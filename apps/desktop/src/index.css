@@ -1,0 +1,34 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html,
+  body,
+  #root {
+    @apply h-full;
+  }
+
+  body {
+    @apply font-sans;
+  }
+}
+
+@layer components {
+  .kindora-card {
+    @apply rounded-2xl border border-kindora-100 bg-white/70 p-6 shadow-sm backdrop-blur
+           dark:border-kindora-800 dark:bg-kindora-900/60;
+  }
+
+  .kindora-button {
+    @apply inline-flex items-center justify-center rounded-xl bg-kindora-600 px-4 py-2
+           text-sm font-medium text-white transition hover:bg-kindora-700
+           focus:outline-none focus:ring-2 focus:ring-kindora-400 disabled:opacity-50;
+  }
+
+  .kindora-button-ghost {
+    @apply inline-flex items-center justify-center rounded-xl border border-kindora-200 px-4 py-2
+           text-sm font-medium text-kindora-700 transition hover:bg-kindora-50
+           dark:border-kindora-700 dark:text-kindora-100 dark:hover:bg-kindora-800;
+  }
+}
