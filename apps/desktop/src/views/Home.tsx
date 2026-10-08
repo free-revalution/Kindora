@@ -10,9 +10,10 @@ export interface HomeProps {
   agent: StoredAgent;
   onEdit: () => void;
   onConnect: () => void;
+  onSettings: () => void;
 }
 
-export function Home({ agent, onEdit, onConnect }: HomeProps) {
+export function Home({ agent, onEdit, onConnect, onSettings }: HomeProps) {
   const { profile } = agent;
   return (
     <main className="mx-auto flex w-full max-w-2xl flex-col gap-8 px-6 py-10">
@@ -29,9 +30,14 @@ export function Home({ agent, onEdit, onConnect }: HomeProps) {
             {agent.agentId.slice(0, 8)}…
           </p>
         </div>
-        <button type="button" className="kindora-button-ghost" onClick={onEdit}>
-          Edit Profile
-        </button>
+        <div className="flex gap-2">
+          <button type="button" className="kindora-button-ghost" onClick={onSettings}>
+            Settings
+          </button>
+          <button type="button" className="kindora-button-ghost" onClick={onEdit}>
+            Edit Profile
+          </button>
+        </div>
       </header>
 
       <section className="kindora-card">

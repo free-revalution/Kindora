@@ -1,8 +1,8 @@
 /**
  * @kindora/llm
  *
- * Unified LLM provider interface.
- * Phase 0: types only — concrete adapters land in Phase 2.
+ * Unified LLM provider interface + adapters.
+ * Phase 2: OpenAI-compatible, Anthropic, Ollama.
  *
  * See 开发手册.md § 10–11.
  */
@@ -39,8 +39,53 @@ export interface LLMConfig {
   readonly provider: LLMProviderKind;
   readonly baseUrl?: string;
   readonly model: string;
-  /** API key is required for cloud providers; stored only in OS keychain. */
+  /** API key is required for cloud providers; stored only in SecretStore. */
   readonly apiKey?: string;
 }
 
 export const LLM_PACKAGE_VERSION = '0.1.0';
+
+/* ------------------------------------------------------------------ */
+/* Provider factory                                                    */
+/* ------------------------------------------------------------------ */
+
+import { AnthropicProvider } from './providers/anthropic';
+import { OllamaProvider } from './providers/ollama';
+import { OpenAICompatibleProvider } from './providers/openai-compatible';
+
+export { AnthropicProvider, OllamaProvider, OpenAICompatibleProvider };
+
+/**
+ * Build a provider from a `LLMConfig` + API key (looked up from the
+ * SecretStore by the caller).
+ */
+export function createProvider(config: LLMConfig): LLMProvider {
+  switch (config.provider) {
+    case 'openai-compatible': {
+      const baseUrl = config.baseUrl ?? '';
+      if (!baseUrl) {
+        throw new Error('OpenAI-compatible provider requires a baseUrl.');
+      }
+      return new OpenAICompatibleProvider({
+        baseUrl,
+        model: config.model,
+        apiKey: config.apiKey,
+      });
+    }
+    case 'anthropic': {
+      const baseUrl = config.baseUrl ?? 'https://api.anthropic.com';
+      if (!config.apiKey) {
+        throw new Error('Anthropic provider requires an API key.');
+      }
+      return new AnthropicProvider({
+        baseUrl,
+        model: config.model,
+        apiKey: config.apiKey,
+      });
+    }
+    case 'ollama': {
+      const baseUrl = config.baseUrl ?? 'http://localhost:11434';
+      return new OllamaProvider({ baseUrl, model: config.model });
+    }
+  }
+}

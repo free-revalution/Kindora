@@ -1,13 +1,10 @@
-/**
- * App shell — chooses Welcome / Create / Edit / Home based on state.
- */
-
 import { useEffect, useState } from 'react';
 import type { SocialProfile } from '@kindora/protocol';
 import type { StoredAgent } from '@kindora/storage';
 import { Welcome } from './views/Welcome';
 import { CreateAgentForm } from './views/CreateAgentForm';
 import { Home } from './views/Home';
+import { Settings } from './views/Settings';
 import { createAgent, loadAgent, updateProfile } from './lib/agent-service';
 
 type View =
@@ -15,7 +12,8 @@ type View =
   | { kind: 'welcome' }
   | { kind: 'create' }
   | { kind: 'edit'; agent: StoredAgent }
-  | { kind: 'home'; agent: StoredAgent };
+  | { kind: 'home'; agent: StoredAgent }
+  | { kind: 'settings'; agent: StoredAgent };
 
 export default function App() {
   const [view, setView] = useState<View>({ kind: 'loading' });
@@ -64,6 +62,10 @@ export default function App() {
     );
   }
 
+  if (view.kind === 'settings') {
+    return <Settings onClose={() => setView({ kind: 'home', agent: view.agent })} />;
+  }
+
   // view.kind === 'home'
   return (
     <Home
@@ -71,9 +73,9 @@ export default function App() {
       onEdit={() => setView({ kind: 'edit', agent: view.agent })}
       onConnect={() => {
         // Phase 5 — Manual Pairing.
-        // For now, the Connect flow is a no-op stub.
         alert('Connect flow lands in Phase 5 (Manual Pairing).');
       }}
+      onSettings={() => setView({ kind: 'settings', agent: view.agent })}
     />
   );
 }
