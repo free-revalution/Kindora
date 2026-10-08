@@ -1,9 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import {
-  AGENT_RUNTIME_VERSION,
-  DEFAULT_MAX_AGENT_MESSAGES,
-  createAgentConfig,
-} from '../index';
+import { AGENT_RUNTIME_VERSION, DEFAULT_MAX_AGENT_MESSAGES, createAgentConfig } from '../index';
 
 describe('@kindora/agent', () => {
   it('exposes a version constant', () => {

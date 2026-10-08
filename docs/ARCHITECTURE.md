@@ -33,14 +33,14 @@
 
 ## Packages
 
-| Package        | Responsibility                                              |
-|----------------|-------------------------------------------------------------|
-| `protocol`     | KSA 0.1 message schema, validation, serialization          |
-| `agent`        | Agent runtime, prompt assembly, context windowing           |
-| `llm`          | Provider adapters (OpenAI-compatible, Anthropic, Ollama)   |
-| `matching`     | Structured + LLM semantic compatibility analysis            |
-| `storage`      | SQLite persistence for profile, conversations, settings     |
-| `transport`    | Pluggable transport layer (WebRTC, LAN, manual signaling)   |
+| Package     | Responsibility                                            |
+| ----------- | --------------------------------------------------------- |
+| `protocol`  | KSA 0.1 message schema, validation, serialization         |
+| `agent`     | Agent runtime, prompt assembly, context windowing         |
+| `llm`       | Provider adapters (OpenAI-compatible, Anthropic, Ollama)  |
+| `matching`  | Structured + LLM semantic compatibility analysis          |
+| `storage`   | SQLite persistence for profile, conversations, settings   |
+| `transport` | Pluggable transport layer (WebRTC, LAN, manual signaling) |
 
 ## Cross-Cutting Constraints
 

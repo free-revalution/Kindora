@@ -1,10 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import {
-  PROTOCOL_NAME,
-  PROTOCOL_VERSION,
-  MESSAGE_TYPES,
-  type MessageType,
-} from '../index';
+import { PROTOCOL_NAME, PROTOCOL_VERSION, MESSAGE_TYPES, type MessageType } from '../index';
 
 describe('@kindora/protocol', () => {
   it('exposes the KSA 0.1 protocol identity', () => {

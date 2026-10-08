@@ -3,7 +3,5 @@
   "identifier": "default",
   "description": "Capability for the main window — Phase 0 minimal permissions.",
   "windows": ["main"],
-  "permissions": [
-    "core:default"
-  ]
+  "permissions": ["core:default"]
 }

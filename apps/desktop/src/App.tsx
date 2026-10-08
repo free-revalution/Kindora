@@ -1,11 +1,5 @@
-import {
-  AGENT_RUNTIME_VERSION,
-  createAgentConfig,
-} from '@kindora/agent';
-import {
-  PROTOCOL_NAME,
-  PROTOCOL_VERSION,
-} from '@kindora/protocol';
+import { AGENT_RUNTIME_VERSION, createAgentConfig } from '@kindora/agent';
+import { PROTOCOL_NAME, PROTOCOL_VERSION } from '@kindora/protocol';
 
 /**
  * Welcome screen — V0.1 Phase 0 placeholder.
@@ -18,7 +12,7 @@ export default function App() {
   return (
     <main className="mx-auto flex h-full max-w-2xl flex-col items-center justify-center px-6 text-center">
       <h1 className="text-5xl font-semibold tracking-tight">Kindora</h1>
-      <p className="mt-6 text-lg text-kindora-700 dark:text-kindora-200">
+      <p className="text-kindora-700 dark:text-kindora-200 mt-6 text-lg">
         Your AI finds the connection.
         <br />
         You make the friendship.
@@ -26,7 +20,7 @@ export default function App() {
 
       <section className="kindora-card mt-12 w-full text-left">
         <h2 className="text-base font-semibold">Phase 0 — Bootstrap</h2>
-        <ul className="mt-4 space-y-2 text-sm text-kindora-700 dark:text-kindora-200">
+        <ul className="text-kindora-700 dark:text-kindora-200 mt-4 space-y-2 text-sm">
           <li>
             Protocol: <code className="font-mono">{PROTOCOL_NAME}</code> v
             <code className="font-mono">{PROTOCOL_VERSION}</code>

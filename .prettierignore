@@ -6,3 +6,4 @@ coverage
 src-tauri/target
 src-tauri/gen
 pnpm-lock.yaml
+开发手册.md

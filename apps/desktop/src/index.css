@@ -16,19 +16,14 @@
 
 @layer components {
   .kindora-card {
-    @apply rounded-2xl border border-kindora-100 bg-white/70 p-6 shadow-sm backdrop-blur
-           dark:border-kindora-800 dark:bg-kindora-900/60;
+    @apply border-kindora-100 dark:border-kindora-800 dark:bg-kindora-900/60 rounded-2xl border bg-white/70 p-6 shadow-sm backdrop-blur;
   }
 
   .kindora-button {
-    @apply inline-flex items-center justify-center rounded-xl bg-kindora-600 px-4 py-2
-           text-sm font-medium text-white transition hover:bg-kindora-700
-           focus:outline-none focus:ring-2 focus:ring-kindora-400 disabled:opacity-50;
+    @apply bg-kindora-600 hover:bg-kindora-700 focus:ring-kindora-400 inline-flex items-center justify-center rounded-xl px-4 py-2 text-sm font-medium text-white transition focus:outline-none focus:ring-2 disabled:opacity-50;
   }
 
   .kindora-button-ghost {
-    @apply inline-flex items-center justify-center rounded-xl border border-kindora-200 px-4 py-2
-           text-sm font-medium text-kindora-700 transition hover:bg-kindora-50
-           dark:border-kindora-700 dark:text-kindora-100 dark:hover:bg-kindora-800;
+    @apply border-kindora-200 text-kindora-700 hover:bg-kindora-50 dark:border-kindora-700 dark:text-kindora-100 dark:hover:bg-kindora-800 inline-flex items-center justify-center rounded-xl border px-4 py-2 text-sm font-medium transition;
   }
 }
