@@ -162,3 +162,61 @@ export interface MatchAnalysis {
   /** Short human-readable explanation grounding the signal. */
   readonly explanation: string;
 }
+
+/* ------------------------------------------------------------------ */
+/* Phase 4 — KSA envelope, payloads, builder, validation, anti-replay. */
+/* See 开发手册.md § 20–22, § 50, § 53–54.                              */
+/* ------------------------------------------------------------------ */
+
+export {
+  type KsaEnvelope,
+  type KsaHello,
+  type KsaProfileExchange,
+  type KsaMatchRequest,
+  type KsaMatchResponse,
+  type KsaIcebreakerRequest,
+  type KsaIcebreakerResponse,
+  type KsaChatMessage,
+  type KsaPermissionRequest,
+  type KsaDisconnect,
+  type KsaMessage,
+} from './envelope';
+
+export {
+  type HelloPayload,
+  type ProfileExchangePayload,
+  type MatchRequestPayload,
+  type MatchResponsePayload,
+  type IcebreakerRequestPayload,
+  type IcebreakerResponsePayload,
+  type ChatMessagePayload,
+  type PermissionKind,
+  type PermissionRequestPayload,
+  type DisconnectPayload,
+} from './payloads';
+
+export {
+  generateMessageId,
+  nowIso,
+  type BuildEnvelopeOptions,
+  createHello,
+  createProfileExchange,
+  createMatchRequest,
+  createMatchResponse,
+  createIcebreakerRequest,
+  createIcebreakerResponse,
+  createChatMessage,
+  createPermissionRequest,
+  createDisconnect,
+} from './builder';
+
+export { ProtocolValidationError, validateEnvelope, tryValidateEnvelope } from './validation';
+
+export { ReplayGuard, ReplayRejected, type ReplayGuardOptions } from './replay-protection';
+
+export {
+  jsonStringifyEnvelope,
+  parseEnvelope,
+  encodeEnvelope,
+  decodeEnvelope,
+} from './serialization';
