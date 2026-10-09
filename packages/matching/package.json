@@ -15,6 +15,12 @@
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit"
   },
+  "dependencies": {
+    "@kindora/agent": "workspace:*",
+    "@kindora/llm": "workspace:*",
+    "@kindora/protocol": "workspace:*",
+    "@kindora/transport": "workspace:*"
+  },
   "devDependencies": {
     "typescript": "^5.6.3"
   }

@@ -2,9 +2,17 @@
  * @kindora/matching
  *
  * Two-stage compatibility engine.
- * Phase 0: data shapes only — algorithms land in Phase 6.
+ * Phase 0: data shapes only.
+ * Phase 6: orchestrator driving the KSA wire flow + display helpers.
  *
- * See 开发手册.md § 24–25.
+ * The display layer consumes the `MatchAnalysis` shape from
+ * `@kindora/protocol` (compatibilitySignal, commonGround,
+ * recommendedTopics, potentialFriction, explanation) — that's the
+ * schema Phase 3's `analyzeMatch` produces. The local `MatchResult`
+ * below is a future-facing shape for the structured-scoring pass
+ * (Phase 6+ / Phase 13) and is not yet populated.
+ *
+ * See 开发手册.md § 6, § 24–25, Phase 6.
  */
 
 export interface PublicProfile {
@@ -30,3 +38,21 @@ export interface MatchResult {
 }
 
 export const MATCHING_PACKAGE_VERSION = '0.1.0';
+
+export {
+  MatchOrchestrator,
+  DEFAULT_PEER_ANALYSIS_TIMEOUT_MS,
+  DEFAULT_EARLY_WAIT_TIMEOUT_MS,
+  type MatchOrchestratorSelf,
+  type MatchOutcome,
+} from './orchestrator';
+
+export {
+  compatibilityLabel,
+  formatExplanation,
+  formatList,
+  summariseAnalysis,
+  type CompatibilityLabel,
+  type CompatibilityTone,
+  type AnalysisSummary,
+} from './display';
