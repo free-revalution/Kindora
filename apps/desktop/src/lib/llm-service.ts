@@ -57,7 +57,7 @@ export async function saveLLMConfig(config: StoredLLMConfig, apiKey?: string): P
 
 export async function clearLLMConfig(): Promise<void> {
   await _settings.delete(SETTINGS_KEY);
-  for (const provider of ['openai-compatible', 'anthropic', 'ollama'] as const) {
+  for (const provider of ['openai-compatible', 'anthropic', 'ollama', 'minimax'] as const) {
     await _secrets.delete(secretKeyFor(provider));
   }
 }
@@ -125,6 +125,13 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
     defaultBaseUrl: 'http://localhost:11434',
     exampleModels: ['llama3.1', 'mistral', 'qwen2.5'],
     requiresApiKey: false,
+  },
+  {
+    kind: 'minimax',
+    label: 'MiniMax',
+    defaultBaseUrl: 'https://api.minimaxi.com/v1',
+    exampleModels: ['MiniMax-M3'],
+    requiresApiKey: true,
   },
 ];
 

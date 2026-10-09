@@ -250,4 +250,43 @@ describe('@kindora/llm — createProvider factory', () => {
       /api key/i,
     );
   });
+
+  it('builds a MiniMax provider with the official baseUrl and Bearer auth', async () => {
+    mockFetchOnce({ choices: [{ message: { content: 'ok' } }] });
+    const provider = createProvider({
+      provider: 'minimax',
+      model: 'MiniMax-M3',
+      apiKey: 'mm-test-key',
+    });
+    await provider.chat(SAMPLE_MESSAGES);
+    const [url, init] = (globalThis.fetch as unknown as ReturnType<typeof vi.fn>).mock.calls[0] as [
+      string,
+      RequestInit,
+    ];
+    expect(url).toBe('https://api.minimaxi.com/v1/chat/completions');
+    const headers = init.headers as Record<string, string>;
+    expect(headers.Authorization).toBe('Bearer mm-test-key');
+    const body = JSON.parse(init.body as string);
+    expect(body.model).toBe('MiniMax-M3');
+    expect(body.stream).toBe(false);
+  });
+
+  it('MiniMax honors a user-supplied baseUrl override', async () => {
+    mockFetchOnce({ choices: [{ message: { content: 'ok' } }] });
+    const provider = createProvider({
+      provider: 'minimax',
+      baseUrl: 'https://proxy.example.com/v1',
+      model: 'MiniMax-M3',
+      apiKey: 'mm-test-key',
+    });
+    await provider.chat(SAMPLE_MESSAGES);
+    const [url] = (globalThis.fetch as unknown as ReturnType<typeof vi.fn>).mock.calls[0] as [
+      string,
+    ];
+    expect(url).toBe('https://proxy.example.com/v1/chat/completions');
+  });
+
+  it('throws when MiniMax is missing an API key', () => {
+    expect(() => createProvider({ provider: 'minimax', model: 'MiniMax-M3' })).toThrow(/api key/i);
+  });
 });
