@@ -135,3 +135,30 @@ export interface SocialAgent {
 
   capabilities: AgentCapabilities;
 }
+
+/* ------------------------------------------------------------------ */
+/* Match analysis — output of Phase 3 Agent Runtime.                  */
+/* Carried in `match_response` messages in KSA Phase 4+.              */
+/* See 开发手册.md § 6, Phase 3, Phase 6.                              */
+/* ------------------------------------------------------------------ */
+
+export const COMPATIBILITY_SIGNALS = ['strong', 'moderate', 'weak', 'none'] as const;
+
+export type CompatibilitySignal = (typeof COMPATIBILITY_SIGNALS)[number];
+
+export interface MatchAnalysis {
+  /** Overall match strength. */
+  readonly compatibilitySignal: CompatibilitySignal;
+
+  /** Specific things the two humans likely share. */
+  readonly commonGround: readonly string[];
+
+  /** Concrete conversation topics for an opener. */
+  readonly recommendedTopics: readonly string[];
+
+  /** Honest things that could make the connection awkward. */
+  readonly potentialFriction: readonly string[];
+
+  /** Short human-readable explanation grounding the signal. */
+  readonly explanation: string;
+}

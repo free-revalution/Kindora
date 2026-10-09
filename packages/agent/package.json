@@ -16,6 +16,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@kindora/llm": "workspace:*",
     "@kindora/protocol": "workspace:*"
   },
   "devDependencies": {

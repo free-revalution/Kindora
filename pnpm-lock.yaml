@@ -135,6 +135,9 @@ importers:
 
   packages/agent:
     dependencies:
+      '@kindora/llm':
+        specifier: workspace:*
+        version: link:../llm
       '@kindora/protocol':
         specifier: workspace:*
         version: link:../protocol
