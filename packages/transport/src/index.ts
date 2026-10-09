@@ -32,7 +32,12 @@ export type MessageHandler = (message: KsaMessage) => void;
 export interface Transport {
   connect(peer: PeerInfo): Promise<void>;
   send(message: KsaMessage): Promise<void>;
-  onMessage(handler: MessageHandler): void;
+  /**
+   * Register a handler for incoming messages. Implementations may
+   * support multiple concurrent handlers; every handler is invoked
+   * for every incoming envelope. Returns an unsubscribe function.
+   */
+  onMessage(handler: MessageHandler): () => void;
   disconnect(): Promise<void>;
 }
 

@@ -30,6 +30,7 @@ function makeOutcome(peer: string = 'Bob'): MatchOutcome {
     },
     peerAnalysisTimeoutMs: 30_000,
     peerAnalysisTimedOut: false,
+    peerRefused: false,
   };
 }
 

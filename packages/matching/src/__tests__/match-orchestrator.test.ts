@@ -91,8 +91,8 @@ async function makeSelf(agentId: string, displayName: string, llm: LLMProvider):
   return { agentId, displayName, profile: buildProfile(displayName), identity, llm };
 }
 
-function selfToDeps(self: Self): MatchOrchestratorSelf {
-  return {
+function selfToDeps(self: Self, peerGuard?: (id: string) => void): MatchOrchestratorSelf {
+  const base: MatchOrchestratorSelf = {
     agentId: self.agentId,
     displayName: self.displayName,
     profile: self.profile,
@@ -107,6 +107,10 @@ function selfToDeps(self: Self): MatchOrchestratorSelf {
     capabilities: buildCapabilities(),
     llm: self.llm,
   };
+  if (peerGuard) {
+    return { ...base, peerGuard };
+  }
+  return base;
 }
 
 describe('@kindora/matching — MatchOrchestrator', () => {
@@ -138,6 +142,29 @@ describe('@kindora/matching — MatchOrchestrator', () => {
     expect(outB.peerProfile?.nickname).toBe('Alice');
     expect(aStub.calls).toHaveLength(1);
     expect(bStub.calls).toHaveLength(1);
+  });
+
+  it('peerRefused=true short-circuits the match (no LLM call) when peerGuard throws', async () => {
+    const { sessionA, sessionB } = await makePair();
+    const llmA: LLMProvider = { async chat() { throw new Error('LLM should not be called'); } };
+    const llmB = stubProvider(cannedAnalysis('moderate'));
+    const selfA = await makeSelf(ID_A, 'Alice', llmA);
+    const selfB = await makeSelf(ID_B, 'Bob', llmB.provider);
+
+    // A refuses B as soon as it learns the peer's id.
+    const depsA = selfToDeps(selfA, (id) => {
+      if (id === ID_B) throw new Error('peer-blocked');
+    });
+    const orchA = new MatchOrchestrator(depsA, ID_B);
+    const orchB = new MatchOrchestrator(selfToDeps(selfB), ID_A);
+
+    const [outA, outB] = await Promise.all([orchA.start(sessionA), orchB.start(sessionB)]);
+
+    expect(outA.peerRefused).toBe(true);
+    expect(outA.localAnalysis.compatibilitySignal).toBe('none');
+    expect(outA.localAnalysis.potentialFriction).toContain('peer is on the local block list');
+    // B's side has no guard, so it runs normally.
+    expect(outB.peerRefused).toBe(false);
   });
 
   it('boundary block: both sides disable agent conversation → local signal "none", no LLM call', async () => {

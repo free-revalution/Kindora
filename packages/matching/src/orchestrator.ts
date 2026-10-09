@@ -70,6 +70,12 @@ export interface MatchOrchestratorSelf {
   readonly config?: AgentRuntimeConfig;
   /** Optional LLM call overrides. */
   readonly llmOptions?: AnalyzeMatchOptions;
+  /**
+   * Optional guard called once the peer's id is known. Throw to abort
+   * the match (e.g. peer is on the local block list). The orchestrator
+   * catches the throw and surfaces a `peerRefused` outcome.
+   */
+  readonly peerGuard?: (peerAgentId: string) => void | Promise<void>;
 }
 
 export interface MatchOutcome {
@@ -91,6 +97,12 @@ export interface MatchOutcome {
   readonly peerAnalysisTimeoutMs: number;
   /** True iff we gave up waiting for the peer's `match_response`. */
   readonly peerAnalysisTimedOut: boolean;
+  /**
+   * True iff the peer was refused by a `peerGuard` (e.g. on the local
+   * block list). When true, the session is closed before any match
+   * analysis runs.
+   */
+  readonly peerRefused: boolean;
 }
 
 /** How long to wait for the peer's `match_response` before giving up. */
@@ -298,6 +310,20 @@ export class MatchOrchestrator {
       this.peerAgentId = discoveredPeerId;
     }
 
+    // Peer guard — runs once we know who they are. The caller uses
+    // this to refuse a blocked peer; the orchestrator captures the
+    // refusal in `peerRefused` and short-circuits to a "none" result.
+    let peerRefused = false;
+    if (this.self.peerGuard) {
+      try {
+        await this.self.peerGuard(this.peerAgentId);
+      } catch {
+        peerRefused = true;
+        // We still ship our own hello/profile so the peer gets a
+        // well-formed exchange — the refusal surfaces on the UI.
+      }
+    }
+
     const peerProfile = peerProfileExchange?.payload.profile ?? null;
     const peerAgent = peerProfileExchange?.payload.agent ?? null;
     const peerDisplayName =
@@ -347,12 +373,32 @@ export class MatchOrchestrator {
         peerAnalysisTimedOut = true;
       });
 
-    const localResult = await analyzeMatch(
-      this.self.llm,
-      analyzeInput,
-      analyzeConfig,
-      this.self.llmOptions ?? {},
-    );
+    // Short-circuit: if the peer was refused by the guard, don't run
+    // the LLM — return a 'none' analysis immediately.
+    let localResult: AnalyzeMatchResult;
+    if (peerRefused) {
+      localResult = {
+        analysis: {
+          compatibilitySignal: 'none',
+          commonGround: [],
+          recommendedTopics: [],
+          potentialFriction: ['peer is on the local block list'],
+          explanation: 'This peer is on your block list. The conversation is refused.',
+        },
+        messages: [],
+        estimatedTokens: 0,
+        rawResponse: '',
+        degraded: false,
+        degradationNote: null,
+      };
+    } else {
+      localResult = await analyzeMatch(
+        this.self.llm,
+        analyzeInput,
+        analyzeConfig,
+        this.self.llmOptions ?? {},
+      );
+    }
 
     // 6) Ship our analysis immediately so the peer can stop waiting.
     await session.send(
@@ -377,6 +423,7 @@ export class MatchOrchestrator {
       localResult,
       peerAnalysisTimeoutMs: this.peerAnalysisTimeoutMs,
       peerAnalysisTimedOut,
+      peerRefused,
     };
   }
 }

@@ -3,12 +3,13 @@
  *
  * Owns the lifecycle of a single pairing session: build a hub,
  * start a host or join flow, return an orchestrator that the view
- * can drive to get a match result.
+ * can drive to get a match result, then a consent orchestrator for
+ * the Phase 7 accept/reject/block decision.
  *
  * V0.1 limitation: discovery is in-process via `LoopbackHub`. Real
  * LAN / WebRTC discovery lands in Mode B / C (out of scope for V0.1).
  *
- * See 开发手册.md § 18, § 44, Phase 6.
+ * See 开发手册.md § 18, § 44, Phase 6 + Phase 7.
  */
 
 import type { LLMProvider } from '@kindora/llm';
@@ -18,19 +19,28 @@ import {
   PairingSession,
 } from '@kindora/transport';
 import {
+  ConsentOrchestrator,
   MatchOrchestrator,
   type MatchOrchestratorSelf,
   type MatchOutcome,
 } from '@kindora/matching';
+import {
+  BrowserLocalStorageBlockedAgentsStore,
+  type BlockedAgentsStore,
+} from '@kindora/storage';
 import type { SocialAgent, SocialProfile } from '@kindora/protocol';
 
 const _hub = new LoopbackHub();
+/** Single shared block list for the desktop app. */
+const _blockList: BlockedAgentsStore = new BrowserLocalStorageBlockedAgentsStore();
 
 export interface ConnectHandle {
   /** Code the host should share with the joiner (only set when mode === 'host'). */
   readonly pairingCode: string;
   /** Pairing session the orchestrator drives. */
   readonly session: PairingSession;
+  /** Local agent id — needed for outgoing consent envelopes. */
+  readonly selfAgentId: string;
   /**
    * Orchestrator built when the peer is known. The orchestrator's
    * `peerAgentId` is set to the actual peer id at the time the
@@ -97,6 +107,7 @@ export function startHost(input: StartInput): ConnectHandle {
   const handle: ConnectHandle = {
     pairingCode,
     session,
+    selfAgentId: input.agentId,
     get orchestrator() {
       if (!orchestrator) {
         orchestrator = new MatchOrchestrator(toOrchestratorSelf(input), '');
@@ -144,6 +155,7 @@ export function startJoin(input: StartInput & { code: string }): ConnectHandle {
   const handle: ConnectHandle = {
     pairingCode: input.code,
     session,
+    selfAgentId: input.agentId,
     get orchestrator() {
       if (!orchestrator) {
         // Empty peer id — the orchestrator will learn it from the
@@ -172,6 +184,54 @@ export async function runMatch(handle: ConnectHandle): Promise<MatchOutcome> {
   return handle.orchestrator.start(handle.session);
 }
 
+/* ------------------------------------------------------------------ */
+/* Phase 7 — Consent                                                  */
+/* ------------------------------------------------------------------ */
+
+export interface ConsentHandle {
+  /** Underlying pairing session — drives the consent envelopes. */
+  readonly session: PairingSession;
+  /** The peer's id (locked in by the time the match completed). */
+  readonly peerAgentId: string;
+  /** The peer's display name. */
+  readonly peerDisplayName: string;
+  /** Local consent orchestrator — the underlying state machine. */
+  readonly orchestrator: ConsentOrchestrator;
+}
+
+/**
+ * Start the consent phase after a successful match. The returned
+ * handle exposes the consent orchestrator; the caller's `start()`
+ * promise resolves when the flow reaches a terminal state. The
+ * caller wires `decide()` from `ConsentOrchestrator.decide`.
+ */
+export function runConsent(handle: ConnectHandle, matchOutcome: MatchOutcome): ConsentHandle {
+  const orchestrator = new ConsentOrchestrator({
+    selfAgentId: handle.selfAgentId,
+    peerDisplayName: matchOutcome.peerDisplayName,
+    peerAgentId: matchOutcome.peerAgentId,
+    options: { blockList: _blockList },
+  });
+  return {
+    session: handle.session,
+    peerAgentId: matchOutcome.peerAgentId,
+    peerDisplayName: matchOutcome.peerDisplayName,
+    orchestrator,
+  };
+}
+
+/** Convenience: read the current block list (re-exported for views / settings). */
+export function getBlockedAgentsStore(): BlockedAgentsStore {
+  return _blockList;
+}
+
+/** Throw if `peerAgentId` is on the local block list. */
+export async function assertPeerNotBlocked(peerAgentId: string): Promise<void> {
+  if (await _blockList.has(peerAgentId)) {
+    throw new Error('This agent is on your block list. Pairing refused.');
+  }
+}
+
 function toOrchestratorSelf(input: StartInput): MatchOrchestratorSelf {
   return {
     agentId: input.agentId,
@@ -180,7 +240,34 @@ function toOrchestratorSelf(input: StartInput): MatchOrchestratorSelf {
     agent: input.agent,
     capabilities: input.agent.capabilities,
     llm: input.llm,
+    peerGuard: (peerAgentId: string) => {
+      // Sync check is fine — the in-memory store is fast enough.
+      // We throw to short-circuit the match; the orchestrator catches
+      // and surfaces a 'none' analysis with peerRefused=true.
+      if (peerAgentId && syncHas(peerAgentId)) {
+        throw new Error('peer-blocked');
+      }
+    },
   };
+}
+
+/**
+ * Synchronous `has` check against the in-memory snapshot of the
+ * block list. The block list is in-memory backed by localStorage; the
+ * read is a Map lookup so it's safe to call from a sync peer guard.
+ */
+let _blockedSnapshot: ReadonlySet<string> = new Set();
+void _blockList.list().then((entries) => {
+  _blockedSnapshot = new Set(entries.map((e) => e.agentId));
+});
+function syncHas(id: string): boolean {
+  return _blockedSnapshot.has(id);
+}
+
+/** Refresh the in-memory snapshot — call after `add`/`remove` to keep the guard in sync. */
+export async function refreshBlockListSnapshot(): Promise<void> {
+  const entries = await _blockList.list();
+  _blockedSnapshot = new Set(entries.map((e) => e.agentId));
 }
 
 /* ------------------------------------------------------------------ */

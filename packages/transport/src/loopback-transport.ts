@@ -17,7 +17,7 @@ import type { MessageHandler, PeerInfo, Transport } from './index';
 
 interface Endpoint {
   readonly id: string;
-  onMessage: MessageHandler | null;
+  readonly messageHandlers: Set<MessageHandler>;
   connected: boolean;
 }
 
@@ -34,7 +34,7 @@ export class LoopbackHub {
   private readonly rooms = new Map<string, Set<string>>();
 
   register(id: string): Endpoint {
-    const ep: Endpoint = { id, onMessage: null, connected: false };
+    const ep: Endpoint = { id, messageHandlers: new Set(), connected: false };
     this.endpoints.set(id, ep);
     return ep;
   }
@@ -80,10 +80,11 @@ export class LoopbackHub {
     // The hub does not know the peer id — broadcast to every other
     // connected endpoint. (For the V0.1 use case, a hub has at most
     // two connected endpoints.)
+    const decoded = decodeEnvelope(rawJson) as KsaMessage;
     for (const [id, ep] of this.endpoints) {
       if (id === fromId) continue;
       if (!ep.connected) continue;
-      ep.onMessage?.(decodeEnvelope(rawJson) as never);
+      for (const h of ep.messageHandlers) h(decoded);
     }
     return true;
   }
@@ -135,8 +136,11 @@ export class LoopbackTransport implements Transport {
     }
   }
 
-  onMessage(handler: MessageHandler): void {
-    this.endpoint.onMessage = handler;
+  onMessage(handler: MessageHandler): () => void {
+    this.endpoint.messageHandlers.add(handler);
+    return () => {
+      this.endpoint.messageHandlers.delete(handler);
+    };
   }
 
   async disconnect(): Promise<void> {

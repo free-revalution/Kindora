@@ -45,3 +45,10 @@ export { InMemorySecretStore } from './in-memory-secret-store';
 export { BrowserLocalStorageEncryptedSecretStore } from './encrypted-local-storage-secret-store';
 
 export { type SettingsStore, BrowserLocalStorageSettingsStore } from './settings-store';
+
+export {
+  type BlockedAgent,
+  type BlockedAgentsStore,
+  BrowserLocalStorageBlockedAgentsStore,
+  InMemoryBlockedAgentsStore,
+} from './blocked-agents-store';

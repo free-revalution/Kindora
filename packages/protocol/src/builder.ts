@@ -16,7 +16,10 @@
  */
 import type { KsaMessage } from './envelope';
 import type {
+  BlockPayload,
   ChatMessagePayload,
+  ConsentAcceptPayload,
+  ConsentRejectPayload,
   DisconnectPayload,
   HelloPayload,
   IcebreakerRequestPayload,
@@ -196,6 +199,54 @@ export function createPermissionRequest(
     messageId: options.messageId ?? generateMessageId(),
     timestamp: options.timestamp ?? nowIso(),
     type: 'permission_request',
+    sender,
+    payload: Object.freeze({ ...payload }),
+  });
+}
+
+export function createConsentAccept(
+  sender: string,
+  payload: ConsentAcceptPayload = {},
+  options: BuildEnvelopeOptions = {},
+): KsaMessage {
+  return Object.freeze({
+    protocol: PROTOCOL_NAME,
+    version: PROTOCOL_VERSION,
+    messageId: options.messageId ?? generateMessageId(),
+    timestamp: options.timestamp ?? nowIso(),
+    type: 'consent_accept',
+    sender,
+    payload: Object.freeze({ ...payload }),
+  });
+}
+
+export function createConsentReject(
+  sender: string,
+  payload: ConsentRejectPayload = {},
+  options: BuildEnvelopeOptions = {},
+): KsaMessage {
+  return Object.freeze({
+    protocol: PROTOCOL_NAME,
+    version: PROTOCOL_VERSION,
+    messageId: options.messageId ?? generateMessageId(),
+    timestamp: options.timestamp ?? nowIso(),
+    type: 'consent_reject',
+    sender,
+    payload: Object.freeze({ ...payload }),
+  });
+}
+
+export function createBlock(
+  sender: string,
+  payload: BlockPayload = {},
+  options: BuildEnvelopeOptions = {},
+): KsaMessage {
+  return Object.freeze({
+    protocol: PROTOCOL_NAME,
+    version: PROTOCOL_VERSION,
+    messageId: options.messageId ?? generateMessageId(),
+    timestamp: options.timestamp ?? nowIso(),
+    type: 'block',
     sender,
     payload: Object.freeze({ ...payload }),
   });

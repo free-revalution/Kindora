@@ -55,7 +55,7 @@ export class PairingSession {
   };
   private transport: Transport | null = null;
   private readonly stateHandlers = new Set<StateChangeHandler>();
-  private messageHandler: MessageHandler | null = null;
+  private readonly messageHandlers = new Set<MessageHandler>();
 
   constructor(private readonly options: PairingSessionOptions) {}
 
@@ -138,10 +138,17 @@ export class PairingSession {
     this.setState({ state: 'connected', peerAgentId: peerAgentId ?? null });
   }
 
-  /** Set a handler for incoming messages. Only meaningful while connected. */
-  onMessage(handler: MessageHandler): void {
-    this.messageHandler = handler;
+  /**
+   * Register a handler for incoming messages. Multiple handlers may
+   * be registered — every handler is invoked for every incoming
+   * envelope. Returns an unsubscribe function.
+   */
+  onMessage(handler: MessageHandler): () => void {
+    this.messageHandlers.add(handler);
     if (this.transport) this.transport.onMessage(handler);
+    return () => {
+      this.messageHandlers.delete(handler);
+    };
   }
 
   /** Send a KSA envelope to the peer. Throws if not connected. */
@@ -175,6 +182,6 @@ export class PairingSession {
   }
 
   private wireTransport(transport: Transport): void {
-    if (this.messageHandler) transport.onMessage(this.messageHandler);
+    for (const h of this.messageHandlers) transport.onMessage(h);
   }
 }

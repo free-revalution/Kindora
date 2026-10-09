@@ -259,6 +259,46 @@ describe('@kindora/protocol — validateEnvelope (per-type payloads)', () => {
       'disconnect',
     );
   });
+
+  it('accepts the Phase 7 consent envelopes (consent_accept / consent_reject / block)', () => {
+    expect(validateEnvelope({ ...baseEnvelope(), type: 'consent_accept', payload: {} }).type).toBe(
+      'consent_accept',
+    );
+    expect(
+      validateEnvelope({
+        ...baseEnvelope(),
+        type: 'consent_accept',
+        payload: { note: 'sounds good' },
+      }).type,
+    ).toBe('consent_accept');
+    expect(
+      validateEnvelope({
+        ...baseEnvelope(),
+        type: 'consent_reject',
+        payload: { reason: 'not a fit' },
+      }).type,
+    ).toBe('consent_reject');
+    expect(validateEnvelope({ ...baseEnvelope(), type: 'block', payload: {} }).type).toBe('block');
+    expect(
+      validateEnvelope({ ...baseEnvelope(), type: 'block', payload: { reason: 'spam' } }).type,
+    ).toBe('block');
+  });
+
+  it('rejects consent_accept with a non-string note', () => {
+    expect(() =>
+      validateEnvelope({
+        ...baseEnvelope(),
+        type: 'consent_accept',
+        payload: { note: 42 },
+      }),
+    ).toThrow(/note/);
+  });
+
+  it('rejects block with a non-object payload', () => {
+    expect(() =>
+      validateEnvelope({ ...baseEnvelope(), type: 'block', payload: 'nope' }),
+    ).toThrow(/object/);
+  });
 });
 
 describe('@kindora/protocol — built envelopes validate', () => {

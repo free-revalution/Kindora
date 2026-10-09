@@ -213,9 +213,15 @@ export interface LiveMatchViewProps {
   readonly run: () => Promise<MatchOutcome>;
   /** Called when the user clicks Disconnect / Cancel / Back. */
   readonly onDisconnect: () => void;
+  /**
+   * Optional callback fired when the match completes (success or
+   * error). The parent uses this to route to the next phase
+   * (Phase 7 consent). When omitted, the view stays on the result.
+   */
+  readonly onDone?: (outcome: MatchOutcome) => void;
 }
 
-export function LiveMatchView({ run, onDisconnect }: LiveMatchViewProps) {
+export function LiveMatchView({ run, onDisconnect, onDone }: LiveMatchViewProps) {
   const [phase, setPhase] = useState<MatchPhase>('connecting');
   const [outcome, setOutcome] = useState<MatchOutcome | undefined>(undefined);
   const [error, setError] = useState<string | undefined>(undefined);
@@ -226,6 +232,8 @@ export function LiveMatchView({ run, onDisconnect }: LiveMatchViewProps) {
   // overwritten with "exchanging" again.
   const runRef = useRef(run);
   runRef.current = run;
+  const onDoneRef = useRef(onDone);
+  onDoneRef.current = onDone;
 
   useEffect(() => {
     let cancelled = false;
@@ -248,6 +256,7 @@ export function LiveMatchView({ run, onDisconnect }: LiveMatchViewProps) {
         clearProgressTimer();
         setOutcome(o);
         setPhase('done');
+        onDoneRef.current?.(o);
       })
       .catch((e: unknown) => {
         if (cancelled) return;

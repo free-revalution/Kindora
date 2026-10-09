@@ -31,7 +31,10 @@ import {
 } from './index';
 import type { KsaMessage } from './envelope';
 import type {
+  BlockPayload,
   ChatMessagePayload,
+  ConsentAcceptPayload,
+  ConsentRejectPayload,
   DisconnectPayload,
   HelloPayload,
   IcebreakerRequestPayload,
@@ -389,6 +392,39 @@ function validatePermissionRequestPayload(payload: unknown): PermissionRequestPa
   };
 }
 
+function validateConsentAcceptPayload(payload: unknown): ConsentAcceptPayload {
+  if (!isObject(payload)) {
+    throw new ProtocolValidationError(
+      'payload',
+      'not-object',
+      'consent_accept payload must be an object.',
+    );
+  }
+  return { note: optionalString(payload, 'note', 280) };
+}
+
+function validateConsentRejectPayload(payload: unknown): ConsentRejectPayload {
+  if (!isObject(payload)) {
+    throw new ProtocolValidationError(
+      'payload',
+      'not-object',
+      'consent_reject payload must be an object.',
+    );
+  }
+  return { reason: optionalString(payload, 'reason', 280) };
+}
+
+function validateBlockPayload(payload: unknown): BlockPayload {
+  if (!isObject(payload)) {
+    throw new ProtocolValidationError(
+      'payload',
+      'not-object',
+      'block payload must be an object.',
+    );
+  }
+  return { reason: optionalString(payload, 'reason', 280) };
+}
+
 function validateDisconnectPayload(payload: unknown): DisconnectPayload {
   if (!isObject(payload)) {
     throw new ProtocolValidationError(
@@ -409,6 +445,9 @@ const PAYLOAD_VALIDATORS = {
   icebreaker_response: validateIcebreakerResponsePayload,
   chat_message: validateChatMessagePayload,
   permission_request: validatePermissionRequestPayload,
+  consent_accept: validateConsentAcceptPayload,
+  consent_reject: validateConsentRejectPayload,
+  block: validateBlockPayload,
   disconnect: validateDisconnectPayload,
 } as const satisfies { [K in MessageType]: (p: unknown) => unknown };
 

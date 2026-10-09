@@ -23,6 +23,9 @@ export const MESSAGE_TYPES = [
   'icebreaker_response',
   'chat_message',
   'permission_request',
+  'consent_accept',
+  'consent_reject',
+  'block',
   'disconnect',
 ] as const;
 
@@ -178,6 +181,9 @@ export {
   type KsaIcebreakerResponse,
   type KsaChatMessage,
   type KsaPermissionRequest,
+  type KsaConsentAccept,
+  type KsaConsentReject,
+  type KsaBlock,
   type KsaDisconnect,
   type KsaMessage,
 } from './envelope';
@@ -192,6 +198,9 @@ export {
   type ChatMessagePayload,
   type PermissionKind,
   type PermissionRequestPayload,
+  type ConsentAcceptPayload,
+  type ConsentRejectPayload,
+  type BlockPayload,
   type DisconnectPayload,
 } from './payloads';
 
@@ -207,6 +216,9 @@ export {
   createIcebreakerResponse,
   createChatMessage,
   createPermissionRequest,
+  createConsentAccept,
+  createConsentReject,
+  createBlock,
   createDisconnect,
 } from './builder';
 

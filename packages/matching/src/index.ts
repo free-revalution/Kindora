@@ -48,6 +48,16 @@ export {
 } from './orchestrator';
 
 export {
+  ConsentOrchestrator,
+  DEFAULT_PEER_CONSENT_TIMEOUT_MS,
+  type ConsentDecision,
+  type ConsentState,
+  type ConsentOutcome,
+  type ConsentOrchestratorOptions,
+  type BlockedAgentsLookup,
+} from './consent-orchestrator';
+
+export {
   compatibilityLabel,
   formatExplanation,
   formatList,

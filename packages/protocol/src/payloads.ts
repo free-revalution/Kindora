@@ -91,6 +91,27 @@ export interface PermissionRequestPayload {
 }
 
 /* ------------------------------------------------------------------ */
+/* consent_accept / consent_reject / block — Phase 7 human consent    */
+/* See 开发手册.md § 27, Phase 7. Both sides must accept to unlock the */
+/* conversation; reject is terminal; block is terminal + persisted.    */
+/* ------------------------------------------------------------------ */
+
+export interface ConsentAcceptPayload {
+  /** Optional human-readable note (≤280 chars, e.g. "Looking forward to it"). */
+  readonly note?: string;
+}
+
+export interface ConsentRejectPayload {
+  /** Optional reason (≤280 chars). Free-form; never shown to other users. */
+  readonly reason?: string;
+}
+
+export interface BlockPayload {
+  /** Optional reason (≤280 chars). Persisted locally; never shared. */
+  readonly reason?: string;
+}
+
+/* ------------------------------------------------------------------ */
 /* disconnect — always last                                            */
 /* ------------------------------------------------------------------ */
 

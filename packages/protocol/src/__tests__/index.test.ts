@@ -18,7 +18,7 @@ describe('@kindora/protocol', () => {
     expect(PROTOCOL_VERSION).toBe('0.1');
   });
 
-  it('lists every V0.1 message type from 开发手册.md § 21', () => {
+  it('lists every V0.1 message type from 开发手册.md § 21 + Phase 7', () => {
     const expected: MessageType[] = [
       'hello',
       'profile_exchange',
@@ -28,6 +28,9 @@ describe('@kindora/protocol', () => {
       'icebreaker_response',
       'chat_message',
       'permission_request',
+      'consent_accept',
+      'consent_reject',
+      'block',
       'disconnect',
     ];
     expect([...MESSAGE_TYPES].sort()).toEqual([...expected].sort());

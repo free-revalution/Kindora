@@ -22,7 +22,10 @@
  * object, and the validator rejects any mutation.
  */
 import type {
+  BlockPayload,
   ChatMessagePayload,
+  ConsentAcceptPayload,
+  ConsentRejectPayload,
   DisconnectPayload,
   HelloPayload,
   IcebreakerRequestPayload,
@@ -53,6 +56,9 @@ export type KsaIcebreakerRequest = KsaEnvelope<'icebreaker_request', IcebreakerR
 export type KsaIcebreakerResponse = KsaEnvelope<'icebreaker_response', IcebreakerResponsePayload>;
 export type KsaChatMessage = KsaEnvelope<'chat_message', ChatMessagePayload>;
 export type KsaPermissionRequest = KsaEnvelope<'permission_request', PermissionRequestPayload>;
+export type KsaConsentAccept = KsaEnvelope<'consent_accept', ConsentAcceptPayload>;
+export type KsaConsentReject = KsaEnvelope<'consent_reject', ConsentRejectPayload>;
+export type KsaBlock = KsaEnvelope<'block', BlockPayload>;
 export type KsaDisconnect = KsaEnvelope<'disconnect', DisconnectPayload>;
 
 /**
@@ -68,4 +74,7 @@ export type KsaMessage =
   | KsaIcebreakerResponse
   | KsaChatMessage
   | KsaPermissionRequest
+  | KsaConsentAccept
+  | KsaConsentReject
+  | KsaBlock
   | KsaDisconnect;

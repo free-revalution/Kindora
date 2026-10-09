@@ -48,7 +48,7 @@ export class WebRtcTransport implements Transport {
     throw new Error('WebRtcTransport.send: transport not connected.');
   }
 
-  onMessage(_handler: MessageHandler): void {
+  onMessage(_handler: MessageHandler): () => void {
     throw new Error('WebRtcTransport.onMessage: transport not connected.');
   }
 

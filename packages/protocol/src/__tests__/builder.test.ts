@@ -8,6 +8,9 @@ import {
   createIcebreakerResponse,
   createChatMessage,
   createPermissionRequest,
+  createConsentAccept,
+  createConsentReject,
+  createBlock,
   createDisconnect,
   PROTOCOL_NAME,
   PROTOCOL_VERSION,
@@ -122,6 +125,30 @@ describe('@kindora/protocol — envelope builders', () => {
     expect(e.payload.reason).toBe('we get along');
   });
 
+  it('createConsentAccept accepts an empty payload', () => {
+    const e = createConsentAccept(SENDER);
+    if (e.type !== 'consent_accept') throw new Error('narrow');
+    expect(e.payload).toEqual({});
+  });
+
+  it('createConsentAccept carries an optional note', () => {
+    const e = createConsentAccept(SENDER, { note: 'looking forward to it' });
+    if (e.type !== 'consent_accept') throw new Error('narrow');
+    expect(e.payload.note).toBe('looking forward to it');
+  });
+
+  it('createConsentReject carries an optional reason', () => {
+    const e = createConsentReject(SENDER, { reason: 'not a fit right now' });
+    if (e.type !== 'consent_reject') throw new Error('narrow');
+    expect(e.payload.reason).toBe('not a fit right now');
+  });
+
+  it('createBlock carries an optional reason', () => {
+    const e = createBlock(SENDER, { reason: 'spam' });
+    if (e.type !== 'block') throw new Error('narrow');
+    expect(e.payload.reason).toBe('spam');
+  });
+
   it('createDisconnect accepts an empty payload', () => {
     const e = createDisconnect(SENDER);
     if (e.type !== 'disconnect') throw new Error('narrow');
@@ -133,6 +160,9 @@ describe('@kindora/protocol — envelope builders', () => {
       createHello(SENDER, { displayName: 't', capabilities: sampleSocialAgent().capabilities }),
       createDisconnect(SENDER),
       createChatMessage(SENDER, { text: 'hi' }),
+      createConsentAccept(SENDER),
+      createConsentReject(SENDER, { reason: 'no' }),
+      createBlock(SENDER),
     ];
     for (const e of all) {
       expect(e.messageId).toMatch(
