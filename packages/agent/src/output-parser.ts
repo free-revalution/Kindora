@@ -198,3 +198,88 @@ export function applyBoundaryOverride(
     explanation: 'Both sides have agent conversation disabled; no match is suggested.',
   });
 }
+
+/* ------------------------------------------------------------------ */
+/* Icebreaker parser                                                   */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Maximum number of icebreaker topics we keep from the LLM response.
+ * 开发手册.md § 28 — agent generates 3 conversation starters.
+ */
+export const MAX_ICEBREAKER_TOPICS = 3;
+
+/**
+ * Parse the LLM's reply into a list of icebreaker topics (Phase 8).
+ *
+ * The model is asked for `{ "topics": [string, string, string] }` and
+ * nothing else. Parsing is forgiving (re-uses `extractJsonObject`) but
+ * strictly enforces that every emitted topic is a non-empty string in
+ * the LOCAL user's voice. On any failure we return an empty list with
+ * `degraded: true` so the UI can offer "Regenerate".
+ */
+export function parseIcebreakerTopics(raw: string): ParseIcebreakerResult {
+  const candidate = extractJsonObject(raw);
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(candidate);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return {
+      topics: Object.freeze([]),
+      degraded: true,
+      note: `json-parse-failed: ${message}`,
+    };
+  }
+
+  if (!parsed || typeof parsed !== 'object') {
+    return {
+      topics: Object.freeze([]),
+      degraded: true,
+      note: 'non-object-output',
+    };
+  }
+
+  const obj = parsed as Record<string, unknown>;
+  const topics = coerceIcebreakerTopics(obj.topics);
+  if (!Array.isArray(obj.topics)) {
+    return {
+      topics: Object.freeze(topics),
+      degraded: true,
+      note: 'defaults-applied: topics-not-array',
+    };
+  }
+  return {
+    topics: Object.freeze(topics),
+    degraded: false,
+    note: null,
+  };
+}
+
+/**
+ * Coerce a possibly-malformed topics field into a clean list of
+ * strings. We keep the first MAX_ICEBREAKER_TOPICS entries after
+ * trimming, dropping empties, and capping length.
+ */
+export function coerceIcebreakerTopics(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const out: string[] = [];
+  for (const item of value) {
+    if (typeof item !== 'string') continue;
+    const trimmed = item.trim();
+    if (!trimmed) continue;
+    out.push(trimmed.slice(0, MAX_ITEM_LEN));
+    if (out.length >= MAX_ICEBREAKER_TOPICS) break;
+  }
+  return out;
+}
+
+export interface ParseIcebreakerResult {
+  /** Up to MAX_ICEBREAKER_TOPICS strings. Empty when the model failed. */
+  readonly topics: readonly string[];
+  /** True iff the parser had to fall back to defaults. */
+  readonly degraded: boolean;
+  /** Human-readable note about what was missing or wrong. */
+  readonly note: string | null;
+}

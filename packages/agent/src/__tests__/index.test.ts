@@ -14,7 +14,7 @@ describe('@kindora/agent — runtime config', () => {
     const cfg = createAgentConfig();
     expect(cfg.maxAgentMessages).toBe(6);
     expect(cfg.maxMatchTokens).toBe(2000);
-    expect(cfg.maxIcebreakerTokens).toBe(500);
+    expect(cfg.maxIcebreakerTokens).toBe(1000);
     expect(Object.isFrozen(cfg)).toBe(true);
   });
 

@@ -8,10 +8,13 @@ import { Settings } from './views/Settings';
 import { ConnectView } from './views/ConnectView';
 import { LiveMatchView } from './views/MatchView';
 import { LiveConsentView } from './views/ConsentView';
+import { LiveIcebreakerView } from './views/IcebreakerView';
 import type { ConsentOutcome, MatchOutcome } from '@kindora/matching';
+import type { IcebreakerHandle } from './lib/connect-service';
 import type { ConnectHandle } from './lib/connect-service';
 import {
   runConsent,
+  runIcebreaker,
   runMatch,
   refreshBlockListSnapshot,
 } from './lib/connect-service';
@@ -34,10 +37,19 @@ type View =
       outcome: MatchOutcome;
     }
   | {
+      kind: 'icebreaker';
+      agent: StoredAgent;
+      handle: ConnectHandle;
+      outcome: MatchOutcome;
+      consent: ConsentOutcome;
+      icebreaker: IcebreakerHandle;
+    }
+  | {
       kind: 'chat';
       agent: StoredAgent;
       handle: ConnectHandle;
       consent: ConsentOutcome;
+      firstMessage?: string;
     };
 
 export default function App() {
@@ -123,11 +135,16 @@ export default function App() {
     return <ConsentScreen view={view} setView={setView} />;
   }
 
+  if (view.kind === 'icebreaker') {
+    return <IcebreakerScreen view={view} setView={setView} />;
+  }
+
   if (view.kind === 'chat') {
     return (
       <ChatStub
         agentName={view.agent.displayName}
         peerName={view.consent.peerDisplayName}
+        firstMessage={view.firstMessage ?? null}
         onClose={() => {
           void view.handle.disconnect('chat-closed');
           setView({ kind: 'home', agent: view.agent });
@@ -150,15 +167,18 @@ export default function App() {
 /**
  * Phase 9 placeholder. Real chat (Send / Receive / History / Block /
  * Disconnect) lands in Phase 9. For now this just confirms the
- * consent-unlocked handoff.
+ * icebreaker→chat handoff and shows which starter (if any) the user
+ * chose via Use / Edit.
  */
 function ChatStub({
   agentName,
   peerName,
+  firstMessage,
   onClose,
 }: {
   agentName: string;
   peerName: string;
+  firstMessage: string | null;
   onClose: () => void;
 }) {
   return (
@@ -182,8 +202,17 @@ function ChatStub({
           Phase 9 — coming soon
         </h2>
         <p className="text-sm leading-relaxed">
-          Both you and {peerName} accepted. The chat is unlocked. Real text chat, AI
-          assist, and icebreaker generation land in Phase 9.
+          Both you and {peerName} accepted. The chat is unlocked.
+          {firstMessage ? (
+            <>
+              {' '}Your first message will be:
+              <span className="kindora-chip-plain mt-2 inline-block" data-testid="chat-first-message">
+                {firstMessage}
+              </span>
+            </>
+          ) : (
+            <> Real text chat, AI assist, and the first-message pipeline land in Phase 9.</>
+          )}
         </p>
       </section>
     </main>
@@ -218,13 +247,81 @@ function ConsentScreen({
       }}
       onFinal={(finalOutcome) => {
         if (finalOutcome.state === 'accepted_both') {
-          setView({ kind: 'chat', agent: view.agent, handle: view.handle, consent: finalOutcome });
+          // Build the icebreaker handle lazily. If it fails (no agent
+          // or no LLM), fall through to the chat stub so the user
+          // isn't stranded.
+          void runIcebreaker(view.outcome)
+            .then((icebreaker) => {
+              setView({
+                kind: 'icebreaker',
+                agent: view.agent,
+                handle: view.handle,
+                outcome: view.outcome,
+                consent: finalOutcome,
+                icebreaker,
+              });
+            })
+            .catch(() => {
+              setView({
+                kind: 'chat',
+                agent: view.agent,
+                handle: view.handle,
+                consent: finalOutcome,
+              });
+            });
         } else {
           // rejected / blocked: keep the user on the consent screen
           // so they see the final banner, then they click "Close"
           // to go home.
           void refreshBlockListSnapshot();
         }
+      }}
+    />
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* Icebreaker screen — owns the LLM call for Phase 8. Created lazily    */
+/* once per (consent outcome, match outcome) pair so the agent-runtime  */
+/* config stays stable. The view itself owns a single `generate()`     */
+/* call and is re-callable via Regenerate.                              */
+/* ------------------------------------------------------------------ */
+
+function IcebreakerScreen({
+  view,
+  setView,
+}: {
+  view: Extract<View, { kind: 'icebreaker' }>;
+  setView: (v: View) => void;
+}) {
+  // `view.icebreaker` was built once by the parent; we re-use the
+  // same handle across re-renders. (The view only invokes `generate`
+  // again on Regenerate.)
+  const icebreaker = view.icebreaker;
+
+  function enterChat(firstMessage?: string): void {
+    setView({
+      kind: 'chat',
+      agent: view.agent,
+      handle: view.handle,
+      consent: view.consent,
+      ...(firstMessage !== undefined ? { firstMessage } : {}),
+    });
+  }
+
+  return (
+    <LiveIcebreakerView
+      peerDisplayName={view.consent.peerDisplayName}
+      selfDisplayName={view.agent.displayName}
+      input={icebreaker.input}
+      generate={() => icebreaker.generate()}
+      onUse={(chosen) => {
+        enterChat(chosen);
+      }}
+      onSkip={() => enterChat()}
+      onDisconnect={() => {
+        void view.handle.disconnect('user-disconnect');
+        setView({ kind: 'home', agent: view.agent });
       }}
     />
   );

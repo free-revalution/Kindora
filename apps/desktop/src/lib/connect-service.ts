@@ -25,6 +25,13 @@ import {
   type MatchOutcome,
 } from '@kindora/matching';
 import {
+  generateIcebreaker,
+  createAgentConfig,
+  type GenerateIcebreakerConfig,
+  type GenerateIcebreakerInput,
+  type GenerateIcebreakerResult,
+} from '@kindora/agent';
+import {
   BrowserLocalStorageBlockedAgentsStore,
   type BlockedAgentsStore,
 } from '@kindora/storage';
@@ -230,6 +237,75 @@ export async function assertPeerNotBlocked(peerAgentId: string): Promise<void> {
   if (await _blockList.has(peerAgentId)) {
     throw new Error('This agent is on your block list. Pairing refused.');
   }
+}
+
+/* ------------------------------------------------------------------ */
+/* Phase 8 — Icebreaker                                                */
+/* ------------------------------------------------------------------ */
+
+export interface IcebreakerHandle {
+  /** Input handed to the LLM (built from the local agent + match outcome). */
+  readonly input: GenerateIcebreakerInput;
+  /** Async function that runs a fresh LLM round-trip. */
+  readonly generate: () => Promise<GenerateIcebreakerResult>;
+  /** Runtime config (token budget) — exposed for tests. */
+  readonly config: GenerateIcebreakerConfig;
+}
+
+/**
+ * Build a Phase 8 icebreaker handle from a successful match.
+ *
+ * Loads the local agent + LLM provider, packages the two profiles plus
+ * the local match analysis as a `GenerateIcebreakerInput`, and returns
+ * a `generate()` runner the view can call (or re-call for Regenerate).
+ *
+ * Per 开发手册.md § 28–29: the AI only SUGGESTS — the human reviews
+ * before sending. The returned runner NEVER auto-sends anything.
+ */
+export async function runIcebreaker(matchOutcome: MatchOutcome): Promise<IcebreakerHandle> {
+  const [agent, llm] = await Promise.all([loadAgent(), loadProvider()]);
+  if (!agent) {
+    throw new Error('No agent on this device. Create an agent first.');
+  }
+  if (!llm) {
+    throw new Error('No LLM configured. Open Settings and pick a provider.');
+  }
+
+  const config = createAgentConfig();
+  const peerProfile = matchOutcome.peerProfile ?? minimalPeerProfile(matchOutcome.peerDisplayName);
+
+  const input: GenerateIcebreakerInput = {
+    selfProfile: agent.profile,
+    selfDisplayName: agent.displayName,
+    peerProfile,
+    peerDisplayName: matchOutcome.peerDisplayName,
+    analysis: matchOutcome.localAnalysis,
+  };
+
+  return {
+    input,
+    config,
+    generate: () => generateIcebreaker(llm, input, config),
+  };
+}
+
+/** Minimal fallback when the peer sent no profile_exchange (matches the orchestrator's). */
+function minimalPeerProfile(displayName: string): SocialProfile {
+  return {
+    nickname: displayName,
+    bio: '',
+    interests: [],
+    currentActivities: [],
+    socialIntent: [],
+    conversationStyle: [],
+    boundaries: {
+      allowAgentConversation: true,
+      allowContactExchange: false,
+      allowOfflineMeeting: false,
+      allowProjectDetails: false,
+      allowCurrentActivity: true,
+    },
+  };
 }
 
 function toOrchestratorSelf(input: StartInput): MatchOrchestratorSelf {

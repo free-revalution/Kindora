@@ -31,7 +31,11 @@ export function createAgentConfig(opts: AgentRuntimeOptions = {}): AgentRuntimeC
   return Object.freeze({
     maxAgentMessages: opts.maxAgentMessages ?? DEFAULT_MAX_AGENT_MESSAGES,
     maxMatchTokens: opts.maxMatchTokens ?? 2000,
-    maxIcebreakerTokens: opts.maxIcebreakerTokens ?? 500,
+    // The icebreaker context carries system prompt + self profile + peer
+    // profile + heuristics + match report + topic hints. 1000 tokens
+    // (~4000 chars) is the smallest budget that fits comfortably without
+    // truncation for both thin and rich profile pairs.
+    maxIcebreakerTokens: opts.maxIcebreakerTokens ?? 1000,
   });
 }
 
@@ -45,23 +49,31 @@ export {
 } from './profile';
 
 /* Phase 3 — Agent Runtime */
-export { MATCH_ANALYST_SYSTEM_PROMPT } from './system-prompt';
+export { MATCH_ANALYST_SYSTEM_PROMPT, ICEBREAKER_SYSTEM_PROMPT } from './system-prompt';
 export { renderProfileContext, type ProfileContextOptions } from './profile-context';
 export { computeHeuristics, renderHeuristics, type HeuristicHints } from './heuristics';
 export {
   buildMatchContext,
   renderMatchUserMessage,
+  buildIcebreakerContext,
+  renderIcebreakerUserMessage,
   estimateTokens,
   DEFAULT_CHARS_PER_TOKEN,
   TokenLimitExceeded,
   type BuildContextInput,
   type BuildContextOptions,
+  type BuildIcebreakerInput,
+  type BuildIcebreakerContextOptions,
 } from './context-builder';
 export {
   parseMatchAnalysis,
+  parseIcebreakerTopics,
+  coerceIcebreakerTopics,
   extractJsonObject,
   applyBoundaryOverride,
+  MAX_ICEBREAKER_TOPICS,
   type ParseResult,
+  type ParseIcebreakerResult,
 } from './output-parser';
 export {
   analyzeMatch,
@@ -69,3 +81,11 @@ export {
   type AnalyzeMatchOptions,
   type AnalyzeMatchResult,
 } from './analyze-match';
+export {
+  generateIcebreaker,
+  ICEBREAKER_TOPIC_CAP,
+  type GenerateIcebreakerInput,
+  type GenerateIcebreakerOptions,
+  type GenerateIcebreakerConfig,
+  type GenerateIcebreakerResult,
+} from './generate-icebreaker';
