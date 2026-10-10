@@ -41,6 +41,20 @@ const INJECTION_PHRASES: readonly RegExp[] = [
   /\{[^{}]*"(?:role|instruction|prompt|system)"[^{}]*\}/gi,
 ];
 
+// Credential-shaped patterns that must never appear verbatim in a
+// prompt — defense in depth on top of `assertNoSensitiveFields`. If
+// the local sensitive-field guard ever has a bug, this layer still
+// prevents API keys / private keys from reaching the LLM. Matches the
+// `FORBIDDEN_VALUE_PATTERNS` set in sensitive-field-guard.ts.
+const CREDENTIAL_PATTERNS: readonly RegExp[] = [
+  /\bsk-[A-Za-z0-9_-]{16,}\b/g,
+  /\bsk-ant-api[A-Za-z0-9_-]{16,}\b/g,
+  /\bgh[pousr]_[A-Za-z0-9]{20,}\b/g,
+  /-----BEGIN (?:RSA |EC |DSA |OPENSSH |PGP |ENCRYPTED )?PRIVATE KEY-----/g,
+  /\bBearer\s+[A-Za-z0-9_\-.=]{16,}/gi,
+  /\bAKIA[0-9A-Z]{16}\b/g,
+];
+
 const SAFE_PLACEHOLDER = '[untrusted-text-stripped]';
 
 export interface SanitiseOptions {
@@ -70,6 +84,13 @@ export function sanitiseUntrustedText(text: string, options: SanitiseOptions = {
     for (const pat of INJECTION_PHRASES) {
       out = out.replace(pat, SAFE_PLACEHOLDER);
     }
+  }
+
+  // Defense in depth: also strip credential-looking patterns so a
+  // peer's profile (or a buggy upstream component) cannot smuggle an
+  // API key or private key into the prompt context.
+  for (const pat of CREDENTIAL_PATTERNS) {
+    out = out.replace(pat, SAFE_PLACEHOLDER);
   }
 
   // Collapse runs of whitespace (including newlines) — keeps paragraph

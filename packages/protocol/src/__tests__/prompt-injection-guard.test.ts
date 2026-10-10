@@ -56,6 +56,30 @@ describe('@kindora/protocol — sanitiseUntrustedText', () => {
     expect(out).toContain('ignore previous instructions');
   });
 
+  it('strips credentials that look like API keys (defense in depth)', () => {
+    const out = sanitiseUntrustedText('My key is sk-secret-1234567890abcdefghij');
+    expect(out).toContain(UNTRUSTED_PLACEHOLDER);
+    expect(out).not.toContain('sk-secret-1234567890abcdefghij');
+  });
+
+  it('strips Bearer tokens', () => {
+    const out = sanitiseUntrustedText('Use this: Bearer abcdefghijklmnopqrstuv');
+    expect(out).toContain(UNTRUSTED_PLACEHOLDER);
+    expect(out).not.toMatch(/Bearer\s+[A-Za-z0-9_-]/);
+  });
+
+  it('strips GitHub personal access tokens', () => {
+    const out = sanitiseUntrustedText('token: ghp_abcdefghijklmnopqrstuvwxyz0123456789');
+    expect(out).toContain(UNTRUSTED_PLACEHOLDER);
+    expect(out).not.toContain('ghp_abcdefghijklmnopqrstuvwxyz0123456789');
+  });
+
+  it('strips PEM private keys', () => {
+    const out = sanitiseUntrustedText('-----BEGIN RSA PRIVATE KEY-----\nMIIE...');
+    expect(out).toContain(UNTRUSTED_PLACEHOLDER);
+    expect(out).not.toMatch(/BEGIN.*PRIVATE KEY/);
+  });
+
   it('returns empty string for non-string input', () => {
     expect(sanitiseUntrustedText(undefined as unknown as string)).toBe('');
     expect(sanitiseUntrustedText(null as unknown as string)).toBe('');
