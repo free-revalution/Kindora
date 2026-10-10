@@ -9,10 +9,12 @@ import { ConnectView } from './views/ConnectView';
 import { LiveMatchView } from './views/MatchView';
 import { LiveConsentView } from './views/ConsentView';
 import { LiveIcebreakerView } from './views/IcebreakerView';
+import { LiveChatView } from './views/ChatView';
 import type { ConsentOutcome, MatchOutcome } from '@kindora/matching';
-import type { IcebreakerHandle } from './lib/connect-service';
+import type { ChatHandle, IcebreakerHandle } from './lib/connect-service';
 import type { ConnectHandle } from './lib/connect-service';
 import {
+  runChat,
   runConsent,
   runIcebreaker,
   runMatch,
@@ -49,6 +51,7 @@ type View =
       agent: StoredAgent;
       handle: ConnectHandle;
       consent: ConsentOutcome;
+      chat: ChatHandle;
       firstMessage?: string;
     };
 
@@ -140,17 +143,7 @@ export default function App() {
   }
 
   if (view.kind === 'chat') {
-    return (
-      <ChatStub
-        agentName={view.agent.displayName}
-        peerName={view.consent.peerDisplayName}
-        firstMessage={view.firstMessage ?? null}
-        onClose={() => {
-          void view.handle.disconnect('chat-closed');
-          setView({ kind: 'home', agent: view.agent });
-        }}
-      />
-    );
+    return <ChatScreen view={view} setView={setView} />;
   }
 
   // view.kind === 'home'
@@ -165,57 +158,50 @@ export default function App() {
 }
 
 /**
- * Phase 9 placeholder. Real chat (Send / Receive / History / Block /
- * Disconnect) lands in Phase 9. For now this just confirms the
- * icebreaker→chat handoff and shows which starter (if any) the user
- * chose via Use / Edit.
+ * Phase 9 — Chat screen. Owns a single ChatOrchestrator built lazily
+ * by `runChat()`. Subscribes to its snapshot so the view re-renders
+ * when messages arrive or the session closes. The chosen icebreaker
+ * (if any) is rendered as `initialDraft` — the user still has to click
+ * Send; per § 32 the AI never auto-sends, and "Use" doesn't bypass
+ * the human's final click.
  */
-function ChatStub({
-  agentName,
-  peerName,
-  firstMessage,
-  onClose,
+function ChatScreen({
+  view,
+  setView,
 }: {
-  agentName: string;
-  peerName: string;
-  firstMessage: string | null;
-  onClose: () => void;
+  view: Extract<View, { kind: 'chat' }>;
+  setView: (v: View) => void;
 }) {
+  // Build the chat handle once for this (consent outcome, first
+  // message) pair. Recreating it would lose the entry history.
+  const [chat] = useState(() => runChat(view.handle, view.consent, view.firstMessage ?? ''));
+
+  function exit(): void {
+    void view.handle.disconnect('chat-closed');
+    void refreshBlockListSnapshot();
+    setView({ kind: 'home', agent: view.agent });
+  }
+
   return (
-    <main className="mx-auto flex w-full max-w-2xl flex-col gap-6 px-6 py-10">
-      <header className="flex items-start justify-between">
-        <div>
-          <p className="text-kindora-500 dark:text-kindora-400 text-xs uppercase tracking-wide">
-            Chat with
-          </p>
-          <h1 className="mt-1 text-3xl font-semibold tracking-tight">{peerName}</h1>
-          <p className="text-kindora-500 dark:text-kindora-400 mt-1 text-sm">
-            You: {agentName}
-          </p>
-        </div>
-        <button type="button" className="kindora-button-ghost" onClick={onClose}>
-          Close
-        </button>
-      </header>
-      <section className="kindora-card flex flex-col gap-3">
-        <h2 className="text-kindora-500 dark:text-kindora-400 text-xs uppercase tracking-wide">
-          Phase 9 — coming soon
-        </h2>
-        <p className="text-sm leading-relaxed">
-          Both you and {peerName} accepted. The chat is unlocked.
-          {firstMessage ? (
-            <>
-              {' '}Your first message will be:
-              <span className="kindora-chip-plain mt-2 inline-block" data-testid="chat-first-message">
-                {firstMessage}
-              </span>
-            </>
-          ) : (
-            <> Real text chat, AI assist, and the first-message pipeline land in Phase 9.</>
-          )}
-        </p>
-      </section>
-    </main>
+    <LiveChatView
+      peerDisplayName={view.consent.peerDisplayName}
+      selfDisplayName={view.agent.displayName}
+      initialDraft={chat.firstMessage}
+      maxTextLength={2000}
+      run={() => chat.orchestrator.start(view.handle.session)}
+      subscribe={(listener) => chat.subscribe(listener)}
+      onSend={async (text) => {
+        await chat.orchestrator.send(view.handle.session, text);
+      }}
+      onDisconnect={async () => {
+        await chat.orchestrator.disconnect(view.handle.session, 'user-disconnect');
+        exit();
+      }}
+      onBlock={async () => {
+        await chat.orchestrator.block(view.handle.session, 'user-block');
+        exit();
+      }}
+    />
   );
 }
 
@@ -248,8 +234,8 @@ function ConsentScreen({
       onFinal={(finalOutcome) => {
         if (finalOutcome.state === 'accepted_both') {
           // Build the icebreaker handle lazily. If it fails (no agent
-          // or no LLM), fall through to the chat stub so the user
-          // isn't stranded.
+          // or no LLM), fall through to a chat screen so the user
+          // isn't stranded — they can still type and send.
           void runIcebreaker(view.outcome)
             .then((icebreaker) => {
               setView({
@@ -262,11 +248,13 @@ function ConsentScreen({
               });
             })
             .catch(() => {
+              const chat = runChat(view.handle, finalOutcome, '');
               setView({
                 kind: 'chat',
                 agent: view.agent,
                 handle: view.handle,
                 consent: finalOutcome,
+                chat,
               });
             });
         } else {
@@ -300,11 +288,13 @@ function IcebreakerScreen({
   const icebreaker = view.icebreaker;
 
   function enterChat(firstMessage?: string): void {
+    const chat = runChat(view.handle, view.consent, firstMessage ?? '');
     setView({
       kind: 'chat',
       agent: view.agent,
       handle: view.handle,
       consent: view.consent,
+      chat,
       ...(firstMessage !== undefined ? { firstMessage } : {}),
     });
   }

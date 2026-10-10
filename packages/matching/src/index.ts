@@ -58,6 +58,16 @@ export {
 } from './consent-orchestrator';
 
 export {
+  ChatOrchestrator,
+  DEFAULT_CHAT_TEXT_MAX_LENGTH,
+  type ChatEntry,
+  type ChatSnapshot,
+  type ChatListener,
+  type ChatCloseReason,
+  type ChatOrchestratorOptions,
+} from './chat-orchestrator';
+
+export {
   compatibilityLabel,
   formatExplanation,
   formatList,

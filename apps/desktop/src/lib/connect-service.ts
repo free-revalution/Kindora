@@ -19,8 +19,11 @@ import {
   PairingSession,
 } from '@kindora/transport';
 import {
+  ChatOrchestrator,
   ConsentOrchestrator,
   MatchOrchestrator,
+  type ChatOrchestratorOptions,
+  type ChatSnapshot,
   type MatchOrchestratorSelf,
   type MatchOutcome,
 } from '@kindora/matching';
@@ -307,6 +310,61 @@ function minimalPeerProfile(displayName: string): SocialProfile {
     },
   };
 }
+
+/* ------------------------------------------------------------------ */
+/* Phase 9 — Chat                                                      */
+/* ------------------------------------------------------------------ */
+
+export interface ChatHandle {
+  /** Underlying orchestrator — start()/send()/disconnect()/block(). */
+  readonly orchestrator: ChatOrchestrator;
+  /** Subscribe to snapshot updates. */
+  readonly subscribe: (listener: (snap: ChatSnapshot) => void) => () => void;
+  /** Snapshot accessor. */
+  readonly snapshot: () => ChatSnapshot;
+  /**
+   * Optional pre-composed first message (e.g. the icebreaker the user
+   * chose via "Use"). The chat view shows it in the input box on mount.
+   */
+  readonly firstMessage: string;
+}
+
+/**
+ * Build a Phase 9 chat handle from a successful consent outcome.
+ *
+ * Returns a `ChatOrchestrator` configured with the local block list.
+ * The orchestrator's `start()` is invoked by the caller (the view).
+ * `subscribe()` is exposed so the view can react to incoming messages
+ * and close events without owning the queue itself.
+ */
+export function runChat(
+  handle: ConnectHandle,
+  consentOutcome: ConsentOutcomeLike,
+  firstMessage: string = '',
+): ChatHandle {
+  const options: ChatOrchestratorOptions = {
+    blockList: _blockList,
+  };
+  const orchestrator = new ChatOrchestrator({
+    selfAgentId: handle.selfAgentId,
+    peerAgentId: consentOutcome.peerAgentId,
+    peerDisplayName: consentOutcome.peerDisplayName,
+    options,
+  });
+  return {
+    orchestrator,
+    subscribe: (listener) => orchestrator.subscribe(listener),
+    snapshot: () => orchestrator.snapshot(),
+    firstMessage,
+  };
+}
+
+/**
+ * Minimal shape we need from a ConsentOutcome to build a chat handle.
+ * Keeping this loose so the call site doesn't have to depend on the
+ * full ConsentOutcome shape.
+ */
+type ConsentOutcomeLike = Pick<MatchOutcome, 'peerAgentId' | 'peerDisplayName'>;
 
 function toOrchestratorSelf(input: StartInput): MatchOrchestratorSelf {
   return {
