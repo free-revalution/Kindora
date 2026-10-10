@@ -23,6 +23,7 @@
  */
 import type { ChatMessage } from '@kindora/llm';
 import type { MatchAnalysis, SocialProfile } from '@kindora/protocol';
+import { sanitiseUntrustedPayload, sanitiseUntrustedText } from '@kindora/protocol';
 import { computeHeuristics, renderHeuristics } from './heuristics';
 import { renderProfileContext } from './profile-context';
 import {
@@ -77,7 +78,11 @@ export function renderMatchUserMessage(input: BuildContextInput): string {
     label: 'Self profile',
     displayName: input.selfDisplayName,
   });
-  const peer = renderProfileContext(input.peerProfile, {
+  // Peer profile is UNTRUSTED (§ 35) — sanitise every string field
+  // before forwarding it into the LLM prompt. Local profile is OUR
+  // data, so we leave it untouched.
+  const peerProfileSanitised = sanitiseUntrustedPayload(input.peerProfile) as typeof input.peerProfile;
+  const peer = renderProfileContext(peerProfileSanitised, {
     label: 'Peer profile',
     displayName: input.peerDisplayName,
   });
@@ -144,7 +149,11 @@ export function renderIcebreakerUserMessage(input: BuildIcebreakerInput): string
     label: 'Local user profile',
     displayName: input.selfDisplayName,
   });
-  const peer = renderProfileContext(input.peerProfile, {
+  // Peer profile is UNTRUSTED (§ 35) — sanitise every string field
+  // before forwarding it into the LLM prompt. Local profile is OUR
+  // data, so we leave it untouched.
+  const peerProfileSanitised = sanitiseUntrustedPayload(input.peerProfile) as typeof input.peerProfile;
+  const peer = renderProfileContext(peerProfileSanitised, {
     label: 'Peer profile',
     displayName: input.peerDisplayName,
   });
@@ -155,7 +164,7 @@ export function renderIcebreakerUserMessage(input: BuildIcebreakerInput): string
   const topicHints = renderTopicHints(input.topicHints);
 
   const analysis = input.analysis
-    ? renderMatchReport(input.analysis)
+    ? renderMatchReport(sanitiseUntrustedPayload(input.analysis) as MatchAnalysis)
     : '(no match analysis available — rely on the two profiles)';
 
   return [
@@ -193,10 +202,10 @@ function renderMatchReport(analysis: MatchAnalysis): string {
 
 function renderTopicHints(hints: readonly string[] | undefined): string {
   if (!hints || hints.length === 0) return '(no hints provided)';
-  // Each hint is untrusted; quote + cap length so the model doesn't
+  // Each hint is untrusted; sanitise + cap length so the model doesn't
   // get a single huge blob if a peer tries to inject instructions.
   const safe = hints.slice(0, 5).map((h) => {
-    const trimmed = h.trim().slice(0, 160);
+    const trimmed = sanitiseUntrustedText(h, { maxLength: 200 }).trim().slice(0, 160);
     return `- "${trimmed}"`;
   });
   return safe.join('\n');
@@ -259,7 +268,11 @@ export function renderChatAssistUserMessage(input: BuildChatAssistInput): string
     label: 'Local user profile',
     displayName: input.selfDisplayName,
   });
-  const peer = renderProfileContext(input.peerProfile, {
+  // Peer profile is UNTRUSTED (§ 35) — sanitise every string field
+  // before forwarding it into the LLM prompt. Local profile is OUR
+  // data, so we leave it untouched.
+  const peerProfileSanitised = sanitiseUntrustedPayload(input.peerProfile) as typeof input.peerProfile;
+  const peer = renderProfileContext(peerProfileSanitised, {
     label: 'Peer profile',
     displayName: input.peerDisplayName,
   });
@@ -268,11 +281,24 @@ export function renderChatAssistUserMessage(input: BuildChatAssistInput): string
     computeHeuristics(input.selfProfile, input.peerProfile),
   );
 
-  const analysis = input.analysis
-    ? renderMatchReport(input.analysis)
+  // Match analysis is produced by the peer's agent; treat as UNTRUSTED.
+  const sanitisedAnalysis = input.analysis
+    ? (sanitiseUntrustedPayload(input.analysis) as MatchAnalysis)
+    : null;
+  const analysis = sanitisedAnalysis
+    ? renderMatchReport(sanitisedAnalysis)
     : '(no match analysis available — rely on the two profiles)';
 
-  const history = renderChatHistory(input.history, input.selfAgentId);
+  // History entries whose sender is not us come from the peer — sanitise.
+  const sanitisedHistory: ChatHistoryEntryLike[] = input.history.map((entry) =>
+    entry.sender === input.selfAgentId
+      ? entry
+      : {
+          ...entry,
+          text: sanitiseUntrustedText(entry.text, { maxLength: 320 }),
+        },
+  );
+  const history = renderChatHistory(sanitisedHistory, input.selfAgentId);
 
   const query = input.userQuery.trim().length === 0
     ? '(no question provided — give the local user a useful next step anyway)'

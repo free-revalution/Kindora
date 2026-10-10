@@ -70,3 +70,10 @@ export {
   type PairingSessionOptions,
   type StateChangeHandler,
 } from './pairing-session';
+
+export {
+  WireRateLimiter,
+  WireRateLimitExceeded,
+  type WireRateLimiterOptions,
+  type WireRateLimiterStats,
+} from './wire-rate-limiter';

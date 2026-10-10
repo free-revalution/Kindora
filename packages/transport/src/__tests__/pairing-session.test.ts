@@ -1,14 +1,23 @@
 import { describe, it, expect, vi } from 'vitest';
-import { createDisconnect, type KsaMessage } from '@kindora/protocol';
-import { LoopbackHub, LoopbackTransport, PairingSession } from '../index';
+import {
+  createDisconnect,
+  type KsaMessage,
+  SensitiveFieldError,
+} from '@kindora/protocol';
+import {
+  LoopbackHub,
+  LoopbackTransport,
+  PairingSession,
+  WireRateLimitExceeded,
+} from '../index';
 
 const A = '11111111-2222-4333-8444-aaaaaaaaaaaa';
 const B = '22222222-3333-4444-8555-bbbbbbbbbbbb';
 
-function makeFixture() {
+function makeFixture(opts: Partial<ConstructorParameters<typeof PairingSession>[0]> = {}) {
   const hub = new LoopbackHub();
-  const sessionA = new PairingSession({ agentId: A, displayName: 'A' });
-  const sessionB = new PairingSession({ agentId: B, displayName: 'B' });
+  const sessionA = new PairingSession({ agentId: A, displayName: 'A', ...opts });
+  const sessionB = new PairingSession({ agentId: B, displayName: 'B', ...opts });
   const ta = new LoopbackTransport({ endpointId: A, hub });
   const tb = new LoopbackTransport({ endpointId: B, hub });
   return { hub, sessionA, sessionB, ta, tb };
@@ -106,5 +115,104 @@ describe('@kindora/transport — PairingSession', () => {
     const code = sessionA.startHost(ta);
     await pairThem(sessionA, sessionB, ta, tb);
     expect(sessionA.current().code).toBe(code);
+  });
+
+  describe('Phase 11 — security hardening', () => {
+    it('rejects outbound envelopes carrying forbidden field names', async () => {
+      const { sessionA, sessionB, ta, tb } = makeFixture();
+      sessionA.startHost(ta);
+      await pairThem(sessionA, sessionB, ta, tb);
+
+      // Hand-craft an envelope that names a forbidden field.
+      // We must include protocol + version + UUID v4 messageId so the
+      // transport's own envelope validator doesn't reject it before
+      // our guard runs.
+      const bad = {
+        protocol: 'KSA',
+        version: '0.1',
+        messageId: '11111111-2222-4333-8444-555555555555',
+        type: 'chat_message',
+        sender: A,
+        timestamp: new Date().toISOString(),
+        payload: { text: 'hi', apiKey: 'not-a-real-key' },
+      } as unknown as KsaMessage;
+
+      await expect(sessionA.send(bad)).rejects.toThrow(SensitiveFieldError);
+    });
+
+    it('skips the guard when guardSensitiveFields=false', async () => {
+      const { sessionA, sessionB, ta, tb } = makeFixture({ guardSensitiveFields: false });
+      const received: KsaMessage[] = [];
+      sessionB.onMessage((m) => received.push(m));
+      sessionA.startHost(ta);
+      await pairThem(sessionA, sessionB, ta, tb);
+
+      const weird = {
+        protocol: 'KSA',
+        version: '0.1',
+        messageId: '22222222-3333-4444-8555-666666666666',
+        type: 'chat_message',
+        sender: A,
+        timestamp: new Date().toISOString(),
+        payload: { text: 'hi', apiKey: 'fake' },
+      } as unknown as KsaMessage;
+
+      // Should pass through even though "apiKey" is forbidden by the guard.
+      await sessionA.send(weird);
+      expect(received).toHaveLength(1);
+    });
+
+    it('throws WireRateLimitExceeded when send exceeds the outbound bucket', async () => {
+      const { sessionA, sessionB, ta, tb } = makeFixture({
+        rateLimiterOptions: {
+          outbound: { capacity: 1, refillPerSecond: 1 },
+          inbound: { capacity: 100, refillPerSecond: 100 },
+        },
+      });
+      sessionA.startHost(ta);
+      await pairThem(sessionA, sessionB, ta, tb);
+
+      await sessionA.send(createDisconnect(A, { reason: 'first' }));
+      await expect(sessionA.send(createDisconnect(A, { reason: 'second' }))).rejects.toThrow(
+        WireRateLimitExceeded,
+      );
+    });
+
+    it('silently drops inbound messages when the inbound bucket is empty', async () => {
+      const { sessionA, sessionB, ta, tb } = makeFixture({
+        rateLimiterOptions: {
+          outbound: { capacity: 100, refillPerSecond: 100 },
+          inbound: { capacity: 1, refillPerSecond: 0.01 }, // 1 token per 100s
+        },
+      });
+      sessionA.startHost(ta);
+      await pairThem(sessionA, sessionB, ta, tb);
+
+      const received: KsaMessage[] = [];
+      sessionB.onMessage((m) => received.push(m));
+
+      await sessionA.send(createDisconnect(A, { reason: 'one' }));
+      await sessionA.send(createDisconnect(A, { reason: 'two' }));
+      await sessionA.send(createDisconnect(A, { reason: 'three' }));
+
+      // Only the first one (within the 1-token bucket) should reach the handler.
+      expect(received.map((m) => m.payload)).toEqual([
+        expect.objectContaining({ reason: 'one' }),
+      ]);
+    });
+
+    it('rateLimiter=null disables all rate limiting', async () => {
+      const { sessionA, sessionB, ta, tb } = makeFixture({ rateLimiter: null });
+      const received: KsaMessage[] = [];
+      sessionB.onMessage((m) => received.push(m));
+      sessionA.startHost(ta);
+      await pairThem(sessionA, sessionB, ta, tb);
+
+      // No outbound limits either — 5 should all pass.
+      for (let i = 0; i < 5; i++) {
+        await sessionA.send(createDisconnect(A, { reason: `r${i}` }));
+      }
+      expect(received).toHaveLength(5);
+    });
   });
 });

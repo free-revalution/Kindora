@@ -20,7 +20,9 @@
  * See 开发手册.md § 17, Phase 5.
  */
 import type { KsaMessage } from '@kindora/protocol';
+import { assertNoSensitiveFields } from '@kindora/protocol';
 import type { MessageHandler, Transport } from './index';
+import { WireRateLimiter, type WireRateLimiterOptions } from './wire-rate-limiter';
 import { type PairingCodeOptions, generatePairingCode, normalisePairingCode } from './pairing-code';
 
 export type PairingState = 'idle' | 'hosting' | 'joining' | 'connected' | 'closed';
@@ -44,6 +46,19 @@ export interface PairingSessionOptions {
   readonly displayName: string;
   /** Optional override for code length (default: 6). */
   readonly codeLength?: number;
+  /**
+   * Optional wire rate limiter — defaults to a fresh `WireRateLimiter`
+   * with V0.1-friendly capacities (10 outbound/sec, 30 inbound/sec).
+   * Pass `null` to disable rate limiting (not recommended for prod).
+   */
+  readonly rateLimiter?: WireRateLimiter | null;
+  /** Configure the default rate limiter (ignored if `rateLimiter` set). */
+  readonly rateLimiterOptions?: WireRateLimiterOptions;
+  /**
+   * Whether to run the sensitive-field guard on outbound envelopes.
+   * Defaults to true. Defense in depth on top of § 11 / § 16.
+   */
+  readonly guardSensitiveFields?: boolean;
 }
 
 export class PairingSession {
@@ -56,8 +71,16 @@ export class PairingSession {
   private transport: Transport | null = null;
   private readonly stateHandlers = new Set<StateChangeHandler>();
   private readonly messageHandlers = new Set<MessageHandler>();
+  private readonly rateLimiter: WireRateLimiter | null;
+  private readonly guardSensitiveFields: boolean;
 
-  constructor(private readonly options: PairingSessionOptions) {}
+  constructor(private readonly options: PairingSessionOptions) {
+    this.rateLimiter =
+      options.rateLimiter === null
+        ? null
+        : (options.rateLimiter ?? new WireRateLimiter(options.rateLimiterOptions));
+    this.guardSensitiveFields = options.guardSensitiveFields ?? true;
+  }
 
   /** Current state snapshot — immutable copy. */
   current(): PairingSnapshot {
@@ -142,22 +165,38 @@ export class PairingSession {
    * Register a handler for incoming messages. Multiple handlers may
    * be registered — every handler is invoked for every incoming
    * envelope. Returns an unsubscribe function.
+   *
+   * Inbound envelopes that exceed the configured wire rate limit are
+   * silently dropped (they don't reach the registered handlers).
    */
   onMessage(handler: MessageHandler): () => void {
-    this.messageHandlers.add(handler);
-    if (this.transport) this.transport.onMessage(handler);
+    const wrapped: MessageHandler = (msg) => {
+      if (this.rateLimiter && !this.rateLimiter.checkInbound()) return;
+      handler(msg);
+    };
+    this.messageHandlers.add(wrapped);
+    if (this.transport) this.transport.onMessage(wrapped);
     return () => {
-      this.messageHandlers.delete(handler);
+      this.messageHandlers.delete(wrapped);
     };
   }
 
-  /** Send a KSA envelope to the peer. Throws if not connected. */
+  /**
+   * Send a KSA envelope to the peer. Throws when:
+   *   - the session isn't connected
+   *   - the wire rate limiter refuses the send (WireRateLimitExceeded)
+   *   - the payload contains a sensitive field (SensitiveFieldError)
+   */
   async send(message: KsaMessage): Promise<void> {
     if (this.snapshot.state !== 'connected') {
       throw new Error(`Cannot send in state "${this.snapshot.state}".`);
     }
     if (!this.transport) {
       throw new Error('No transport attached.');
+    }
+    this.rateLimiter?.checkOutbound();
+    if (this.guardSensitiveFields) {
+      assertNoSensitiveFields(message);
     }
     await this.transport.send(message);
   }

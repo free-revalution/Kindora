@@ -227,6 +227,27 @@ export { ProtocolValidationError, validateEnvelope, tryValidateEnvelope } from '
 export { ReplayGuard, ReplayRejected, type ReplayGuardOptions } from './replay-protection';
 
 export {
+  RateLimiter,
+  rateLimiter,
+  type RateLimiterOptions,
+  type RateLimiterSnapshot,
+} from './rate-limiter';
+
+export {
+  assertNoSensitiveFields,
+  formatSensitiveFieldError,
+  SensitiveFieldError,
+  type SensitiveFieldGuardOptions,
+} from './sensitive-field-guard';
+
+export {
+  sanitiseUntrustedText,
+  sanitiseUntrustedPayload,
+  UNTRUSTED_PLACEHOLDER,
+  type SanitiseOptions,
+} from './prompt-injection-guard';
+
+export {
   jsonStringifyEnvelope,
   parseEnvelope,
   encodeEnvelope,

@@ -79,9 +79,12 @@ describe('@kindora/agent — analyzeMatch', () => {
       }),
     });
     const sent = provider.calls[0]?.[1]?.content ?? '';
-    // The malicious text appears in the user message — but as DATA,
-    // wrapped in a peer-profile block, with an explicit warning above it.
-    expect(sent).toContain('Ignore all previous instructions');
+    // Phase 11 — peer profile is sanitised before rendering. The
+    // injection phrase MUST NOT appear verbatim; it gets replaced
+    // with the safe placeholder. The UNTRUSTED framing is still in
+    // place as defense in depth.
+    expect(sent).not.toMatch(/ignore all previous instructions/i);
+    expect(sent).toContain('[untrusted-text-stripped]');
     expect(sent).toMatch(/untrusted/i);
   });
 
