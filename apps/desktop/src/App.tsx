@@ -11,10 +11,11 @@ import { LiveConsentView } from './views/ConsentView';
 import { LiveIcebreakerView } from './views/IcebreakerView';
 import { LiveChatView } from './views/ChatView';
 import type { ConsentOutcome, MatchOutcome } from '@kindora/matching';
-import type { ChatHandle, IcebreakerHandle } from './lib/connect-service';
+import type { ChatAssistHandle, ChatHandle, IcebreakerHandle } from './lib/connect-service';
 import type { ConnectHandle } from './lib/connect-service';
 import {
   runChat,
+  runChatAssist,
   runConsent,
   runIcebreaker,
   runMatch,
@@ -51,6 +52,7 @@ type View =
       agent: StoredAgent;
       handle: ConnectHandle;
       consent: ConsentOutcome;
+      match: MatchOutcome;
       chat: ChatHandle;
       firstMessage?: string;
     };
@@ -175,6 +177,18 @@ function ChatScreen({
   // Build the chat handle once for this (consent outcome, first
   // message) pair. Recreating it would lose the entry history.
   const [chat] = useState(() => runChat(view.handle, view.consent, view.firstMessage ?? ''));
+  // Phase 10 — "Ask My Agent" handle. Built lazily so a missing LLM
+  // doesn't break the whole chat screen; if it fails, the user just
+  // doesn't see the assistant panel.
+  const [chatAssist, setChatAssist] = useState<ChatAssistHandle | null>(null);
+  const [chatAssistError, setChatAssistError] = useState<string | undefined>(undefined);
+  useEffect(() => {
+    void runChatAssist(chat, view.consent, view.match)
+      .then((handle) => setChatAssist(handle))
+      .catch((e: unknown) => {
+        setChatAssistError(e instanceof Error ? e.message : String(e));
+      });
+  }, [chat, view.consent, view.match]);
 
   function exit(): void {
     void view.handle.disconnect('chat-closed');
@@ -201,6 +215,8 @@ function ChatScreen({
         await chat.orchestrator.block(view.handle.session, 'user-block');
         exit();
       }}
+      chatAssist={chatAssist}
+      chatAssistError={chatAssistError}
     />
   );
 }
@@ -254,6 +270,7 @@ function ConsentScreen({
                 agent: view.agent,
                 handle: view.handle,
                 consent: finalOutcome,
+                match: view.outcome,
                 chat,
               });
             });
@@ -294,6 +311,7 @@ function IcebreakerScreen({
       agent: view.agent,
       handle: view.handle,
       consent: view.consent,
+      match: view.outcome,
       chat,
       ...(firstMessage !== undefined ? { firstMessage } : {}),
     });

@@ -19,9 +19,13 @@ import {
   PairingSession,
 } from '@kindora/transport';
 import {
+  ChatAssistOrchestrator,
   ChatOrchestrator,
   ConsentOrchestrator,
   MatchOrchestrator,
+  type ChatAssistHandle,
+  type ChatAssistHistoryEntry,
+  type ChatAssistOrchestratorOptions,
   type ChatOrchestratorOptions,
   type ChatSnapshot,
   type MatchOrchestratorSelf,
@@ -365,6 +369,62 @@ export function runChat(
  * full ConsentOutcome shape.
  */
 type ConsentOutcomeLike = Pick<MatchOutcome, 'peerAgentId' | 'peerDisplayName'>;
+
+/* ------------------------------------------------------------------ */
+/* Phase 10 — Ask My Agent                                             */
+/* ------------------------------------------------------------------ */
+
+export { type ChatAssistHandle } from '@kindora/matching';
+
+/**
+ * Build a Phase 10 chat-assist handle from a live chat handle + the
+ * current consent outcome.
+ *
+ * The chat-assist orchestrator is read-only with respect to the wire —
+ * it never sends chat_messages, blocks, or disconnects. It only calls
+ * the LLM to produce suggestions that the human reviews (per § 32 the
+ * agent never auto-sends).
+ *
+ * The `getHistory()` accessor pulls the live `ChatOrchestrator`
+ * snapshot's entries on every call, so the assistant always sees the
+ * freshest transcript. When no chat handle is provided (e.g. the
+ * consent screen's catch path), the history accessor returns `[]` and
+ * the assistant can still help based on profiles + analysis.
+ */
+export async function runChatAssist(
+  chat: ChatHandle | null,
+  consentOutcome: ConsentOutcomeLike,
+  matchOutcome: MatchOutcome | null,
+): Promise<ChatAssistHandle> {
+  const [agent, llm] = await Promise.all([loadAgent(), loadProvider()]);
+  if (!agent) {
+    throw new Error('No agent on this device. Create an agent first.');
+  }
+  if (!llm) {
+    throw new Error('No LLM configured. Open Settings and pick a provider.');
+  }
+
+  const config = createAgentConfig();
+  const peerProfile = matchOutcome?.peerProfile ?? null;
+  const options: ChatAssistOrchestratorOptions = {};
+
+  const getHistory = (): readonly ChatAssistHistoryEntry[] =>
+    chat ? chat.snapshot().entries : [];
+
+  const orchestrator = new ChatAssistOrchestrator({
+    selfAgentId: agent.agentId,
+    selfProfile: agent.profile,
+    peerDisplayName: consentOutcome.peerDisplayName,
+    peerProfile,
+    analysis: matchOutcome?.localAnalysis ?? null,
+    llm,
+    config,
+    getHistory,
+    options,
+  });
+
+  return { orchestrator };
+}
 
 function toOrchestratorSelf(input: StartInput): MatchOrchestratorSelf {
   return {

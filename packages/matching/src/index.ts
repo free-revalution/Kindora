@@ -76,3 +76,16 @@ export {
   type CompatibilityTone,
   type AnalysisSummary,
 } from './display';
+
+export {
+  ChatAssistOrchestrator,
+  summariseChatAssist,
+  type ChatAssistHandle,
+  type ChatAssistHistoryEntry,
+  type ChatAssistOrchestratorOptions,
+  type ChatAssistDisplay,
+  type ChatAssistDisplaySuggestion,
+  type ChatAssistReply,
+  type ChatAssistSuggestion,
+  type ChatAssistKind,
+} from './chat-assist-orchestrator';

@@ -352,7 +352,7 @@ export class MatchOrchestrator {
       peerProfile: peerProfile ?? minimalProfile(peerDisplayName),
       peerDisplayName,
     };
-    const analyzeConfig: AgentRuntimeConfig = this.self.config ?? { maxMatchTokens: 2000, maxAgentMessages: 6, maxIcebreakerTokens: 500 };
+    const analyzeConfig: AgentRuntimeConfig = this.self.config ?? { maxMatchTokens: 2000, maxAgentMessages: 6, maxIcebreakerTokens: 500, maxChatAssistTokens: 500 };
 
     let peerAnalysis: MatchAnalysis | null = null;
     let peerAnalysisTimedOut = false;

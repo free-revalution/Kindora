@@ -283,3 +283,137 @@ export interface ParseIcebreakerResult {
   /** Human-readable note about what was missing or wrong. */
   readonly note: string | null;
 }
+
+/* ------------------------------------------------------------------ */
+/* Phase 10 — Chat-assist parser                                       */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Maximum number of chat-assist suggestions we keep from the LLM.
+ * 开发手册.md § 31 — up to 4 concrete suggestions per request.
+ */
+export const MAX_CHAT_ASSIST_SUGGESTIONS = 4;
+
+export type ChatAssistKind = 'reply' | 'topic' | 'explanation';
+
+export const CHAT_ASSIST_KINDS: readonly ChatAssistKind[] = [
+  'reply',
+  'topic',
+  'explanation',
+];
+
+export interface ChatAssistSuggestion {
+  readonly kind: ChatAssistKind;
+  readonly text: string;
+  readonly rationale: string;
+}
+
+export interface ChatAssistReply {
+  readonly summary: string;
+  readonly suggestions: readonly ChatAssistSuggestion[];
+}
+
+export interface ParseChatAssistResult {
+  readonly reply: ChatAssistReply;
+  /** True iff the parser had to fall back to defaults. */
+  readonly degraded: boolean;
+  /** Human-readable note about what was missing or wrong. */
+  readonly note: string | null;
+}
+
+const EMPTY_REPLY: ChatAssistReply = Object.freeze({
+  summary: '',
+  suggestions: Object.freeze([]),
+});
+
+function isKind(value: unknown): value is ChatAssistKind {
+  return (
+    typeof value === 'string' &&
+    (CHAT_ASSIST_KINDS as readonly string[]).includes(value)
+  );
+}
+
+function coerceSuggestion(raw: unknown): ChatAssistSuggestion | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const obj = raw as Record<string, unknown>;
+  if (!isKind(obj.kind)) return null;
+  if (typeof obj.text !== 'string') return null;
+  const text = obj.text.trim().slice(0, MAX_ITEM_LEN);
+  if (text.length === 0) return null;
+  const rationale =
+    typeof obj.rationale === 'string'
+      ? obj.rationale.trim().slice(0, 200)
+      : '';
+  return Object.freeze({ kind: obj.kind, text, rationale });
+}
+
+function coerceSuggestions(value: unknown): ChatAssistSuggestion[] {
+  if (!Array.isArray(value)) return [];
+  const out: ChatAssistSuggestion[] = [];
+  for (const item of value) {
+    const s = coerceSuggestion(item);
+    if (!s) continue;
+    out.push(s);
+    if (out.length >= MAX_CHAT_ASSIST_SUGGESTIONS) break;
+  }
+  return out;
+}
+
+/**
+ * Parse the LLM's reply into a `ChatAssistReply`. Same JSON-fence
+ * tolerance as the other parsers (extractJsonObject is reused).
+ * On any failure we return an empty reply with `degraded: true` so the
+ * UI can offer Regenerate.
+ */
+export function parseChatAssistReply(raw: string): ParseChatAssistResult {
+  const candidate = extractJsonObject(raw);
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(candidate);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return {
+      reply: EMPTY_REPLY,
+      degraded: true,
+      note: `json-parse-failed: ${message}`,
+    };
+  }
+
+  if (!parsed || typeof parsed !== 'object') {
+    return {
+      reply: EMPTY_REPLY,
+      degraded: true,
+      note: 'non-object-output',
+    };
+  }
+
+  const obj = parsed as Record<string, unknown>;
+  const degradedFlags: string[] = [];
+
+  const summary =
+    typeof obj.summary === 'string'
+      ? obj.summary.trim().slice(0, MAX_EXPLANATION_LEN)
+      : ((): string => {
+          degradedFlags.push('summary');
+          return '';
+        })();
+
+  const suggestions = coerceSuggestions(obj.suggestions);
+  if (!Array.isArray(obj.suggestions)) degradedFlags.push('suggestions');
+
+  const reply: ChatAssistReply = Object.freeze({
+    summary,
+    suggestions: Object.freeze(suggestions),
+  });
+
+  const note =
+    degradedFlags.length === 0
+      ? null
+      : `defaults-applied: ${degradedFlags.join(', ')}`;
+  return {
+    reply,
+    degraded: degradedFlags.length > 0,
+    note,
+  };
+}

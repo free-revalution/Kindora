@@ -15,12 +15,25 @@
  * from a real envelope (sent by the local user via Send, or received
  * from the peer via the wire).
  *
+ * Phase 10 adds the "Ask My Agent" panel (§ 31). The agent only
+ * SUGGESTS — the human reviews before any suggestion is sent. The
+ * panel renders suggestions with [Use] / [Edit] / [Regenerate] /
+ * [Dismiss]. [Use] fills the composer draft; the user still has to
+ * click Send. [Edit] opens an inline textarea. [Regenerate] re-runs
+ * the assistant round-trip. [Dismiss] closes the panel.
+ *
  * The view is purely presentational — it consumes a `ChatSnapshot`
  * from `ChatOrchestrator` and emits intents. The live wrapper drives
  * the orchestrator.
  */
 
 import { useEffect, useRef, useState } from 'react';
+import {
+  summariseChatAssist,
+  type ChatAssistDisplay,
+  type ChatAssistDisplaySuggestion,
+  type ChatAssistHandle,
+} from '@kindora/matching';
 import type { ChatSnapshot } from '@kindora/matching';
 
 export type ChatPhase = 'loading' | 'open' | 'closed';
@@ -34,10 +47,20 @@ export interface ChatViewProps {
   readonly sending: boolean;
   readonly maxTextLength: number;
   readonly error: string | undefined;
+  readonly assistant: ChatAssistPanelState;
   onDraftChange(next: string): void;
   onSend(): void;
   onDisconnect(): void;
   onBlock(): void;
+  /** When the user clicks Use on a suggestion — fills the composer draft. */
+  onUseSuggestion(text: string): void;
+  /** Phase 10 — assistant panel callbacks. */
+  onAskOpen(): void;
+  onAskClose(): void;
+  onAskChangeQuery(next: string): void;
+  onAskSubmit(): void;
+  onAskRegenerate(): void;
+  onAskDismissSuggestion(id: string): void;
 }
 
 export function ChatView({
@@ -49,10 +72,18 @@ export function ChatView({
   sending,
   maxTextLength,
   error,
+  assistant,
   onDraftChange,
   onSend,
   onDisconnect,
   onBlock,
+  onUseSuggestion,
+  onAskOpen,
+  onAskClose,
+  onAskChangeQuery,
+  onAskSubmit,
+  onAskRegenerate,
+  onAskDismissSuggestion,
 }: ChatViewProps) {
   const isClosed = snapshot.state === 'closed';
   const trimmed = draft.trim();
@@ -156,6 +187,18 @@ export function ChatView({
           <p className="text-rose-600 dark:text-rose-400 text-sm">{error}</p>
         </section>
       )}
+
+      <ChatAssistPanel
+        state={assistant}
+        disabled={isClosed}
+        onAskOpen={onAskOpen}
+        onAskClose={onAskClose}
+        onAskChangeQuery={onAskChangeQuery}
+        onAskSubmit={onAskSubmit}
+        onAskRegenerate={onAskRegenerate}
+        onUseSuggestion={onUseSuggestion}
+        onAskDismissSuggestion={onAskDismissSuggestion}
+      />
 
       <form
         className="kindora-card flex flex-col gap-2"
@@ -274,6 +317,326 @@ function formatTime(iso: string): string {
 }
 
 /* ------------------------------------------------------------------ */
+/* Phase 10 — "Ask My Agent" panel                                     */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Phase 10 panel state. The live wrapper drives these fields; the
+ * presentational view only renders them.
+ */
+export interface ChatAssistPanelState {
+  /** Whether the panel is open at all. Closed = no UI shown. */
+  readonly open: boolean;
+  /** Whether the LLM round-trip is in flight. */
+  readonly busy: boolean;
+  /** True iff no chat-assist handle is available (e.g. no LLM). */
+  readonly unavailable: boolean;
+  /** Reason the assistant is unavailable — shown as a small note. */
+  readonly unavailableReason: string | undefined;
+  /** Error from the most recent round-trip (parser / network). */
+  readonly error: string | undefined;
+  /** The user's free-text query. */
+  readonly query: string;
+  /** Parsed reply — already shaped for display by `summariseChatAssist`. */
+  readonly display: ChatAssistDisplay | null;
+  /** Set of suggestion ids the user has dismissed. */
+  readonly dismissedIds: readonly string[];
+}
+
+function ChatAssistPanel({
+  state,
+  disabled,
+  onAskOpen,
+  onAskClose,
+  onAskChangeQuery,
+  onAskSubmit,
+  onAskRegenerate,
+  onUseSuggestion,
+  onAskDismissSuggestion,
+}: {
+  state: ChatAssistPanelState;
+  disabled: boolean;
+  onAskOpen(): void;
+  onAskClose(): void;
+  onAskChangeQuery(next: string): void;
+  onAskSubmit(): void;
+  onAskRegenerate(): void;
+  onUseSuggestion(text: string): void;
+  onAskDismissSuggestion(id: string): void;
+}) {
+  // Closed panel: show a single button.
+  if (!state.open) {
+    return (
+      <section className="kindora-card flex flex-wrap items-center justify-between gap-2" data-testid="chat-assist-closed">
+        <p className="text-kindora-500 dark:text-kindora-400 text-sm">
+          Stuck? Ask your agent for help.
+        </p>
+        <button
+          type="button"
+          className="kindora-button-ghost"
+          onClick={onAskOpen}
+          disabled={disabled || state.unavailable}
+          data-testid="chat-assist-open"
+        >
+          Ask My Agent
+        </button>
+      </section>
+    );
+  }
+
+  const visibleSuggestions = (state.display?.suggestions ?? []).filter(
+    (s) => !state.dismissedIds.includes(s.id),
+  );
+
+  const canSubmit = !state.busy && state.query.trim().length > 0;
+
+  return (
+    <section className="kindora-card flex flex-col gap-3" data-testid="chat-assist-panel">
+      <header className="flex items-start justify-between">
+        <div>
+          <p className="text-kindora-500 dark:text-kindora-400 text-xs uppercase tracking-wide">
+            Ask My Agent
+          </p>
+          <p className="mt-1 text-sm leading-relaxed">
+            Suggestions from your agent. The human reviews every one — nothing is sent
+            until you click Send yourself.
+          </p>
+        </div>
+        <button
+          type="button"
+          className="kindora-button-ghost"
+          onClick={onAskClose}
+          disabled={state.busy}
+          data-testid="chat-assist-close"
+        >
+          Close
+        </button>
+      </header>
+
+      {state.unavailable && (
+        <p
+          className="text-kindora-500 dark:text-kindora-400 text-xs italic"
+          data-testid="chat-assist-unavailable"
+        >
+          {state.unavailableReason ??
+            'Assistant is not available right now (no LLM configured).'}
+        </p>
+      )}
+
+      {!state.unavailable && (
+        <form
+          className="flex flex-col gap-2"
+          onSubmit={(e) => {
+            e.preventDefault();
+            if (canSubmit) onAskSubmit();
+          }}
+          data-testid="chat-assist-form"
+        >
+          <label
+            htmlFor="chat-assist-query"
+            className="text-kindora-500 dark:text-kindora-400 text-xs uppercase tracking-wide"
+          >
+            What do you want help with?
+          </label>
+          <textarea
+            id="chat-assist-query"
+            className="border-kindora-200 dark:border-kindora-700 min-h-[3.5rem] w-full resize-none rounded-md border bg-transparent p-2 text-sm leading-relaxed disabled:opacity-50"
+            rows={2}
+            value={state.query}
+            onChange={(e) => onAskChangeQuery(e.target.value)}
+            placeholder='e.g. "help me reply to their last message" or "what should I ask them next?"'
+            disabled={state.busy}
+            data-testid="chat-assist-query"
+          />
+          <div className="flex items-center justify-between gap-2">
+            <p className="text-kindora-500 dark:text-kindora-400 text-xs">
+              Phase 10 · AI only suggests — it never sends for you (§ 32).
+            </p>
+            <button
+              type="submit"
+              className="kindora-button"
+              disabled={!canSubmit}
+              data-testid="chat-assist-submit"
+            >
+              {state.busy ? 'Thinking…' : 'Ask'}
+            </button>
+          </div>
+        </form>
+      )}
+
+      {state.error && (
+        <section
+          className="flex flex-col gap-1 border border-rose-300 dark:border-rose-700 rounded-md p-2"
+          data-testid="chat-assist-error"
+        >
+          <p className="text-rose-600 dark:text-rose-400 text-xs">{state.error}</p>
+        </section>
+      )}
+
+      {state.busy && visibleSuggestions.length === 0 && (
+        <p
+          className="text-kindora-500 dark:text-kindora-400 text-sm italic"
+          data-testid="chat-assist-loading"
+        >
+          Your agent is reading the chat…
+        </p>
+      )}
+
+      {!state.busy && state.display && visibleSuggestions.length === 0 && state.display.suggestions.length === 0 && (
+        <p
+          className="text-kindora-500 dark:text-kindora-400 text-sm italic"
+          data-testid="chat-assist-empty"
+        >
+          {state.display.summary || 'No suggestions came back.'}
+        </p>
+      )}
+
+      {visibleSuggestions.length > 0 && (
+        <section
+          className="flex flex-col gap-3"
+          data-testid="chat-assist-suggestions"
+          data-suggestion-count={visibleSuggestions.length}
+        >
+          {state.display?.summary && (
+            <p className="text-kindora-500 dark:text-kindora-400 text-xs italic">
+              {state.display.summary}
+            </p>
+          )}
+          {visibleSuggestions.map((s) => (
+            <ChatAssistSuggestionRow
+              key={s.id}
+              suggestion={s}
+              onUse={onUseSuggestion}
+              onDismiss={onAskDismissSuggestion}
+            />
+          ))}
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              className="kindora-button-ghost"
+              onClick={onAskRegenerate}
+              disabled={state.busy || !state.query.trim()}
+              data-testid="chat-assist-regenerate"
+            >
+              Regenerate
+            </button>
+          </div>
+        </section>
+      )}
+    </section>
+  );
+}
+
+function ChatAssistSuggestionRow({
+  suggestion,
+  onUse,
+  onDismiss,
+}: {
+  suggestion: ChatAssistDisplaySuggestion;
+  onUse(text: string): void;
+  onDismiss(id: string): void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(suggestion.text);
+
+  useEffect(() => {
+    setDraft(suggestion.text);
+  }, [suggestion.text]);
+
+  if (editing) {
+    return (
+      <article
+        className="kindora-card flex flex-col gap-2"
+        data-testid="chat-assist-suggestion"
+        data-kind={suggestion.kind}
+      >
+        <p className="text-kindora-500 dark:text-kindora-400 text-xs uppercase tracking-wide">
+          {suggestion.kindLabel}
+        </p>
+        <textarea
+          className="border-kindora-200 dark:border-kindora-700 w-full resize-none rounded-md border bg-transparent p-2 text-sm leading-relaxed"
+          rows={3}
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          data-testid="chat-assist-edit-textarea"
+        />
+        <div className="flex flex-wrap gap-2">
+          <button
+            type="button"
+            className="kindora-button"
+            onClick={() => {
+              const trimmed = draft.trim();
+              if (!trimmed) return;
+              onUse(trimmed);
+              setEditing(false);
+            }}
+            disabled={draft.trim().length === 0}
+            data-testid="chat-assist-use"
+          >
+            Use edited
+          </button>
+          <button
+            type="button"
+            className="kindora-button-ghost"
+            onClick={() => {
+              setDraft(suggestion.text);
+              setEditing(false);
+            }}
+            data-testid="chat-assist-cancel-edit"
+          >
+            Cancel
+          </button>
+        </div>
+      </article>
+    );
+  }
+
+  return (
+    <article
+      className="kindora-card flex flex-col gap-2"
+      data-testid="chat-assist-suggestion"
+      data-kind={suggestion.kind}
+    >
+      <p className="text-kindora-500 dark:text-kindora-400 text-xs uppercase tracking-wide">
+        {suggestion.kindLabel}
+      </p>
+      <p className="text-sm leading-relaxed">{suggestion.text}</p>
+      {suggestion.rationale && (
+        <p className="text-kindora-500 dark:text-kindora-400 text-xs italic">
+          {suggestion.rationale}
+        </p>
+      )}
+      <div className="flex flex-wrap gap-2">
+        <button
+          type="button"
+          className="kindora-button"
+          onClick={() => onUse(suggestion.text)}
+          data-testid="chat-assist-use"
+        >
+          Use
+        </button>
+        <button
+          type="button"
+          className="kindora-button-ghost"
+          onClick={() => setEditing(true)}
+          data-testid="chat-assist-edit"
+        >
+          Edit
+        </button>
+        <button
+          type="button"
+          className="kindora-button-ghost"
+          onClick={() => onDismiss(suggestion.id)}
+          data-testid="chat-assist-dismiss"
+        >
+          Dismiss
+        </button>
+      </div>
+    </article>
+  );
+}
+
+/* ------------------------------------------------------------------ */
 /* Live wrapper — drives a single ChatOrchestrator                     */
 /* ------------------------------------------------------------------ */
 
@@ -304,6 +667,14 @@ export interface LiveChatViewProps {
   readonly onDisconnect: () => Promise<void> | void;
   /** Called when the user clicks Block. */
   readonly onBlock: () => Promise<void> | void;
+  /**
+   * Phase 10 — chat-assist handle (built lazily by the parent). When
+   * `null` the assistant panel is rendered as unavailable. When set,
+   * the panel uses `handle.ask(query)` to run a single round-trip.
+   */
+  readonly chatAssist: ChatAssistHandle | null;
+  /** Reason the assistant is unavailable (e.g. "No LLM configured."). */
+  readonly chatAssistError?: string | undefined;
 }
 
 export function LiveChatView({
@@ -316,11 +687,21 @@ export function LiveChatView({
   onSend,
   onDisconnect,
   onBlock,
+  chatAssist,
+  chatAssistError,
 }: LiveChatViewProps) {
   const [snapshot, setSnapshot] = useState<ChatSnapshot | undefined>(undefined);
   const [draft, setDraft] = useState(initialDraft ?? '');
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | undefined>(undefined);
+
+  // Phase 10 — assistant panel state.
+  const [assistOpen, setAssistOpen] = useState(false);
+  const [assistQuery, setAssistQuery] = useState('');
+  const [assistBusy, setAssistBusy] = useState(false);
+  const [assistError, setAssistError] = useState<string | undefined>(undefined);
+  const [assistDisplay, setAssistDisplay] = useState<ChatAssistDisplay | null>(null);
+  const [assistDismissed, setAssistDismissed] = useState<readonly string[]>([]);
 
   const runRef = useRef(run);
   runRef.current = run;
@@ -332,6 +713,8 @@ export function LiveChatView({
   onDisconnectRef.current = onDisconnect;
   const onBlockRef = useRef(onBlock);
   onBlockRef.current = onBlock;
+  const chatAssistRef = useRef(chatAssist);
+  chatAssistRef.current = chatAssist;
 
   useEffect(() => {
     let cancelled = false;
@@ -387,6 +770,69 @@ export function LiveChatView({
     }
   }
 
+  /* ---------- Phase 10 panel handlers ---------- */
+
+  function applySuggestion(text: string): void {
+    // Use → fills the composer draft (per § 32 the AI never auto-sends).
+    setDraft(text);
+  }
+
+  async function runAssist(rawQuery: string): Promise<void> {
+    const handle = chatAssistRef.current;
+    const query = rawQuery.trim();
+    if (!handle || !query) return;
+    setAssistBusy(true);
+    setAssistError(undefined);
+    setAssistDismissed([]);
+    try {
+      const result = await handle.orchestrator.ask(query);
+      const display = summariseChatAssist(result.reply);
+      setAssistDisplay(display);
+      if (result.degraded && result.degradationNote) {
+        setAssistError(result.degradationNote);
+      }
+      if (result.boundaryBlocked) {
+        setAssistError(
+          'Both profiles disallow agent conversation — assistant is disabled for this chat.',
+        );
+      }
+    } catch (e: unknown) {
+      setAssistError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setAssistBusy(false);
+    }
+  }
+
+  function handleAskOpen(): void {
+    setAssistOpen(true);
+  }
+  function handleAskClose(): void {
+    setAssistOpen(false);
+  }
+  function handleAskChangeQuery(next: string): void {
+    setAssistQuery(next);
+  }
+  function handleAskSubmit(): void {
+    void runAssist(assistQuery);
+  }
+  function handleAskRegenerate(): void {
+    void runAssist(assistQuery);
+  }
+  function handleAskDismiss(id: string): void {
+    setAssistDismissed((prev) => (prev.includes(id) ? prev : [...prev, id]));
+  }
+
+  const assistant: ChatAssistPanelState = {
+    open: assistOpen,
+    busy: assistBusy,
+    unavailable: chatAssist === null,
+    unavailableReason: chatAssist === null ? chatAssistError : undefined,
+    error: assistError,
+    query: assistQuery,
+    display: assistDisplay,
+    dismissedIds: assistDismissed,
+  };
+
   return (
     <ChatView
       peerDisplayName={peerDisplayName}
@@ -397,10 +843,18 @@ export function LiveChatView({
       sending={sending}
       maxTextLength={maxTextLength}
       error={error}
+      assistant={assistant}
       onDraftChange={setDraft}
       onSend={handleSend}
       onDisconnect={() => void onDisconnectRef.current()}
       onBlock={() => void onBlockRef.current()}
+      onUseSuggestion={applySuggestion}
+      onAskOpen={handleAskOpen}
+      onAskClose={handleAskClose}
+      onAskChangeQuery={handleAskChangeQuery}
+      onAskSubmit={handleAskSubmit}
+      onAskRegenerate={handleAskRegenerate}
+      onAskDismissSuggestion={handleAskDismiss}
     />
   );
 }

@@ -19,12 +19,14 @@ export interface AgentRuntimeOptions {
   maxAgentMessages?: number;
   maxMatchTokens?: number;
   maxIcebreakerTokens?: number;
+  maxChatAssistTokens?: number;
 }
 
 export interface AgentRuntimeConfig {
   readonly maxAgentMessages: number;
   readonly maxMatchTokens: number;
   readonly maxIcebreakerTokens: number;
+  readonly maxChatAssistTokens: number;
 }
 
 export function createAgentConfig(opts: AgentRuntimeOptions = {}): AgentRuntimeConfig {
@@ -36,6 +38,12 @@ export function createAgentConfig(opts: AgentRuntimeOptions = {}): AgentRuntimeC
     // (~4000 chars) is the smallest budget that fits comfortably without
     // truncation for both thin and rich profile pairs.
     maxIcebreakerTokens: opts.maxIcebreakerTokens ?? 1000,
+    // The chat-assist context carries system prompt + both profiles +
+    // heuristics + match report + recent chat history + the user's
+    // free-text query. 1200 tokens (~4800 chars) is the smallest budget
+    // that fits the system prompt + a dozen history entries without
+    // truncation for both rich and thin profile pairs.
+    maxChatAssistTokens: opts.maxChatAssistTokens ?? 1200,
   });
 }
 
@@ -49,7 +57,11 @@ export {
 } from './profile';
 
 /* Phase 3 — Agent Runtime */
-export { MATCH_ANALYST_SYSTEM_PROMPT, ICEBREAKER_SYSTEM_PROMPT } from './system-prompt';
+export {
+  MATCH_ANALYST_SYSTEM_PROMPT,
+  ICEBREAKER_SYSTEM_PROMPT,
+  CHAT_ASSIST_SYSTEM_PROMPT,
+} from './system-prompt';
 export { renderProfileContext, type ProfileContextOptions } from './profile-context';
 export { computeHeuristics, renderHeuristics, type HeuristicHints } from './heuristics';
 export {
@@ -57,6 +69,8 @@ export {
   renderMatchUserMessage,
   buildIcebreakerContext,
   renderIcebreakerUserMessage,
+  buildChatAssistContext,
+  renderChatAssistUserMessage,
   estimateTokens,
   DEFAULT_CHARS_PER_TOKEN,
   TokenLimitExceeded,
@@ -64,16 +78,26 @@ export {
   type BuildContextOptions,
   type BuildIcebreakerInput,
   type BuildIcebreakerContextOptions,
+  type BuildChatAssistInput,
+  type BuildChatAssistContextOptions,
+  type ChatHistoryEntryLike,
 } from './context-builder';
 export {
   parseMatchAnalysis,
   parseIcebreakerTopics,
+  parseChatAssistReply,
   coerceIcebreakerTopics,
   extractJsonObject,
   applyBoundaryOverride,
   MAX_ICEBREAKER_TOPICS,
+  MAX_CHAT_ASSIST_SUGGESTIONS,
+  CHAT_ASSIST_KINDS,
   type ParseResult,
   type ParseIcebreakerResult,
+  type ParseChatAssistResult,
+  type ChatAssistKind,
+  type ChatAssistSuggestion,
+  type ChatAssistReply,
 } from './output-parser';
 export {
   analyzeMatch,
@@ -89,3 +113,10 @@ export {
   type GenerateIcebreakerConfig,
   type GenerateIcebreakerResult,
 } from './generate-icebreaker';
+export {
+  generateChatAssist,
+  type GenerateChatAssistInput,
+  type GenerateChatAssistOptions,
+  type GenerateChatAssistConfig,
+  type GenerateChatAssistResult,
+} from './generate-chat-assist';
