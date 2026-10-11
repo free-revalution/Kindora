@@ -150,16 +150,27 @@ trap cleanup_children EXIT
 #     by the caller, which uses the returned list as the
 #     whitelist for explicit PID-based kills (no name pattern).
 #
-#   PID-reuse caveat:
+#   PID-reuse caveat (Round-9 / Round-10 honest disclosure):
 #     The returned list is captured at observation time T0. If a
 #     process in the list dies AND its PID is reused by an
 #     unrelated process before our cleanup runs, we would attempt
-#     to kill the unrelated process. Mitigations:
-#       (1) Each kill is guarded by pid_is_alive (kills -0).
+#     to kill the unrelated process. Mitigations applied in
+#     scenario 5's cleanup paths:
+#       (1) Each kill is guarded by pid_is_alive (kill -0).
 #       (2) Each kill is further guarded by pid_still_in_subtree
 #       which verifies the target's parent chain still leads to
 #       <root_pid>.
-#     Both guards are applied in scenario 5's cleanup paths.
+#       (3) Ninth round added a THIRD guard: lstart identity via
+#       ps -o lstart= (see pid_safe_kill_with_identity /
+#       pid_safe_kill_orphan). Catches different-second reuse.
+#     What these guards DO NOT cover (Round-10 audit, RISK_REMAINS):
+#       - Same-second PID reuse (lstart is second-precision on
+#         macOS — two processes spawned in the same wall-clock
+#         second yield identical lstart strings).
+#       - The check-then-kill race between kill -0 and kill -KILL
+#         delivery is not provably closed.
+#     Harness policy in any ambiguous case: refuse to kill and
+#     report residual, not risk killing an unidentifiable stranger.
 # -----------------------------------------------------------------------------
 collect_descendants_pids() {
   local root="$1"
@@ -228,13 +239,27 @@ pid_still_in_subtree() {
 # pid_get_lstart <pid>
 #   Output: the lstart (process start time) string for <pid>, with
 #   leading/trailing whitespace stripped. Empty output if <pid> is
-#   gone (ps can't find it). lstart is a stable identity token:
-#   two `ps` calls for the SAME process return the SAME lstart
-#   regardless of timing. Two DIFFERENT processes at the SAME
-#   PID (PID reuse) return DIFFERENT lstart values (because they
-#   started at different times). This is what makes lstart usable
-#   as a PID-reuse-detection token: if lstart at observation time
-#   differs from lstart at kill time, the PID was reused.
+#   gone (ps can't find it).
+#
+#   What lstart IS verified to do (Round-9 / Round-10 audit):
+#     - Stable across `ps` calls for the SAME process.
+#     - Different for the SAME PID number when the holder started
+#       in a DIFFERENT wall-clock second (different-second reuse
+#       is detectable — verified by verify_precheck_deep_tree.sh
+#       step 10 with a fabricated wrong-second lstart).
+#
+#   What lstart is NOT verified to do (Round-10 audit honest
+#   disclosure — see REPORT § 7b "Round-10 audit"):
+#     - macOS `ps -o lstart=` is second-precision (strftime %c,
+#       no sub-second field exposed). Two processes spawned
+#       within the same wall-clock second yield IDENTICAL
+#       lstart strings — empirically verified by step 10b of
+#       verify_precheck_deep_tree.sh. Same-second reuse is NOT
+#       distinguishable by lstart.
+#     - The check-then-kill race (between kill -0 succeeding
+#       and kill -KILL being delivered) is not closed atomically;
+#       a same-second stranger could in principle be inserted
+#       into the slot between the aliveness check and the kill.
 #
 #   Why lstart (and not etime):
 #     etime is the elapsed time SINCE the process started,
@@ -430,8 +455,11 @@ pid_safe_kill_with_identity() {
   local current_lstart
   current_lstart=$(pid_get_lstart "$pid")
   if [[ "$current_lstart" != "$expected_lstart" ]]; then
-    # PID reused — refuse to kill. Log so verifiers can observe
-    # the refusal if they care.
+    # lstart mismatch — observed lstart differs from recorded
+    # lstart. Catches DIFFERENT-second PID reuse. DOES NOT
+    # catch same-second reuse (macOS `ps -o lstart=` is
+    # second-precision; see Round-10 audit in REPORT.md).
+    # Refuse to kill; verifiers can observe the refusal.
     if [[ -n "${KILL_LOG_FILE:-}" ]]; then
       printf 'REFUSE pid=%s root=%s reason=pid-reuse expected_lstart=[%s] current_lstart=[%s]\n' \
         "$pid" "$root" "$expected_lstart" "${current_lstart:-<empty>}" \
@@ -501,6 +529,11 @@ pid_safe_kill_orphan() {
   local current_lstart
   current_lstart=$(pid_get_lstart "$pid")
   if [[ "$current_lstart" != "$expected_lstart" ]]; then
+    # lstart mismatch for an orphan — same constraint as
+    # pid_safe_kill_with_identity: catches DIFFERENT-second
+    # reuse; does NOT catch same-second reuse (lstart is
+    # second-precision on macOS; see Round-10 audit in
+    # REPORT.md). Refuse + log.
     if [[ -n "${KILL_LOG_FILE:-}" ]]; then
       printf 'REFUSE_ORPHAN pid=%s reason=pid-reuse expected_lstart=[%s] current_lstart=[%s]\n' \
         "$pid" "$expected_lstart" "${current_lstart:-<empty>}" \
@@ -809,7 +842,9 @@ run_scenario_5() {
   #        sequence, not just "some ordering").
   #     3. Each kill goes through pid_safe_kill_with_identity,
   #        which verifies (a) PID in identities_tsv,
-  #        (b) PID alive, (c) lstart matches (PID-reuse guard),
+  #        (b) PID alive, (c) lstart matches (catches
+  #            DIFFERENT-second PID reuse — same-second reuse
+  #            remains RISK_REMAINS; see Round-10 audit),
   #        (d) PID still in $PID's subtree.
   #     4. After all descendants are gone, kill $PID itself via
   #        pid_safe_kill_with_identity (identity check still
@@ -847,8 +882,9 @@ run_scenario_5() {
   if kill -0 "$PID" 2>/dev/null; then
     fail "scenario5.post_pid_dead: $PID still alive after reap_pid"
     # $PID is provably ours. Use pid_safe_kill_with_identity so
-    # we re-verify aliveness, lstart (PID-reuse guard), and that
-    # $PID is still in its own subtree.
+    # we re-verify aliveness, lstart (catches different-second
+    # PID reuse; same-second reuse is RISK_REMAINS — see
+    # Round-10 audit), and that $PID is still in its own subtree.
     pid_safe_kill_with_identity "$PID" "$PID" "$identities_tsv" "0"
   else
     ok "scenario5.post_pid_dead ($PID is gone)"

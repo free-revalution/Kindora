@@ -116,11 +116,40 @@ Sizes & mtimes also re-verified post-run — see `T12` in § 7.
            time) paired with the same aliveness guard. Unprovable
            orphans are still reported as residual and left
            untouched (per the seventh-round contract).
-    - PID-reuse mitigation: every kill goes through one of
-      `pid_safe_kill` (alive + subtree) or `pid_safe_kill_owned`
-      (alive + whitelist membership). Both check aliveness
-      (`kill -0`) at kill time, narrowing the reuse window to
-      the time between observation and kill.
+    - PID-reuse mitigation (Round-8 baseline, Round-9
+      enhanced, Round-10 honest disclosure): in scenario 5,
+      every kill goes through one of
+      `pid_safe_kill_with_identity` (Round-9 primitive;
+      REPLACES the eighth-round `pid_safe_kill` for scenario
+      5 paths) or `pid_safe_kill_orphan` (Round-9 primitive;
+      REPLACES the eighth-round `pid_safe_kill_owned` for the
+      Gap 2 orphan-under-PID-1 path). Each applies up to
+      four guards:
+        1. PID membership in `identities_tsv` (whitelist
+           captured at T0).
+        2. Aliveness (`kill -0`).
+        3. `ps -o lstart=` string equality between observation
+           and kill time.
+        4. For non-orphan path: PID still in root's subtree.
+      What the lstart check VERIFIED to catch: different-
+      second PID reuse (verified by
+      `verify_precheck_deep_tree.sh` step 10 with a
+      fabricated wrong-second lstart ⇒ refusal ⇒ target
+      alive).
+      What the lstart check does NOT catch (Round-10 audit,
+      RISK_REMAINS):
+        - Same-second PID reuse — `ps -o lstart=` is
+          second-precision on macOS bash 3.2; two processes
+          spawned within the same wall-clock second yield
+          identical lstart strings (verified by step 10b).
+        - Check-then-kill race — between `kill -0` succeeding
+          and `kill -KILL` delivery, a same-second stranger
+          could in principle be inserted into the slot; no
+          shell-accessible atomic operation closes this on
+          macOS bash 3.2.
+      Harness policy in any ambiguous case: refuse to kill
+      and report the PID as residual, not risk killing an
+      unidentifiable stranger.
     - Assertion count: **35** (unchanged from seventh round — no
       assertion was removed or relaxed).
     - New verification: `/tmp/verify_deep_tree_fix.sh` exercises
@@ -1313,7 +1342,10 @@ every cleanup path)** — ChatGPT's ninth-round review of
    kernels — milliseconds is enough for an unrelated process
    to take the slot). On the Gap 2 path, the orphan is now
    under PID 1 and the subtree check cannot be used at all,
-   so the PID-reuse race is the only ownership proof we have.
+   so the whitelist + lstart check was the only ownership
+   proof path (and the Round-10 audit subsequently documented
+   that lstart only catches different-second reuse — see
+   § 7b "Round-10 audit" for the precise residual risks).
 
 **Fix (this revision)** introduces depth-correct ordering and
 a process-identity guard:
@@ -1570,9 +1602,60 @@ using the `%c' format described in strftime(3)". `strftime(3)`
 `%c` is the national representation (e.g. `Sun Oct 11
 16:01:25 2026` on macOS en-US) — **no sub-second field**.
 
-Empirical verification (`verify_precheck_deep_tree.sh` step
-10b, repeated three times in this session, always succeeded
-with identical results):
+Empirical verification (now in-tree via `test_lstart_precision.sh`;
+Round-11 re-run, identical result):
+
+```text
+$ ps -p $A -o lstart=; sleep 1.5; ps -p $A -o lstart=; sleep 2; ps -p $A -o lstart=
+Sun Oct 11 15:54:49 2026     (etime = 00:00)
+Sun Oct 11 15:54:49 2026     (etime = 00:02)
+Sun Oct 11 15:54:49 2026     (etime = 00:04)
+```
+
+**In-tree lstart precision verifier (Round-11)**:
+`experiments/phase21_experiment_a/tests/test_lstart_precision.sh`
+was added in Round-11 so the same-second collision property
+is reproducible from the repo (not from `/tmp`). It:
+
+  - Records the runtime environment (uname, bash, ps path).
+  - Calls `ps -o lstart=` three times on the same PID;
+    asserts the string is stable (Round-9 / Round-10 audit
+    stability property).
+  - Spawns 40 `sleep 8` background processes (safe pattern:
+    `&` + `disown`, no `( sleep N &)` subshell — bash 3.2
+    hangs that on macOS), reads each PID's lstart, and
+    counts how many distinct second-tokens appear.
+  - If fewer distinct seconds than PIDs are observed, the
+    same-second collision is empirically demonstrated
+    (`PASS`).
+  - If every spawn crossed a second boundary (no collision),
+    it explicitly reports `NOT_VERIFIED` rather than PASS —
+    the harness does NOT assume sub-second precision on
+    macOS bash 3.2 without observation.
+  - Cleanup only kills PIDs whose current `lstart` matches
+    the recorded spawn-time `lstart`. Any PID whose lstart
+    drifted is reported as `REPORTED_RESIDUAL` and left
+    alive — same identity policy as
+    `pid_safe_kill_with_identity`.
+
+```text
+$ bash experiments/phase21_experiment_a/tests/test_lstart_precision.sh
+ENV: uname=Darwin 24.6.0 bash=3.2.57(1)-release ps=/bin/ps
+STEP1: ps -o lstart= on 79742 => [Sun Oct 11 16:12:33 2026]
+STEP2: lstart stable across 3 ps calls (same second) => [Sun Oct 11 16:12:33 2026]
+STEP2_VERDICT: PASS — lstart is stable within <1s
+STEP3: spawned 40 processes; distinct lstart seconds = 1
+STEP3: SAME-SECOND COLLISION observed — example: lstart=[Sun Oct 11 16:12:33 2026] share_count=39 ...
+STEP3_VERDICT: PASS — same-second processes have identical lstart on this host
+STEP4: cleanup killed=40 residual=<none>
+STEP5: no residual PIDs from this script
+```
+
+The previous `/tmp/lstart_collision_test.sh` and step 10b
+of `/tmp/verify_precheck_deep_tree.sh` remain valid
+supplementary evidence but are now duplicated by the
+in-tree script. Future audits should re-run
+`test_lstart_precision.sh` from the repo.
 
 ```text
 $ ps -p $A -o lstart=; sleep 1.5; ps -p $A -o lstart=; sleep 2; ps -p $A -o lstart=
@@ -1777,8 +1860,11 @@ isolation: cleanup is PID-scoped to the scenario's
 produces descendants deeper than the direct children
 `pgrep -P` could see (Gap 4 deep-tree:
 `collect_descendants_pids` BFS captures the full subtree, and
-every kill goes through `pid_safe_kill` / `pid_safe_kill_owned`
-with PID-reuse guards + uniform whitelist enforcement),
+every kill goes through `pid_safe_kill_with_identity` /
+`pid_safe_kill_orphan` (Round-9 primitives that REPLACED
+the eighth-round `pid_safe_kill` / `pid_safe_kill_owned` for
+scenario 5 paths) with lstart identity + subtree guards +
+uniform whitelist enforcement),
 (5) a depth ordering that is **real tree depth** (not PID
 number, since PID number ≠ depth and the kernel assigns PIDs
 in an order unrelated to tree depth) with a **PID-reuse
@@ -1816,6 +1902,7 @@ unclosable without an external dependency).
 | **Scenario 5 Gap 3 — test isolation (no broad-pattern kills)** | **PASS** (`verify_isolation_fix.sh`: unrelated init-sleep planted BEFORE reap harness; harness passes 35/35; unrelated sleep survives; init has exactly 1 sleep (= planted one); explicit cleanup succeeds) |
 | **Scenario 5 Gap 4 — multi-level fixture (deep-tree)** | **PASS** (`verify_deep_tree_fix.sh`: 3-level `bash → bash → sleep` fixture; `collect_descendants_pids` captures all 3 levels; deepest-first PID-scoped cleanup kills all 3 levels; no orphan sleep leaks under init; unrelated init-sleep survives; `pid_still_in_subtree` correctly rejects unrelated PID; final init-sleep count = 0) |
 | **Scenario 5 Gap 5 — depth-correct + PID-reuse-safe pre-check FAIL cleanup** | **PASS** (`verify_precheck_deep_tree.sh`: 3-level fixture where outer and middle are long-running; `collect_descendants_with_depth` correctly tags middle=depth 1, inner=depth 2; `record_identities` captures lstart for every PID; cleanup is killed by **real depth** descending, not PID number; PID-reuse guard refuses to kill when lstart mismatches (different-second case); step 10b empirically demonstrates lstart is second-precision on macOS bash 3.2 and that two processes started within the same second collide — see Round-10 audit for what this does NOT cover (same-second reuse; check-then-kill race); unrelated init-sleep survives; final init-sleep count = 0). See § 7b "Ninth-round fix" + "Round-10 audit". |
+| **Round-11 in-tree lstart precision verifier** | **PASS** (`tests/test_lstart_precision.sh`: spawned 40 background sleep processes on this host; all 40 share the same `Sun Oct 11 16:12:33 2026` lstart string; cleanup policy kills only PIDs whose lstart still matches the recorded value — same identity rule as `pid_safe_kill_with_identity`). See § 7b "Round-11 in-tree lstart precision verifier". |
 | Source-file integrity (T12) | PASS (every check) |
 | Bash SIGINT (background, T7a) | NOT_VERIFIED (re-confirmed: `kill -INT <pid>` does not fire bash INT trap on macOS bash 3.2 in non-tty; see T7a section) |
 | Foreground Ctrl-C (T7c) | NOT_VERIFIED (cannot be automated; manual reproduction steps in T7c section) |
@@ -1885,6 +1972,9 @@ bash /tmp/verify_deep_tree_fix.sh                              # 3-level bash->b
 
 # Ninth-round depth-correct + PID-reuse-guard verification (see § 7b "Ninth-round fix"):
 bash /tmp/verify_precheck_deep_tree.sh                         # 3-level long-running fixture; collect_descendants_with_depth tags depths correctly; kill order is real depth descending (parsed from KILL_LOG_FILE line numbers); record_identities captures lstart; pid_safe_kill_with_identity refuses to kill on lstart mismatch; unrelated init-sleep survives
+
+# Round-11 in-tree lstart precision verifier (reproducible from the repo):
+bash experiments/phase21_experiment_a/tests/test_lstart_precision.sh  # lstart stability across ps calls + same-second collision demonstration (PASS if observed in this run, NOT_VERIFIED if no collision); cleanup policy mirrors pid_safe_kill_with_identity (only kill on lstart match)
 bash /tmp/plant_3level_fixture.sh 60                           # helper: spawn a 3-level long-running bash tree for the precheck verification
 
 # T-build (build fail → exit=20). Invoke from a tempdir with no Cargo.toml:

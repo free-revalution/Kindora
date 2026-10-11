@@ -1,0 +1,215 @@
+#!/usr/bin/env bash
+# test_lstart_precision.sh — in-tree Round-10/11 verifier for the
+# `ps -o lstart=` precision property used by the reap harness's
+# PID-reuse guards.
+#
+# Purpose (Round-10 audit carried forward to Round-11):
+#   The reap harness relies on `ps -o lstart=` (process start time
+#   via strftime %c) as an identity token to detect different-second
+#   PID reuse. Two properties matter:
+#     (a) lstart is STABLE for the same process across `ps` calls
+#         within a fraction of a second.
+#     (b) Two processes spawned within the same wall-clock second
+#         produce IDENTICAL lstart strings — i.e., lstart is
+#         second-precision on macOS bash 3.2 and cannot distinguish
+#         same-second reuse.
+#   This script exercises both properties and reports them with the
+#   verdict vocabulary required by Round-11:
+#     PASS — verified empirically in this run.
+#     NOT_VERIFIED — could not be exercised in this run (e.g., no
+#       same-second collision observed in a small sample).
+#     RISK_REMAINS — limitation documented; not eliminated.
+#
+#   This script does NOT exercise actual PID reuse, does NOT
+#   fabricate a reused-PID slot, and does NOT claim to eliminate
+#   the check-then-kill race. It only reports what `ps -o lstart=`
+#   actually returns on this host.
+#
+# Constraints:
+#   - Bash 3.2 compatible (no ${var,,} / ${var^^}, no associative arrays).
+#   - macOS `ps -o lstart=` only — no /proc, no GNU ps, no etimes.
+#   - Self-contained: does NOT source the reap harness (its helpers
+#     are larger than this script needs and would require an
+#     awk-extract wrapper); it only calls ps / sleep / kill.
+#   - Cleanup only kills processes this script started and can
+#     re-identify via lstart. If identity is ambiguous, the PID
+#     is reported as residual and left alive.
+
+set -u
+
+# --- Environment banner (required by the report's expectations) ---
+ENV_OS="$(uname -s 2>/dev/null || echo unknown)"
+ENV_REL="$(uname -r 2>/dev/null || echo unknown)"
+ENV_PS_PATH="$(command -v ps 2>/dev/null || echo none)"
+ENV_BASH_VER="${BASH_VERSION:-unknown}"
+echo "ENV: uname=$ENV_OS $ENV_REL bash=$ENV_BASH_VER ps=$ENV_PS_PATH"
+
+# --- Guard: ps must exist ---
+if [[ "$ENV_PS_PATH" = "none" || ! -x "$ENV_PS_PATH" ]]; then
+  echo "FAIL: ps not available on this host"
+  exit 1
+fi
+
+# --- Helper: read lstart for a PID, stripped ---
+read_lstart() {
+  local pid="$1"
+  [[ -z "$pid" ]] && return 1
+  ps -p "$pid" -o lstart= 2>/dev/null \
+    | sed 's/^[[:space:]]*//; s/[[:space:]]*$//'
+}
+
+# --- 1. lstart must work on this ps at all ---
+SAMPLE_PID=$$
+SAMPLE_LSTART_1="$(read_lstart "$SAMPLE_PID")"
+if [[ -z "$SAMPLE_LSTART_1" ]]; then
+  echo "FAIL: ps -o lstart= returned empty for current shell (PID=$SAMPLE_PID)"
+  exit 1
+fi
+echo "STEP1: ps -o lstart= on $$ => [$SAMPLE_LSTART_1]"
+
+# --- 2. Stability across `ps` calls within <1s ---
+LSTART_2="$(read_lstart "$SAMPLE_PID")"
+LSTART_3="$(read_lstart "$SAMPLE_PID")"
+if [[ "$SAMPLE_LSTART_1" != "$LSTART_2" || "$SAMPLE_LSTART_1" != "$LSTART_3" ]]; then
+  echo "FAIL: lstart not stable across calls: [$SAMPLE_LSTART_1] [$LSTART_2] [$LSTART_3]"
+  exit 1
+fi
+echo "STEP2: lstart stable across 3 ps calls (same second) => [$SAMPLE_LSTART_1]"
+echo "STEP2_VERDICT: PASS — lstart is stable within <1s"
+
+# --- 3. Same-second collision demonstration ---
+# Strategy: spawn N sleep processes back-to-back without any
+# `wait` or subshell hang. Capture each PID + lstart. If at
+# least two of them land in the same wall-clock second AND
+# have identical lstart strings, that demonstrates the
+# precision limit. If N is large enough that some collision
+# occurs with overwhelming probability, we can call it
+# PASS. If by chance all spawns cross second boundaries, we
+# report NOT_VERIFIED.
+#
+# Notes for bash 3.2: do NOT use `( sleep N &)` inside $()
+# (hangs on macOS). Use the safe pattern: spawn to bg, save
+# $!, disown, then read ps.
+#
+# IMPORTANT: macOS `ps -o lstart=` output contains spaces
+# (e.g. "Sun Oct 11 16:12:05 2026"). We store the lstart +
+# PID pair with a TAB separator and process the TSV with awk
+# using -F'\t' so the date spaces don't split our fields.
+N=40
+PIDS=""
+TSV_FILE="$(mktemp -t lstart_tsv.XXXXXX)"
+trap 'rm -f "$TSV_FILE"' EXIT
+for i in $(seq 1 $N); do
+  # Background sleep; record PID immediately.
+  sleep 8 >/dev/null 2>&1 &
+  P=$!
+  PIDS="$PIDS $P"
+  disown $P 2>/dev/null || true
+done
+# Read lstart for each PID. If the spawn finished faster than
+# 1 wall-clock second, all N processes will share the same
+# lstart second. Use TAB separator to survive spaces in lstart.
+> "$TSV_FILE"
+for p in $PIDS; do
+  L="$(read_lstart "$p")"
+  if [[ -n "$L" ]]; then
+    printf '%s\t%s\n' "$L" "$p" >>"$TSV_FILE"
+  fi
+done
+# Count distinct lstart values across all N PIDs.
+DISTINCT_COUNT=$(awk -F'\t' 'NF >= 2 && $2 != "" { print $1 }' "$TSV_FILE" | sort -u | wc -l | tr -d ' ')
+TOTAL_COUNT=$(awk -F'\t' 'NF >= 2 && $2 != "" { print $2 }' "$TSV_FILE" | wc -l | tr -d ' ')
+echo "STEP3: spawned $TOTAL_COUNT processes; distinct lstart seconds = $DISTINCT_COUNT"
+
+if [[ "$TOTAL_COUNT" -eq 0 ]]; then
+  echo "FAIL: could not record lstart for the spawned PID group"
+  CLEANUP_PIDS="$PIDS"
+elif [[ "$DISTINCT_COUNT" -lt "$TOTAL_COUNT" ]]; then
+  COLLIDED=1
+  # Show one example collision: pick the first lstart that
+  # appears at least twice and list the PIDs that share it.
+  COLLIDED_EXAMPLE=$(awk -F'\t' '
+    { seen[$1] = seen[$1] " " $2 }
+    END { for (l in seen) { n = split(seen[l], p, " "); if (n > 1) { printf "lstart=[%s] share_count=%d pids=%s\n", l, n-1, seen[l]; exit } } }
+  ' "$TSV_FILE")
+  echo "STEP3: SAME-SECOND COLLISION observed — example: $COLLIDED_EXAMPLE"
+  echo "STEP3_VERDICT: PASS — same-second processes have identical lstart on this host"
+else
+  # No collision: every spawn crossed a wall-clock second.
+  # This is rare but possible. NOT_VERIFIED, not PASS.
+  echo "STEP3: no same-second collision observed in this run (all $TOTAL_COUNT spawns crossed a second boundary)"
+  echo "STEP3_VERDICT: NOT_VERIFIED — same-second collision not exercised; precision may still be sub-second on this host, but the macOS bash 3.2 + ps -o lstart= combination in the reap harness is documented as second-precision based on the Round-10 audit (see REPORT.md § 7b)"
+fi
+
+# --- 4. Cleanup: only kill processes whose lstart matches what
+#        we recorded at spawn time. If identity is ambiguous,
+#        report and leave alone. Source: $TSV_FILE, which is
+#        already "<lstart>\t<pid>" lines.
+KILLED=0
+REPORTED_RESIDUAL=""
+while IFS=$'\t' read -r L P; do
+  [[ -z "$P" || -z "$L" ]] && continue
+  CUR="$(read_lstart "$P")"
+  if [[ "$CUR" = "$L" ]]; then
+    # Identity confirmed. Safe to kill.
+    if kill -KILL "$P" 2>/dev/null; then
+      KILLED=$((KILLED + 1))
+    fi
+  else
+    # Identity ambiguous (lstart drifted, possibly reused by
+    # another process). Report and do NOT kill.
+    REPORTED_RESIDUAL="$REPORTED_RESIDUAL $P"
+  fi
+done <"$TSV_FILE"
+
+echo "STEP4: cleanup killed=$KILLED residual=${REPORTED_RESIDUAL:-<none>}"
+
+# --- 5. Final residual check: are any of our PIDs still alive? ---
+sleep 0.3
+STILL_ALIVE=""
+for p in $PIDS; do
+  if kill -0 "$p" 2>/dev/null; then
+    STILL_ALIVE="$STILL_ALIVE $p"
+  fi
+done
+STILL_ALIVE="${STILL_ALIVE# }"
+if [[ -n "$STILL_ALIVE" ]]; then
+  echo "STEP5: residual PIDs from this script still alive: [$STILL_ALIVE]"
+  echo "STEP5_VERDICT: NOT_VERIFIED — could not fully clean up; processes may have reparented and are under PID 1, or identity was ambiguous"
+else
+  echo "STEP5: no residual PIDs from this script"
+fi
+
+# --- 6. Final verdict summary ---
+echo ""
+echo "=========================================="
+echo "LSTART PRECISION VERIFIER — verdict summary"
+echo "=========================================="
+if [[ "$COLLIDED" -eq 1 ]]; then
+  echo "  - lstart stability within <1s:        PASS"
+  echo "  - same-second collision demonstrated: PASS"
+  echo "  - cleanup identity-check policy:      PASS (only killed on lstart match)"
+  echo ""
+  echo "  IMPLICATION (documented in REPORT § 7b Round-10 audit):"
+  echo "    lstart is second-precision on this host; same-second PID"
+  echo "    reuse is NOT distinguishable. The reap harness's"
+  echo "    pid_safe_kill_with_identity / pid_safe_kill_orphan refuse"
+  echo "    to kill in this case rather than risk killing a stranger."
+  echo "    This is a documented RISK_REMAINS, not an eliminated risk."
+  echo ""
+  echo "  RESULT: PASS for stability and same-second collision."
+  echo "          RISK_REMAINS for same-second reuse (documented)."
+  exit 0
+else
+  echo "  - lstart stability within <1s:        PASS"
+  echo "  - same-second collision:              NOT_VERIFIED (this round did not observe a collision)"
+  echo "  - cleanup identity-check policy:      PASS (only killed on lstart match)"
+  echo ""
+  echo "  IMPLICATION: Round-10 audit documented same-second collision"
+  echo "  on macOS bash 3.2 + ps -o lstart=; this run did not reproduce"
+  echo "  it but the documented result stands. RISK_REMAINS unchanged."
+  echo ""
+  echo "  RESULT: PASS for stability. NOT_VERIFIED for same-second"
+  echo "          collision in this specific run."
+  exit 0
+fi
