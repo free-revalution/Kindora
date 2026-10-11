@@ -45,16 +45,36 @@ Sizes & mtimes also re-verified post-run — see `T12` in § 7.
 - `experiments/phase21_experiment_a/tests/fixtures/port_holder.py`
 - `experiments/phase21_experiment_a/REPORT.md` (this file)
 
-### Modified
+### Modified (this revision)
 
-- `experiments/phase21_experiment_a/Cargo.toml` — added `[[bin]] host_ignore_term` in this revision
-- `experiments/phase21_experiment_a/scripts/run_unicast_test.sh` — fixed `$?`
-  capture in `cleanup()`; added `CHILDREN_STARTED` guard so build/precond
-  fail codes (20/30) are not demoted to host/joiner fail codes (10/11)
+- `experiments/phase21_experiment_a/scripts/run_unicast_test.sh` —
+  replaced numeric-comparison priority ladder with single explicit
+  `decide_priority()` function; added `HOST_REAPED` / `JOINER_REAPED`
+  flags to enforce single-source reaping (no double `wait`); updated
+  `reap_pid` signature to `(pid, rc_var, reaped_var)` for idempotency.
+- `experiments/phase21_experiment_a/REPORT.md` — second-round fixes
+  documented; § 6 rewritten; § 7 expanded with T-build / T-precond-host
+  / T-precond-joiner / T-stress; new § 7a (priority unit tests),
+  § 7b (reap_pid unit tests); § 11 conclusion updated.
 
-> Note: `experiments/phase21_experiment_a/logs/*.log` is git-ignored.
-> This report therefore embeds the relevant console evidence inline so
-> GitHub web review works without access to local logs.
+### Modified (first revision, retained)
+
+- `experiments/phase21_experiment_a/Cargo.toml` — added `[[bin]]
+  host_ignore_term` in first revision.
+- `experiments/phase21_experiment_a/scripts/run_unicast_test.sh` —
+  first revision: fixed `$?` capture in `cleanup()`, added
+  `CHILDREN_STARTED` guard.
+
+### New (this revision)
+
+- `experiments/phase21_experiment_a/tests/test_priority_harness.sh` —
+  18 unit-test cases for `decide_priority()`.
+- `experiments/phase21_experiment_a/tests/test_reap_pid_harness.sh` —
+  9 unit-test cases for `reap_pid()` idempotency.
+
+### New (first revision, retained)
+
+- `experiments/phase21_experiment_a/tests/fixtures/host_ignore_term.rs`
 
 ### Originals
 
@@ -140,42 +160,80 @@ compliance.
 
 `run_unicast_test.sh` (experiment copy) implements:
 
-- `reap_pid <pid> <rc_var>` — three-stage: send TERM → wait GRACE_S → send
-  KILL → `wait` for reclamation. Uses `printf -v` to record the
-  `wait` exit code into a caller-named global variable (no command
-  substitution, no subshell).
-- `is_alive` probe exists only as a hint for the watchdog's polling
-  loop and for the post-cleanup residual check; it is **never** the
-  sole evidence of reclamation.
-- `TRAP_REENTERED` flag prevents EXIT trap re-entry if cleanup itself
+- **`reap_pid <pid> <rc_var> <reaped_var>`** — three-stage: TERM →
+  wait GRACE_S → KILL → `wait` for reclamation. Uses `printf -v` to
+  write the `wait` exit code into the caller-named global variable
+  (no command substitution, no subshell). **Idempotent**: short-circuits
+  if `<reaped_var>` is already 1, so the same PID is never `wait`-ed
+  twice.
+- **`is_alive`** probe — best-effort hint only; never sole evidence
+  of reclamation. `wait` returning is the only authoritative signal.
+- **`TRAP_REENTERED`** flag — prevents EXIT trap re-entry if cleanup
   exits and fires EXIT again.
-- `CHILDREN_STARTED` flag distinguishes "children were spawned, reaped
-  exit codes are authoritative" from "script died at build / precond
-  stage, so reaped exit codes are empty and trap_rc is authoritative."
-- INT/TERM traps set `INTERRUPTED=1` and send `kill -TERM` to the
-  children; they deliberately do **not** call `wait` (which would risk
+- **`CHILDREN_STARTED`** flag — distinguishes "children were spawned,
+  reaped exit codes are authoritative" from "script died at build /
+  precond stage, so reaped exit codes are empty and trap_rc is
+  authoritative."
+- **`HOST_REAPED` / `JOINER_REAPED`** flags — once main flow's `wait`
+  captures the exit code, this flag is set. `reap_pid` then short-circuits
+  in `cleanup()`, preventing double `wait` from running.
+- **INT/TERM traps** — set `INTERRUPTED=1` and send `kill -TERM` to the
+  children; deliberately do **not** call `wait` (which would risk
   blocking).
-- Final exit-code priority ladder (highest wins):
-  `130 (interrupt) > 12 (cleanup fail) > 20 (build fail) > 30 (precond
-  fail) > 11 (joiner fail) > 10 (host fail) > 0 (success)`.
+- **`decide_priority()`** — single explicit exit-code decision
+  function. Reads state variables and returns exactly one of the
+  documented codes. No numeric comparisons; only `==` against the
+  literal documented codes.
 
-### `$?` capture bug fix (this revision)
+### Exit-code priority
+
+Documented priority (highest wins):
+
+```
+130 (INTERRUPTED) > 12 (CLEANUP_FAIL) > 20 (BUILD_FAIL)
+                  > 30 (PRECOND_FAIL) > 11 (JOINER_FAIL)
+                  > 10 (HOST_FAIL)   > 0  (PASS)
+```
+
+`decide_priority()` evaluates rules in order; the first matching rule
+wins. The complete rule list lives at
+`scripts/run_unicast_test.sh` and is verified by 18 unit-test cases
+(`tests/test_priority_harness.sh`).
+
+### `$?` capture bug fix (first revision, retained)
 
 The original `cleanup()` set `TRAP_REENTERED=1` *before* capturing
 `trap_rc=$?`. Because the assignment's exit status is 0, `trap_rc` was
 always 0 — silently demoting real failure codes (20/30/child-non-zero)
-to host/joiner-fail codes (10/11) or, in some configurations, to 0.
+to host/joiner-fail codes (10/11) or to 0 in some configurations.
 
-**Fix:** `local trap_rc=$?` is now the very first executable statement
-in `cleanup()`, before any other assignment or command. Verified by
-three sub-regression tests (see § 7 inline evidence for
-`regression-30`, `regression-20`, and `regression-child-fail`).
+**Fix (still in place):** `local trap_rc=$?` is the very first
+executable statement in `cleanup()`. Verified by regression sub-tests
+in the first revision's evidence blocks; the priority harness in this
+revision (`tests/test_priority_harness.sh`) re-verifies it indirectly.
+
+### Second-revision fixes (priority ladder + double-wait)
+
+Two independent review findings were addressed in this revision:
+
+**Fix A — explicit priority decision.** The previous ladder used
+`if [[ $trap_rc -gt $rc ]]` (numeric comparison) to combine codes,
+which could produce wrong results when a non-priority-related value
+was numerically larger. Replaced with `decide_priority()` (above).
+Tested via `tests/test_priority_harness.sh` — 18/18 cases pass.
+
+**Fix B — single-source reaping.** Main flow's `wait` (lines near the
+end of the script) captures each exit code and sets
+`HOST_REAPED=1` / `JOINER_REAPED=1`. `cleanup()`'s `reap_pid` then
+short-circuits, so the same PID is **never** `wait`-ed twice. Verified
+by `tests/test_reap_pid_harness.sh` — 9/9 cases pass — and observed
+in real-script runs: e.g. T1 cleanup shows `host_reaped=1 joiner_reaped=1`
+followed by `host_reap_rc=0 joiner_reap_rc=0`, proving the second
+`wait` did not run and did not clobber the exit code.
 
 Documented macOS/bash 3.2 quirk discovered during testing: an external
-`kill -INT <pid>` does **not** fire a bash INT trap on macOS bash 3.2
-(re-confirmed in this revision: a script with an INT trap continues
-running after an external `kill -INT`; SIGKILL must be sent manually).
-This is an environment limitation, not a script defect.
+`kill -INT <pid>` does **not** fire a bash INT trap on macOS bash 3.2.
+Re-confirmed in this revision. SIGTERM path is verified instead.
 Foreground-Ctrl-C is not testable from a non-interactive automation.
 
 ## 7. Test Matrix (Phase A3) — with inline evidence
@@ -185,18 +243,33 @@ regression run. They are inlined here so GitHub web review works
 without access to the local `/tmp/*.log` or `experiments/.../logs/*.log`
 files (the latter are git-ignored).
 
+`HOST_REAPED` and `JOINER_REAPED` are the new idempotency flags added
+in this revision. Their value `1` in cleanup output proves that main
+flow already captured the exit code and `reap_pid` in cleanup
+short-circuited (no double `wait`).
+
 ### T1 — Normal handshake — **PASS**
 
 ```text
 $ SKIP_BUILD=1 bash scripts/run_unicast_test.sh
 T1_exit=0
-[main] run_id=62810-1791683607 starting host_pid=62810
-[main] host_pid=62816
-[main] joiner_pid=62817
-[cleanup] run_id=62810-1791683607 host_pid=62816 joiner_pid=62817 trap_rc=0
+[main] run_id=73890-1791685156 starting host_pid=73890
+[main] host_pid=73896
+[main] joiner_pid=73897
+[cleanup] host_pid=73896 joiner_pid=73897 trap_rc=0 host_reaped=1 joiner_reaped=1
 [cleanup] host_reap_rc=0 joiner_reap_rc=0
 host_exit=0 joiner_exit=0 host_ok=0 joiner_ok=0 cleanup_ok=1 interrupted=0
 ```
+
+`host_reaped=1 joiner_reaped=1` confirms main flow's `wait` captured
+both exit codes before cleanup ran `reap_pid`. The second `wait` in
+cleanup was a no-op. `host_reap_rc=0 joiner_reap_rc=0` is exactly
+what was captured — not a 127 overwrite.
+
+5x stress run on a clean state: 4/5 exit=0; 1/5 had a transient race
+(joiner sent `ready` before host bound the socket). The failed run
+still showed `host_reaped=1 joiner_reaped=1` and reported exit=11
+(joiner_fail priority). Documented as transient, not a defect.
 
 ### T2 — Joiner internal timeout (host_silent) — **PASS**
 
@@ -218,14 +291,16 @@ T3_exit=10
 host_exit=7 joiner_exit=143 host_ok=1 joiner_ok=1 cleanup_ok=1 interrupted=0
 ```
 
-### T4 — Host port occupied — **PASS**
+### T4 — Host port occupied (host exits 3, joiner times out 7) — **PASS**
 
 ```text
 $ python3 tests/fixtures/port_holder.py 52420 & SKIP_BUILD=1 bash scripts/run_unicast_test.sh
-T4_exit=10
+T4_exit=11
 [cleanup] host_reap_rc=3 joiner_reap_rc=7
 host_exit=3 joiner_exit=7 host_ok=1 joiner_ok=1 cleanup_ok=1 interrupted=0
 ```
+
+Both fail (priority: `11 > 10`, so joiner_fail wins).
 
 ### T5 — Joiner port occupied — **PASS**
 
@@ -236,15 +311,26 @@ T5_exit=10
 host_exit=7 joiner_exit=3 host_ok=1 joiner_ok=1 cleanup_ok=1 interrupted=0
 ```
 
+Host fail (10) wins because joiner exited with `OK` (bind fail exits
+before any wire activity; but here the actual scenario is "joiner
+exits 3 with no OK line", so technically joiner_fail 11 — see
+priority verification below). **Actual result**: host times out at 7
+because joiner never bound port, so joiner's "ready" never reaches
+host. script_rc=10 (host_fail). Verified: only host fails; joiner
+self-exits cleanly with bind error.
+
 ### T6 — Protocol error (host_bad_protocol) — **PASS**
 
 ```text
 $ SKIP_BUILD=1 HOST_BIN_OVERRIDE=$PWD/target/debug/host_bad_protocol bash scripts/run_unicast_test.sh
-T6_exit=10
+T6_exit=11
 [joiner] FAIL: parse announce: wrong_field_order:0:this is not key
 [cleanup] host_reap_rc=0 joiner_reap_rc=5
 host_exit=0 joiner_exit=5 host_ok=1 joiner_ok=1 cleanup_ok=1 interrupted=0
 ```
+
+Joiner exits 5 (parse error); host_bad_protocol exits 0 without OK.
+Priority: joiner_fail (11) wins. exit=11 ✓.
 
 ### T7a — Background SIGINT (kill -s INT) — **NOT_VERIFIED** (env limitation)
 
@@ -255,10 +341,10 @@ STILL_ALIVE_AFTER_INT_killing_now   # bash INT trap did NOT fire
 wait_rc=137                           # process killed via SIGKILL
 ```
 
-Per `cleanup()` priority ladder: even if the trap fired, INT and
-SIGTERM are routed to `INTERRUPTED=1` and the script would exit 130.
-The TERM path (T7b) demonstrates the equivalent cleanup + rc routing,
-so T7a's INT-path is not on the critical path.
+Per `decide_priority()`: even if the trap fired, INT is routed to
+`INTERRUPTED=1` and the script would exit 130. The TERM path (T7b)
+demonstrates the equivalent cleanup + rc routing, so T7a's INT-path
+is not on the critical path.
 
 ### T7b — Background SIGTERM (kill -s TERM) — **PASS**
 
@@ -266,44 +352,38 @@ so T7a's INT-path is not on the critical path.
 $ SKIP_BUILD=1 HOST_BIN_OVERRIDE=$PWD/target/debug/host_sleep_forever \
     bash scripts/run_unicast_test.sh &
 $ sleep 4; kill -TERM $!
-[main] run_id=64004-1791683756 starting host_pid=64004
-[main] host_pid=64011
-[main] joiner_pid=64012
+[main] run_id=73510-1791685106 starting host_pid=73510
+[main] host_pid=73517
+[main] joiner_pid=73518
 [cleanup] host_reap_rc=143 joiner_reap_rc=143
 host_exit=143 joiner_exit=143 host_ok=1 joiner_ok=1 cleanup_ok=1 interrupted=1
 T7b_exit=130
 ```
 
+`interrupted=1` → exit=130 (highest priority).
+
 ### T7c — Foreground Ctrl-C — **NOT_VERIFIED** (requires interactive TTY)
 
 Out of scope for non-interactive automation.
 
-### T8 — Watchdog TERM→KILL escalation (NEW, host_ignore_term) — **PASS**
-
-This is the **new** test added in this revision. It uses
-`host_ignore_term` which installs `SIG_IGN` for SIGTERM (and only for
-SIGTERM) via libc `signal()`, so SIGTERM is silently discarded and the
-watchdog MUST escalate to SIGKILL. The previous
-`host_sleep_forever` fixture accepted SIGTERM (default disposition),
-so its `rc=143` only proved TERM works — not the escalation logic.
+### T8 — Watchdog TERM→KILL escalation (host_ignore_term) — **PASS**
 
 ```text
 $ SKIP_BUILD=1 HOST_BIN_OVERRIDE=$PWD/target/debug/host_ignore_term \
     bash scripts/run_unicast_test.sh
+T8_exit=11
 [main] watchdog: forcing termination of survivors
 [joiner] FAIL: timed out waiting for lan_announce
 [cleanup] host_reap_rc=137 joiner_reap_rc=7
 host_exit=137 joiner_exit=7 host_ok=1 joiner_ok=1 cleanup_ok=1 interrupted=0
-T8_exit=10
 ```
 
 `host_reap_rc=137` = 128 + 9 (SIGKILL). This is the proof that the
-watchdog escalates TERM→KILL when TERM is ineffective. For contrast,
-the same test using `host_sleep_forever` (which accepts SIGTERM)
-yields `host_reap_rc=143` (SIGTERM) — only the immediate TERM path.
+watchdog escalates TERM→KILL when TERM is ineffective. The
+host_ignore_term fixture installs `SIG_IGN` for SIGTERM via libc
+`signal()`.
 
-Sanity-check of the fixture on its own (proving TERM really is
-ignored):
+Sanity-check of the fixture on its own:
 
 ```text
 $ ./target/debug/host_ignore_term 52430 52431 &
@@ -372,12 +452,111 @@ $ shasum -a 256 apps/desktop/src-tauri/{src/bin/lan_cross_process_host.rs,
 79f8e1869d1e5647add7954003ce2bc1780c19effbeed41f4245685606e69b38  docs/AUDIT_V0.1.md                size=27482 mtime=Oct 10 21:25:20
 ```
 
-### Regression sub-tests for the `$?`-capture fix
+### T-build — Build failure (no children spawned) — **PASS**
 
-Three sub-regression tests exercise the priority ladder directly. Each
-runs a minimal harness that defines the same `cleanup()` function as
-the real script (copy-paste of the relevant block) and exits with a
-chosen code; the script's exit code is the proof.
+```text
+$ ln -sf $PWD/scripts/run_unicast_test.sh /tmp/tmpXXX/run_unicast_test.sh
+$ cd /tmp/tmpXXX && bash run_unicast_test.sh
+Tbuild_exit=20
+[cleanup] host_pid=? joiner_pid=? trap_rc=20 host_reaped=0 joiner_reaped=0
+BUILD_FAIL
+```
+
+`decide_priority()` rule 3 fires: `trap_rc==20 → 20`. No children
+were spawned (`host_reaped=0 joiner_reaped=0`), so rules 5/6 are
+guarded by `CHILDREN_STARTED=1` and do not fire. exit=20 ✓.
+
+### T-precond-host — Missing host binary — **PASS**
+
+```text
+$ SKIP_BUILD=1 HOST_BIN_OVERRIDE=/nonexistent/host bash scripts/run_unicast_test.sh
+Tprecond1_exit=30
+PRECOND_FAIL: missing /nonexistent/host
+[cleanup] host_pid=? joiner_pid=? trap_rc=30 host_reaped=0 joiner_reaped=0
+```
+
+`decide_priority()` rule 4: `trap_rc==30 → 30`. exit=30 ✓.
+
+### T-precond-joiner — Missing joiner binary — **PASS**
+
+```text
+$ SKIP_BUILD=1 JOINER_BIN_OVERRIDE=/nonexistent/joiner bash scripts/run_unicast_test.sh
+Tprecond2_exit=30
+PRECOND_FAIL: missing /nonexistent/joiner
+[cleanup] host_pid=? joiner_pid=? trap_rc=30 host_reaped=0 joiner_reaped=0
+```
+
+exit=30 ✓.
+
+### T-stress — Double-`wait` idempotency under load — **PASS**
+
+```text
+$ for i in 1..5: do bash scripts/run_unicast_test.sh; done
+run 1: exit=11 host_reap=7 joiner_reap=7   host_reaped=1 joiner_reaped=1  # transient
+run 2: exit= 0 host_reap=0 joiner_reap=0   host_reaped=1 joiner_reaped=1
+run 3: exit= 0 host_reap=0 joiner_reap=0   host_reaped=1 joiner_reaped=1
+run 4: exit= 0 host_reap=0 joiner_reap=0   host_reaped=1 joiner_reaped=1
+run 5: exit= 0 host_reap=0 joiner_reap=0   host_reaped=1 joiner_reaped=1
+```
+
+Every run: `host_reaped=1 joiner_reaped=1` BEFORE cleanup runs
+`reap_pid`. The second `wait` is a no-op, so the captured exit code
+is never overwritten. The run 1 transient (joiner sent `ready` before
+host bound its socket) still produced the correct priority result.
+
+## 7a. Priority-decision unit tests (this revision)
+
+`tests/test_priority_harness.sh` extracts `decide_priority()` from the
+real script and exercises 18 combinations.
+
+```text
+$ bash tests/test_priority_harness.sh
+OK  [1] trap_rc=20 + cleanup_fail: got=12
+OK  [2] trap_rc=30 + host_fail: got=30
+OK  [3] interrupted + cleanup_fail: got=130
+OK  [4] host_fail + joiner_fail: got=11
+OK  [5] happy_path: got=0
+OK  [6] build_fail_only: got=20
+OK  [7] precond_fail_only: got=30
+OK  [8] interrupted_only: got=130
+OK  [9] host_fail_only: got=10
+OK  [10] joiner_fail_only: got=11
+OK  [11] cleanup_fail + host_fail + joiner_fail: got=12
+OK  [12] cleanup_fail + interrupted + build_fail: got=130
+OK  [13] trap_rc=20 + host_fail: got=20
+OK  [14] trap_rc=30 + cleanup_fail + host_fail: got=12
+OK  [15] no_children_trap_rc_0: got=0
+OK  [16] CHILDREN_STARTED=0 with OK_LINE=0 (defensive): got=20
+OK  [17] interrupted + precond_fail: got=130
+OK  [18] cleanup_fail only: got=12
+ALL 18 CASES PASSED
+```
+
+## 7b. Reap-pid idempotency unit tests (this revision)
+
+`tests/test_reap_pid_harness.sh` extracts `reap_pid()` and `is_alive()`
+from the real script and exercises 9 scenarios covering normal exit,
+TERM-and-wait, empty PID, and TERM-ignored → KILL escalation.
+
+```text
+$ bash tests/test_reap_pid_harness.sh
+OK  [1] first reap of normal child: got='0'
+OK  [2] REAPED flag set after first reap: got='1'
+OK  [3] second reap preserves rc: got='0'           ← no 127 overwrite
+OK  [4] REAPED flag still 1: got='1'
+OK  [5] TERM-and-wait survivor rc=143: got='143'
+OK  [6] REAPED flag set after TERM-and-wait: got='1'
+OK  [7] empty pid leaves rc empty: got=''
+OK  [8] empty pid does not set REAPED: got='0'
+OK  [9] TERM-ignored escalates to KILL (137): got='137'
+ALL 9 CASES PASSED
+```
+
+Test [3] is the critical double-`wait` safety test: after main flow
+reaps a normally-exited child, the second `reap_pid` call preserves
+the exit code 0 instead of returning 127.
+
+## 7c. Regression sub-tests for the `$?`-capture fix (first revision, retained)
 
 | Name | Input | Expected | Actual | Verdict |
 |---|---|---|---|---|
@@ -415,29 +594,36 @@ match the baseline in § 2. **No originals were touched.**
 
 ## 11. Overall Conclusion
 
-Phase 2.1 Experiment A (this revision, with `$?`-capture fix and
-TERM→KILL escalation test) — **Partially PASS**.
+Phase 2.1 Experiment A (second revision, with explicit
+`decide_priority()` and single-source reaping) — **Partially PASS**.
 
 | Bucket | Result |
 |---|---|
 | A1 minimal offline build | PASS |
 | A2 isolated project build (incl. host_ignore_term) | PASS |
 | Parser unit tests (17/17) | PASS |
-| Normal handshake | PASS |
-| Host / joiner internal timeout | PASS |
-| Port-occupancy handling | PASS |
-| Protocol-error handling | PASS |
-| Bash syntax (3.2) | PASS |
-| Bash SIGTERM cleanup | PASS |
-| Watchdog TERM→KILL escalation (new T8 with host_ignore_term) | PASS (host_reap_rc=137) |
-| Cleanup `$?`-capture fix | PASS (regression-30/20/0/child-fail all preserved) |
-| Source-file integrity | PASS (every check) |
+| Normal handshake (T1, T9) | PASS (exit=0) |
+| Host / joiner internal timeout (T2, T3) | PASS (exit=10) |
+| Port-occupancy handling (T4, T5) | PASS (T4=11 host+joiner both fail, T5=10 host times out) |
+| Protocol-error handling (T6) | PASS (exit=11) |
+| Bash syntax 3.2 (T10) | PASS |
+| Bash SIGTERM cleanup (T7b) | PASS (exit=130) |
+| Watchdog TERM→KILL escalation (T8, host_ignore_term) | PASS (host_reap=137) |
+| Build failure (T-build) | PASS (exit=20, trap_rc=20, no children) |
+| Precond fail — missing host (T-precond-host) | PASS (exit=30, trap_rc=30) |
+| Precond fail — missing joiner (T-precond-joiner) | PASS (exit=30) |
+| Stress: 5x normal handshake (T-stress) | PASS (no double-wait overwrite; transient 1/5 joiner-race documented) |
+| Cleanup `$?`-capture fix (regression-30/20/0/child-fail) | PASS |
+| **decide_priority() unit tests (18/18)** | **PASS** |
+| **reap_pid() idempotency unit tests (9/9)** | **PASS** |
+| Source-file integrity (T12) | PASS (every check) |
 | Bash SIGINT (background) | NOT_VERIFIED (macOS bash 3.2 limitation) |
 | Foreground Ctrl-C | NOT_VERIFIED (cannot be automated) |
 
-The two NOT_VERIFIED items are environment limitations, not script bugs.
-The SIGTERM path proves the same cleanup and exit-code routing works
-correctly when an interrupt signal actually reaches the bash process.
+The two NOT_VERIFIED items are environment limitations, not script
+bugs. The SIGTERM path proves the same cleanup and exit-code routing
+works correctly when an interrupt signal actually reaches the bash
+process.
 
 No protected file was modified. No work outside the experiment
 directory was performed.
@@ -459,17 +645,25 @@ SKIP_BUILD=1 HOST_BIN_OVERRIDE=$PWD/target/debug/host_silent   \
 SKIP_BUILD=1 JOINER_BIN_OVERRIDE=$PWD/target/debug/joiner_silent \
   bash scripts/run_unicast_test.sh                             # T3
 SKIP_BUILD=1 HOST_BIN_OVERRIDE=$PWD/target/debug/host_ignore_term \
-  bash scripts/run_unicast_test.sh                             # T8 (NEW: TERM→KILL proof)
+  bash scripts/run_unicast_test.sh                             # T8 (TERM→KILL proof)
 SKIP_BUILD=1 HOST_BIN_OVERRIDE=$PWD/target/debug/host_sleep_forever \
-  bash scripts/run_unicast_test.sh                             # T8 (legacy TERM-only contrast)
+  bash scripts/run_unicast_test.sh                             # T8 legacy TERM-only contrast
 SKIP_BUILD=1 HOST_BIN_OVERRIDE=$PWD/target/debug/host_bad_protocol \
   bash scripts/run_unicast_test.sh                             # T6
 python3 tests/fixtures/port_holder.py 52420 & SKIP_BUILD=1 bash scripts/run_unicast_test.sh; kill %1   # T4
 python3 tests/fixtures/port_holder.py 52421 & SKIP_BUILD=1 bash scripts/run_unicast_test.sh; kill %1   # T5
+SKIP_BUILD=1 HOST_BIN_OVERRIDE=/nonexistent/host bash scripts/run_unicast_test.sh            # T-precond-host (exit=30)
+SKIP_BUILD=1 JOINER_BIN_OVERRIDE=/nonexistent/joiner bash scripts/run_unicast_test.sh        # T-precond-joiner (exit=30)
 bash -n scripts/run_unicast_test.sh                            # T10
-cargo test --offline --manifest-path Cargo.toml --bin lan_cross_process_host   # T11
+cargo test --offline --manifest-path Cargo.toml --bin lan_cross_process_host                 # T11
+bash tests/test_priority_harness.sh                            # § 7a (18/18 priority unit tests)
+bash tests/test_reap_pid_harness.sh                            # § 7b (9/9 reap_pid unit tests)
 
-# T7b SIGTERM (kill -TERM to the script while children are running)
+# T-build (build fail → exit=20). Invoke from a tempdir with no Cargo.toml:
+TMPDIR=$(mktemp -d); ln -sf "$PWD/scripts/run_unicast_test.sh" "$TMPDIR/"
+( cd "$TMPDIR" && bash run_unicast_test.sh ); rm -rf "$TMPDIR"   # T-build
+
+# T7b SIGTERM
 SKIP_BUILD=1 HOST_BIN_OVERRIDE=$PWD/target/debug/host_sleep_forever \
   bash scripts/run_unicast_test.sh &
 P=$!

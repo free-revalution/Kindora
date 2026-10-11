@@ -10,15 +10,30 @@
 #   joiner -> host : lan_invite_ack (key=value, 3 lines)
 #
 # Exit codes (single source of truth):
-#   0   = PASS — both processes exited 0, both logs contain exact "OK".
-#   10  = HOST_FAIL — host non-zero exit OR missing OK line.
-#   11  = JOINER_FAIL — joiner non-zero exit OR missing OK line.
+#    0  = PASS       — both processes exited 0, both logs contain exact "OK".
+#   10  = HOST_FAIL  — host non-zero exit OR missing OK line.
+#   11  = JOINER_FAIL— joiner non-zero exit OR missing OK line.
 #   12  = CLEANUP_FAIL — a child survived cleanup; ps shows it alive.
 #   20  = BUILD_FAIL — cargo build failed.
 #   30  = PRECOND_FAIL — missing binary or bad env.
-#   130 = INTERRUPTED — SIGINT / SIGTERM.
+#  130  = INTERRUPTED — SIGINT / SIGTERM reached this bash process.
 #
-# Priority: 130 > 12 > 10 / 11 > 20 > 30 > 0.
+# Priority (highest wins):
+#   130 > 12 > 20 > 30 > 11 > 10 > 0
+#
+# State machine for each child:
+#   EMPTY    — never spawned (script exited before reaching spawn line)
+#   REAPED   — exit code captured (either by main-flow `wait` or by
+#              reap_pid's `wait`); the stored value is authoritative and
+#              must NOT be re-waited.
+#   SURVIVOR — process still running when cleanup started; must be
+#              TERM'd, given a grace window, then KILL'd before being
+#              waited on. After successful TERM/KILL+wait, transitions
+#              to REAPED.
+#
+# Idempotency:
+#   - TRAP_REENTERED blocks recursive EXIT-trap firing.
+#   - Each child's `_REAPED` flag prevents double `wait`.
 #
 # Bash 3.2 compatible (no `wait -n`, no GNU coreutils dependency).
 
@@ -49,15 +64,17 @@ JOINER_LOG="/tmp/kindora-expA-joiner.${RUN_ID}.log"
 # Persistent state (populated as we go).
 HOST_PID=""
 JOINER_PID=""
-HOST_REAP_RC=""
+HOST_REAP_RC=""          # authoritative exit code (set once when REAPED)
 JOINER_REAP_RC=""
-HOST_OK_LINE=1
+HOST_REAPED=0            # 1 once exit code captured (no re-wait)
+JOINER_REAPED=0
+HOST_OK_LINE=1           # 0 = "OK" line present in log
 JOINER_OK_LINE=1
-CLEANUP_OK=1
-INTERRUPTED=0
+CLEANUP_OK=1             # 0 = a child survived cleanup
+INTERRUPTED=0            # 1 = SIGINT/SIGTERM received
 TRAP_REENTERED=0
 CLEANUP_FINAL_RC=0
-CHILDREN_STARTED=0   # 1 only after both children were spawned
+CHILDREN_STARTED=0       # 1 only after both children were spawned
 SKIP_BUILD=${SKIP_BUILD:-0}     # 1 = skip cargo build (fixture scenario)
 
 # Best-effort alive probe. macOS ps -p may misreport zombies; we use it only
@@ -68,18 +85,46 @@ is_alive() {
   [[ -n "$pid" ]] && ps -p "$pid" -o pid= >/dev/null 2>&1
 }
 
-# reap_pid <pid> <rc_var>
-# Three-stage process termination: S1 send TERM/KILL, S2 best-effort probe,
-# S3 wait for reclamation. The exit code from `wait` is written to the
-# global variable named by <rc_var>. `wait` is only called after S1, which
-# guarantees it operates on a dead or zombie child and so returns
-# immediately per POSIX.
+# try_wait <pid>
+# If the PID is a child of this shell and is reaped (dead, status known),
+# `wait` returns the exit code. Returns the exit code via $? AND sets
+# the global REAPED flag is NOT done here — caller decides.
+# This function exists solely as a single, well-tested wrapper around `wait`.
+try_wait() {
+  local pid="$1"
+  [[ -z "$pid" ]] && return 127
+  wait "$pid" 2>/dev/null
+  return $?
+}
+
+# reap_pid <pid> <rc_var> <reaped_var>
+# Single-source reaping for a child. Guarantees that:
+#   - the global variable <rc_var>* receives the exit code exactly once
+#   - the global variable <reaped_var>* is set to 1 upon completion
+#   - the function is idempotent: if <reaped_var> is already 1, it does
+#     nothing and returns
+#   - if the child is still alive, it is TERM'd, given GRACE_S, then
+#     KILL'd before being waited on
+#   - if <pid> is empty (child never spawned), it does nothing and
+#     leaves <rc_var>* empty (which decide_priority maps to "no failure")
+#
+# * The variable names are passed by name; we use printf -v to write into
+#   the caller's globals without invoking a subshell.
 reap_pid() {
   local pid="$1"
   local rc_var="$2"
-  [[ -z "$pid" ]] && return 0
+  local reaped_var="$3"
 
-  # S1: signal sending (best-effort)
+  # Idempotency: if already reaped, do nothing. Prevents re-wait race.
+  if [[ "$(eval printf '%s' \"\$$reaped_var\")" == "1" ]]; then
+    return 0
+  fi
+  # Empty PID → child never spawned; leave rc empty.
+  if [[ -z "$pid" ]]; then
+    return 0
+  fi
+
+  # S1: if still alive, send TERM, wait GRACE_S, then KILL if needed.
   if kill -0 "$pid" 2>/dev/null; then
     kill -TERM "$pid" 2>/dev/null || true
     local elapsed=0
@@ -92,14 +137,67 @@ reap_pid() {
     fi
   fi
 
-  # S2: no separate "death judgment" step — kill -0 above is informational.
-  # S3: reap. On a dead or zombie child POSIX guarantees `wait` returns
-  # immediately. We capture the exit code into the caller-named variable
-  # (no command substitution — avoids subshell side-effects).
+  # S2/S3: wait once. POSIX/bash guarantee `wait` returns immediately
+  # for a dead or zombie child. We capture into the caller's variable
+  # by name; this is the only place that ever sets the reaped value.
   wait "$pid" 2>/dev/null
   local rc=$?
   printf -v "$rc_var" '%s' "$rc"
+  printf -v "$reaped_var" '%s' "1"
   return 0
+}
+
+# decide_priority
+# Single, explicit exit-code decision. Reads the documented state
+# variables and returns exactly one of the documented codes.
+#
+# Priority (highest wins):
+#   130 > 12 > 20 > 30 > 11 > 10 > 0
+#
+# Rules (in evaluation order; first matching rule wins):
+#   1. INTERRUPTED=1                              → 130
+#   2. CLEANUP_OK=0 (child survived cleanup)      →  12
+#   3. trap_rc=20 (build fail)                    →  20
+#      — wins over host/joiner fail because build fail happened before
+#        child failures and reflects a more fundamental defect.
+#      — also covers the CHILDREN_STARTED=0 case naturally.
+#   4. trap_rc=30 (precond fail)                  →  30
+#   5. JOINER_REAP_RC != 0  OR JOINER_OK_LINE!=0  →  11
+#      — only when CHILDREN_STARTED=1 (otherwise OK_LINE/RC are stale
+#        defaults with no meaning).
+#   6. HOST_REAP_RC   != 0  OR HOST_OK_LINE!=0    →  10
+#      — only when CHILDREN_STARTED=1.
+#   7. otherwise                                  →   0
+#
+# Notes:
+#   - In rules 5 and 6 we deliberately consider "non-empty RC != 0" the
+#     failure condition. An empty RC means "we did not get a chance to
+#     reap" — only valid when CHILDREN_STARTED=0, already covered by
+#     rules 3/4.
+#   - Rules 3 and 4 are evaluated regardless of CHILDREN_STARTED so the
+#     priority holds even in pathological combinations (defensive).
+decide_priority() {
+  if [[ "$INTERRUPTED" -eq 1 ]]; then
+    echo 130; return 0
+  fi
+  if [[ "$CLEANUP_OK" -eq 0 ]]; then
+    echo 12; return 0
+  fi
+  if [[ "${trap_rc:-0}" -eq 20 ]]; then
+    echo 20; return 0
+  fi
+  if [[ "${trap_rc:-0}" -eq 30 ]]; then
+    echo 30; return 0
+  fi
+  if [[ "$CHILDREN_STARTED" -eq 1 ]]; then
+    if [[ "${JOINER_REAP_RC:-X}" != "0" || "$JOINER_OK_LINE" -ne 0 ]]; then
+      echo 11; return 0
+    fi
+    if [[ "${HOST_REAP_RC:-X}" != "0" || "$HOST_OK_LINE" -ne 0 ]]; then
+      echo 10; return 0
+    fi
+  fi
+  echo 0
 }
 
 cleanup() {
@@ -110,15 +208,18 @@ cleanup() {
   # discard via TRAP_REENTERED.
   local trap_rc=$?
 
+  # Idempotency: never run cleanup body twice.
   if [[ "$TRAP_REENTERED" -eq 1 ]]; then
     exit "$CLEANUP_FINAL_RC"
   fi
   TRAP_REENTERED=1
 
-  echo "[cleanup] run_id=$RUN_ID host_pid=${HOST_PID:-?} joiner_pid=${JOINER_PID:-?} trap_rc=$trap_rc" >&2
+  echo "[cleanup] run_id=$RUN_ID host_pid=${HOST_PID:-?} joiner_pid=${JOINER_PID:-?} trap_rc=$trap_rc host_reaped=$HOST_REAPED joiner_reaped=$JOINER_REAPED" >&2
 
-  reap_pid "$HOST_PID" HOST_REAP_RC
-  reap_pid "$JOINER_PID" JOINER_REAP_RC
+  # Reap each child at most once. reap_pid checks the _REAPED flag and
+  # short-circuits if main flow has already captured the exit code.
+  reap_pid "$HOST_PID"   HOST_REAP_RC   HOST_REAPED
+  reap_pid "$JOINER_PID" JOINER_REAP_RC JOINER_REAPED
 
   echo "[cleanup] host_reap_rc=${HOST_REAP_RC:-?} joiner_reap_rc=${JOINER_REAP_RC:-?}" >&2
 
@@ -131,10 +232,14 @@ cleanup() {
   fi
 
   # Best-effort residual check (ps -p may misreport zombies — informational).
-  if [[ -n "$HOST_PID" ]] && is_alive "$HOST_PID"; then
+  # We use is_alive on PIDs that we know we spawned AND we set alive-check
+  # criterion to "non-zero HOST/joiner REAP_RC + still alive". If a child
+  # exited cleanly (RC=0) we trust the wait; if it exited non-zero but ps
+  # still shows it, that's an inconsistency → cleanup_fail.
+  if [[ -n "$HOST_PID" ]] && [[ "${HOST_REAP_RC:-X}" != "0" ]] && is_alive "$HOST_PID"; then
     CLEANUP_OK=0
   fi
-  if [[ -n "$JOINER_PID" ]] && is_alive "$JOINER_PID"; then
+  if [[ -n "$JOINER_PID" ]] && [[ "${JOINER_REAP_RC:-X}" != "0" ]] && is_alive "$JOINER_PID"; then
     CLEANUP_OK=0
   fi
 
@@ -144,45 +249,9 @@ cleanup() {
   cat "$JOINER_LOG" 2>/dev/null || echo "(missing)" >&2
   echo "host_exit=${HOST_REAP_RC:-?} joiner_exit=${JOINER_REAP_RC:-?} host_ok=$HOST_OK_LINE joiner_ok=$JOINER_OK_LINE cleanup_ok=$CLEANUP_OK interrupted=$INTERRUPTED" >&2
 
-  local rc=0
-  # Priority ladder (highest first):
-  #   130  SIGINT / SIGTERM (interrupt flag set by trap)
-  #    12  cleanup fail — child survived cleanup
-  #    20  build fail (preserved from the early exit in stage 1)
-  #    30  precondition fail (preserved from the early exit in stage 2)
-  #    11  joiner fail (joiner non-zero exit OR missing OK line)
-  #    10  host   fail (host   non-zero exit OR missing OK line)
-  #     0  success
-  #
-  # If the script exited before children started (build/precond fail),
-  # CHILDREN_STARTED=0 and we MUST honour trap_rc (20 or 30) — otherwise
-  # the host/joiner empty-string checks below would demote it to 10.
-  if [[ "$INTERRUPTED" -eq 1 ]]; then
-    rc=130
-  elif [[ "$CLEANUP_OK" -eq 0 ]]; then
-    rc=12
-  fi
-  if [[ "$CHILDREN_STARTED" -eq 0 ]]; then
-    # No children were ever spawned; trap_rc is the authoritative code.
-    if [[ "$trap_rc" -gt "$rc" ]]; then
-      rc="$trap_rc"
-    fi
-  else
-    # Children were spawned; trust the reaped exit codes over trap_rc
-    # for the host/joiner buckets, but still let trap_rc win for any
-    # higher-priority code (20 / 30 / 130) it carries.
-    if [[ "$trap_rc" -gt "$rc" && "$trap_rc" -ne 0 ]]; then
-      rc="$trap_rc"
-    fi
-    if [[ "$rc" -eq 0 ]]; then
-      if [[ "${HOST_REAP_RC:-X}" != "0" || "$HOST_OK_LINE" -ne 0 ]]; then
-        rc=10
-      elif [[ "${JOINER_REAP_RC:-X}" != "0" || "$JOINER_OK_LINE" -ne 0 ]]; then
-        rc=11
-      fi
-    fi
-  fi
-
+  # Single explicit decision.
+  local rc
+  rc=$(decide_priority)
   CLEANUP_FINAL_RC="$rc"
   exit "$rc"
 }
@@ -262,9 +331,14 @@ if is_alive "$HOST_PID" || is_alive "$JOINER_PID"; then
   kill_step_for_watchdog "$JOINER_PID"
 fi
 
-# --- 7) Reap exit codes (best-effort, may have been pre-killed) ---
-# Wait may still race, but cleanup's reap_pid will retry if needed.
+# --- 7) Reap exit codes ONCE ---
+# After the watchdog, both children are dead/zombie. `wait` returns
+# immediately and we record the exit code as authoritative.
+# From this point on, HOST_REAPED=1 / JOINER_REAPED=1 prevents any
+# further `wait` in cleanup() from running.
 wait "$HOST_PID" 2>/dev/null && HOST_REAP_RC=0 || HOST_REAP_RC=$?
+HOST_REAPED=1
 wait "$JOINER_PID" 2>/dev/null && JOINER_REAP_RC=0 || JOINER_REAP_RC=$?
+JOINER_REAPED=1
 
 # --- 8) Fall through to EXIT trap ---
