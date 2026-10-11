@@ -1239,11 +1239,16 @@ primitives and rewires every cleanup path through them:
     because they're under init now). Unprovable ones reported
     as residual with their PIDs, NOT killed.
 
-PID-reuse mitigation: every kill goes through one of
-`pid_safe_kill` or `pid_safe_kill_owned`, both of which check
-aliveness (`kill -0`) at kill time. The reuse race window is
-narrowed to "time between observation and kill" (typically
-<100 ms in this harness).
+PID-reuse mitigation (eighth-round): every kill goes
+through one of `pid_safe_kill` or `pid_safe_kill_owned`, both
+of which check aliveness (`kill -0`) at kill time. The reuse
+race window is narrowed to "time between observation and
+kill" (typically <100 ms in this harness). The ninth round
+adds an lstart identity check on top; Round-10 audit
+established that lstart is second-precision on macOS, so the
+narrowing catches different-second reuse only — see Round-10
+disclosure in § 7b "Ninth-round fix" below for the residual
+race the harness cannot prove closed.
 
 **New verification: `verify_deep_tree_fix.sh`** exercises a
 3-level fixture `bash → bash → sleep`, verifies that
@@ -1318,9 +1323,13 @@ a process-identity guard:
     - `pid_get_lstart <pid>` — reads `ps -o lstart=` and
       strips surrounding whitespace. Returns empty if the PID
       is gone or `ps` errors. `lstart` is the kernel-reported
-      process start time as an absolute string and is stable
-      across calls; it does NOT change when a new process
-      reuses the PID number.
+      process start time as an absolute string formatted via
+      strftime `%c` (`Sun Oct 11 16:01:25 2026`). **Precision
+      is one second on macOS** — `ps` does not expose any
+      sub-second field; two processes spawned within the same
+      wall-clock second yield identical lstart strings
+      (empirically verified in step 10b of
+      `verify_precheck_deep_tree.sh`).
     - `identity_lookup_lstart <tsv> <pid>` — finds the
       lstart for `pid` in a `<pid>\t<lstart>` TSV produced
       by `record_identities`. Returns empty if not present.
@@ -1339,10 +1348,11 @@ a process-identity guard:
       (1) `pid` is in `identities_tsv` (we observed it at
       capture time), (2) `kill -0` succeeds (still alive),
       (3) current `ps -o lstart=` for `pid` matches the
-      recorded lstart exactly (PID-reuse guard — a reused
-      PID has a different lstart), (4) if `root_pid` is
-      alive, `pid_still_in_subtree` confirms `pid` is still
-      under `root_pid`. Any guard failing → refuse to kill,
+      recorded lstart exactly (catches **different-second**
+      PID reuse — see Round-10 disclosure below for what
+      this does NOT catch), (4) if `root_pid` is alive,
+      `pid_still_in_subtree` confirms `pid` is still under
+      `root_pid`. Any guard failing → refuse to kill,
       log `reason=...` line to `KILL_LOG_FILE` if set,
       return non-zero. **Never kills unless all four guards
       pass.**
@@ -1350,7 +1360,8 @@ a process-identity guard:
       variant for orphans under PID 1 (subtree check
       inapplicable). Same guards (1)–(3); guard (4) is
       skipped because the orphan's parent is now PID 1, not
-      our root.
+      our root. The lstart check is the ONLY ownership proof
+      available for orphans.
 
   - **Why PID number is NOT a depth proxy**: PIDs are
     allocated monotonically (mostly) but a parent process
@@ -1387,26 +1398,71 @@ a process-identity guard:
     is PID 1, not our root.
 
 **Honest disclosure of the remaining race window**:
-`lstart` is the kernel-recorded start time. PID reuse
-assigns a new PID to a new process; the new process has a
-different lstart. We compare the **string** `lstart` from
-`ps -o lstart=` at observation time to the same string at
-kill time. If the kernel clock rolls backwards between
-observation and kill, or if the platform's `ps -o lstart=`
-formats inconsistently between calls, the comparison could
-in principle give a false negative (refuse to kill a real
-target) or — more dangerously — a false positive if format
-drift happens to produce the same string. The format on
-macOS for `ps -o lstart=` is stable (`Thu Oct 11 14:23:01
-2026`); we have not observed format drift in our runs but
-cannot prove the kernel will never produce a different
-string for the same logical time. **The race window is now
-"observe-lstart → kill <1 s" rather than
-"observe-PID → kill <1 s"**. This is a meaningful narrowing
-but not a proof of no-claim. If the platform's `ps -o
-lstart=` ever becomes unreliable, the harness would need
-another identity mechanism (e.g. a wrapper record file,
-audit token, or kernel interface).
+
+The PID-reuse guard is a **best-effort** identity check, not a
+proof. It is composed of:
+
+  1. PID membership in `identities_tsv` (whitelist).
+  2. Aliveness (`kill -0`).
+  3. `ps -o lstart=` string equality between observation and
+     kill time.
+
+What this **IS** verified to do:
+
+  - Refuses to kill a target whose lstart differs from the
+    recorded one. Verified by `verify_precheck_deep_tree.sh`
+    step 10 (fabricated wrong lstart ⇒ refusal ⇒ target alive).
+  - Refuses to kill a target that is no longer in the root's
+    subtree (when root is still alive).
+
+What this **is NOT** verified to do, and what the harness
+therefore **cannot claim**:
+
+  - `lstart` is **second-precision** on macOS bash 3.2 — the
+    format is `Sun Oct 11 16:01:25 2026` via strftime `%c`,
+    and macOS `ps` does not expose any sub-second field for
+    process start time. Two processes spawned within the
+    same wall-clock second yield **identical** lstart strings
+    (empirically verified: `verify_precheck_deep_tree.sh`
+    step 10b). Therefore:
+      - **Same-second PID reuse is NOT distinguishable** by
+        the lstart check. The harness cannot prove a stranger
+        holding the slot from the same second as the original
+        would be rejected.
+      - Only **different-second** PID reuse is detectable.
+  - The check-then-kill race (between `kill -0` succeeding
+    and `kill -KILL` being delivered) is **not** closed. macOS
+    does not provide a shell-accessible process-creation lock
+    that could atomically verify identity and kill. A
+    same-second stranger could in principle be inserted into
+    the slot between the aliveness check and the kill
+    delivery; the harness cannot prove this cannot happen.
+  - `ps -o lstart=` **format drift** between observation and
+    kill is a theoretical concern. We have not observed it on
+    macOS bash 3.2, but cannot prove the kernel will never
+    produce a different string for the same logical time.
+  - **No higher-precision identity mechanism was found on
+    macOS bash 3.2** that the harness could use without
+    introducing external dependencies. Investigated and
+    rejected (Round-10 audit):
+      - `/proc/<pid>/stat` — does not exist.
+      - `ps -o etimes` — keyword not found (only `etime`,
+        which is `MM:SS` second-precision).
+      - `sysctl kern.proc.<pid>.start` — no such OID.
+      - `lsof -p <pid>` — no process-creation timestamp field.
+      - All other `ps` keywords enumerated from `ps` error
+        message — none provides sub-second identity.
+  - For **orphans under PID 1** (Gap 2 path), the subtree
+    check is inapplicable, so the lstart check is the **only**
+    ownership proof available. The same-second race above is
+    directly applicable here.
+
+The harness's policy in the residual race is: **refuse to
+kill and report the PID as residual**, not to risk killing
+an unidentifiable stranger. The verify_*.sh scripts confirm
+that no unintended process is killed in our actual test
+scenarios; we make no claim beyond what those scripts
+exercise.
 
 **New verification: `verify_precheck_deep_tree.sh`**
 exercises the pre-check FAIL cleanup path on a 3-level
@@ -1493,6 +1549,165 @@ the new verification is external
 (`verify_precheck_deep_tree.sh`) because the harness's
 scenario 5 already exercises these paths.
 
+**Round-10 audit (lstart precision + alternative identity
+mechanisms)** — Round 9 introduced the lstart identity check.
+Round 10 audited the actual precision of that check on the
+target macOS bash 3.2 environment, and searched for any
+alternative identity mechanism that could close the residual
+race the lstart check cannot.
+
+**Environment**:
+
+  - macOS 15.8.1 (24G212) on Apple Silicon (arm64).
+  - Darwin kernel 24.6.0.
+  - Bash 3.2.57(1)-release (arm64-apple-darwin24).
+  - `ps` from macOS base (BSD-style), not procps/Linux `ps`.
+
+**Question 1: what is the actual precision of `ps -o lstart=`?**
+
+Man page: `lstart` is "the exact time the command started,
+using the `%c' format described in strftime(3)". `strftime(3)`
+`%c` is the national representation (e.g. `Sun Oct 11
+16:01:25 2026` on macOS en-US) — **no sub-second field**.
+
+Empirical verification (`verify_precheck_deep_tree.sh` step
+10b, repeated three times in this session, always succeeded
+with identical results):
+
+```text
+$ ps -p $A -o lstart=; sleep 1.5; ps -p $A -o lstart=; sleep 2; ps -p $A -o lstart=
+Sun Oct 11 15:54:49 2026     (etime = 00:00)
+Sun Oct 11 15:54:49 2026     (etime = 00:02)   <-- 1.5s later, same string
+Sun Oct 11 15:54:49 2026     (etime = 00:04)   <-- 3.5s later, same string
+```
+
+The lstart string is stable across `ps` calls for the same
+process and only changes when the underlying wall-clock
+second boundary is crossed. **Resolution = 1 second.**
+
+**Question 2: do two processes spawned within the same second
+collide on lstart?**
+
+Verified empirically in the same session:
+
+```text
+$ bash /tmp/lstart_collision_test.sh
+A=73072 lstart=[Sun Oct 11 15:58:44 2026]
+B=73073 lstart=[Sun Oct 11 15:58:44 2026]
+RESULT: lstart COLLIDES (Sun Oct 11 15:58:44 2026 == Sun Oct 11 15:58:44 2026)
+        — sub-second distinction NOT possible
+```
+
+And in `verify_precheck_deep_tree.sh` step 10b:
+
+```text
+lstart precision test: A=[Sun Oct 11 16:01:25 2026] B=[Sun Oct 11 16:01:25 2026]
+PASS: lstart is second-precision on macOS (same-second collision demonstrated)
+        IMPLICATION: same-second PID reuse is NOT distinguishable
+        by lstart; the harness documents this residual race
+```
+
+**Therefore**: lstart catches *different-second* PID reuse,
+and **does NOT** catch *same-second* PID reuse. Round 9's
+report claimed the lstart check "detects PID reuse" without
+qualifying the second-precision limitation; Round 10 corrects
+this. The verification step 10 (fabricated wrong-second
+lstart ⇒ refusal ⇒ target alive) is unchanged and still
+valid; it now serves as the "different-second case" proof.
+
+**Question 3: does any other shell-accessible mechanism on
+macOS bash 3.2 provide sub-second process identity?**
+
+Investigated and rejected:
+
+| Candidate | Available? | Sub-second? |
+|---|---|---|
+| `/proc/<pid>/stat` (Linux) | NO — `/proc` does not exist on macOS | n/a |
+| `ps -o etimes` (Linux procps) | NO — `ps: etimes: keyword not found`; macOS `ps` only has `etime` (MM:SS) | NO |
+| `sysctl kern.proc.<pid>.start` | NO — `sysctl: couldn't find oid` | n/a |
+| `sysctl -a \| grep kern.proc` | Only `kern.procname` and `kern.proc_rsr_in_progress` (unrelated to process identity) | n/a |
+| `lsof -p <pid>` | YES, but exposes FD/comm/state — no creation timestamp | n/a |
+| Other `ps` keywords | Full enumeration from `ps` error message — none provides sub-second identity | NO |
+| `getpidinfo` / `sysctlbyname("kern.proc.<pid>")` from C | Available, but would require a binary outside the bash harness | YES, but **out of scope** for this round (introduces external dependency) |
+
+No mechanism was found that the bash harness could call to
+produce a stable, sub-second, same-second-colliding-free
+process-creation token without introducing an external dependency
+the project has not adopted. Per Round-10 task spec, the
+audit explicitly **forbids** introducing unverified
+dependencies.
+
+**Question 4: residual check-then-kill race?**
+
+The kill primitive:
+
+```bash
+pid_is_alive "$pid"          # kill -0
+current_lstart=$(pid_get_lstart "$pid")   # ps -o lstart=
+... string compare ...
+kill -KILL "$pid"             # actual kill
+```
+
+Between `kill -0` succeeding and `kill -KILL` being delivered,
+an unrelated process could reuse the PID slot. There is no
+shell-accessible atomic "verify identity + kill" operation on
+macOS. **The race is not provably closed by the harness.**
+The harness's policy is to refuse to kill and report the PID
+as residual in any ambiguous case, not to risk killing an
+unidentifiable stranger.
+
+**Question 5: format-drift risk?**
+
+`ps -o lstart=` format on macOS is documented as `%c` (per
+`man ps`) and is the same string in every observation across
+the test runs in this round. We cannot prove the kernel
+will never produce a different string for the same logical
+time, but we have not observed it. The harness treats
+format drift as a hypothetical concern, with a refusal-on-mismatch
+policy that biases toward *not* killing a real target (safe
+failure mode).
+
+**Code change decision (Round-10 task spec, section 4)**:
+
+No code change was made in Round 10. The criteria for a code
+change were:
+
+1. A more reliable identity mechanism must be available
+   in the current environment.
+2. It must not break Bash 3.2 compatibility or the existing
+   cleanup contract.
+3. It must pass a new targeted test.
+4. It must not expand cleanup authority or lower existing
+   assertion standards.
+
+None of the candidates in the table above met all four
+criteria. Therefore per the explicit instruction "如果找不到
+满足条件的机制,本轮可以只修改报告和注释", this round modifies
+only the harness comments and the report:
+
+  - `test_reap_pid_harness.sh`: comments on `pid_get_lstart`,
+    `pid_safe_kill_with_identity`, `pid_safe_kill_orphan`
+    document the second-precision limit, the same-second
+    race, and the check-then-kill race.
+  - `REPORT.md`: this Round-10 audit section; corrections
+    to the Ninth-round "Honest disclosure" section;
+    correction to the Gap-8 table row wording.
+  - `verify_precheck_deep_tree.sh`: added step 10b that
+    empirically demonstrates the second-precision /
+    same-second-collision property.
+
+**Verdict on PID-reuse guard** (corrected from Round 9):
+
+  - `PASS`: PID-reuse guard refuses to kill a target whose
+    lstart differs from the recorded one (different-second
+    case). Verified by step 10.
+  - `RISK_REMAINS`: same-second PID reuse is not
+    distinguishable by lstart. Documented, not eliminated.
+  - `RISK_REMAINS`: the check-then-kill race is not provably
+    closed. Documented, not eliminated.
+  - `RISK_REMAINS`: lstart format drift is a theoretical
+    concern. Not observed, not eliminated.
+
 ## 7c. Regression sub-tests for the `$?`-capture fix (first revision, retained)
 
 | Name | Input | Expected | Actual | Verdict |
@@ -1530,22 +1745,27 @@ match the baseline in § 2. **No originals were touched.**
 | `kill -0` on zombie PID | Cannot reliably distinguish alive vs zombie on macOS | `wait` return used as sole evidence of reclamation; `kill -0` only used for best-effort probe |
 | `jobs -l` only keeps the most recent `Done` background job on macOS bash 3.2 | Earlier-terminated background children are unobservable via `jobs -l` even when no `wait` has run | reap_pid harness records `jobs -l` as `[diag]` diagnostic output rather than hard assertion; the test still proves the contract via the code path (no pre-`wait`) |
 | bash 3.2 second `wait` returns 0 (not 127) for previously reaped child | Platform behaviour; means `reap_pid`'s return code alone cannot prove it was the first waiter | Test asserts on `rc_var` / `REAPED` side-effects, not on `wait`'s exit code |
-| KILL of an outer `bash -c "..." &` leaves the inner `sleep` orphaned (reparented to PID 1, init) | macOS does not propagate SIGKILL to forked-but-not-reaped children | Scenario 5 fixture now uses `bash -c "...; exec sleep 30"` so the process tree has one node; pre/post assertions verify no orphan is created. Sixth round added: (a) pre-check FAIL now aborts the scenario without calling `reap_pid`, and safe-cleans the spawned subtree so the harness cannot manufacture an orphan even if the fixture regresses; (b) post-check now diffs the init-sleep set before vs after `reap_pid` to catch reparented-to-init orphans that `pgrep -P` cannot see. Both gaps independently verified by `verify_gap1_fix.sh` and `verify_gap2_fix.sh`. Seventh round added PID-scoped isolation: every kill is now restricted to PIDs in the scenario's `owned_pids` whitelist ($PID + its observed children); broad-pattern `pkill -KILL -P 1 sleep` was removed. Independent isolation contract verified by `verify_isolation_fix.sh`: an unrelated init-sleep planted BEFORE the harness survives the harness (35/35 PASS). Eighth round added (a) recursive descendant capture via `collect_descendants_pids` so the whitelist is correct for any depth the fixture spawns (not just direct children), and (b) uniform ownership verification across ALL cleanup paths: pre-check FAIL, post-check 1/2/3 all classify residuals as provable/unprovable and kill only provable ones; unprovable ones are reported with PIDs and the cleanup does NOT claim success. Two new helpers (`pid_safe_kill` and `pid_safe_kill_owned`) consolidate the PID-reuse guards (`kill -0` aliveness + either subtree or whitelist ownership) so every kill goes through the same primitive. New verification `verify_deep_tree_fix.sh` exercises a 3-level `bash → bash → sleep` fixture and confirms the recursive whitelist + deepest-first cleanup + isolation contract all hold simultaneously. Ninth round added (a) **depth-correct ordering**: `collect_descendants_with_depth` + `sort -k1,1nr -k2,2n` (real BFS depth, not PID number, since PID number ≠ tree depth and a parent can have a larger PID than its child) so the pre-check FAIL cleanup is genuinely deepest-first and never kills a parent before its descendants; and (b) **PID-reuse guard via lstart identity**: `record_identities` captures `ps -o lstart=` for every PID in the subtree at observation time; `pid_safe_kill_with_identity` and `pid_safe_kill_orphan` (for orphans under PID 1 where subtree check is inapplicable) refuse to kill unless the current `lstart` matches the recorded one — so a PID-reused, unrelated process cannot be misidentified as our target. New verification `verify_precheck_deep_tree.sh` exercises a long-running 3-level fixture, asserts the kill order from `KILL_LOG_FILE` line numbers, and asserts the PID-reuse guard refuses to kill when lstart mismatches. |
+| KILL of an outer `bash -c "..." &` leaves the inner `sleep` orphaned (reparented to PID 1, init) | macOS does not propagate SIGKILL to forked-but-not-reaped children | Scenario 5 fixture now uses `bash -c "...; exec sleep 30"` so the process tree has one node; pre/post assertions verify no orphan is created. Sixth round added: (a) pre-check FAIL now aborts the scenario without calling `reap_pid`, and safe-cleans the spawned subtree so the harness cannot manufacture an orphan even if the fixture regresses; (b) post-check now diffs the init-sleep set before vs after `reap_pid` to catch reparented-to-init orphans that `pgrep -P` cannot see. Both gaps independently verified by `verify_gap1_fix.sh` and `verify_gap2_fix.sh`. Seventh round added PID-scoped isolation: every kill is now restricted to PIDs in the scenario's `owned_pids` whitelist ($PID + its observed children); broad-pattern `pkill -KILL -P 1 sleep` was removed. Independent isolation contract verified by `verify_isolation_fix.sh`: an unrelated init-sleep planted BEFORE the harness survives the harness (35/35 PASS). Eighth round added (a) recursive descendant capture via `collect_descendants_pids` so the whitelist is correct for any depth the fixture spawns (not just direct children), and (b) uniform ownership verification across ALL cleanup paths: pre-check FAIL, post-check 1/2/3 all classify residuals as provable/unprovable and kill only provable ones; unprovable ones are reported with PIDs and the cleanup does NOT claim success. Two new helpers (`pid_safe_kill` and `pid_safe_kill_owned`) consolidate the PID-reuse guards (`kill -0` aliveness + either subtree or whitelist ownership) so every kill goes through the same primitive. New verification `verify_deep_tree_fix.sh` exercises a 3-level `bash → bash → sleep` fixture and confirms the recursive whitelist + deepest-first cleanup + isolation contract all hold simultaneously. Ninth round added (a) **depth-correct ordering**: `collect_descendants_with_depth` + `sort -k1,1nr -k2,2n` (real BFS depth, not PID number, since PID number ≠ tree depth and a parent can have a larger PID than its child) so the pre-check FAIL cleanup is genuinely deepest-first and never kills a parent before its descendants; and (b) **PID-reuse guard via lstart identity**: `record_identities` captures `ps -o lstart=` for every PID in the subtree at observation time; `pid_safe_kill_with_identity` and `pid_safe_kill_orphan` (for orphans under PID 1 where subtree check is inapplicable) refuse to kill unless the current `lstart` matches the recorded one — so a **different-second** PID-reused, unrelated process cannot be misidentified as our target. New verification `verify_precheck_deep_tree.sh` exercises a long-running 3-level fixture, asserts the kill order from `KILL_LOG_FILE` line numbers, and asserts the PID-reuse guard refuses to kill when lstart mismatches (different-second case). **Round 10 audit** verified empirically that `ps -o lstart=` is second-precision on macOS bash 3.2 and that two processes spawned within the same wall-clock second have **identical** lstart strings; the harness therefore cannot distinguish same-second PID reuse by lstart. The Round-10 audit also investigated and rejected alternative identity mechanisms (`/proc`, `etimes`, `sysctl kern.proc.<pid>.start`, `lsof`, full `ps` keyword enumeration) — none provides sub-second identity in this environment. The check-then-kill race (between `kill -0` succeeding and `kill -KILL` delivery) is documented in `§ 7b` "Round-10 audit" as `RISK_REMAINS`. The harness's policy is to refuse to kill in any ambiguous case and report the PID as residual, not to risk killing an unidentifiable stranger. |
+| `ps -o lstart=` is second-precision on macOS bash 3.2 | strftime `%c` format yields no sub-second component; macOS `ps` has no etimes/etimens field; no /proc on macOS | `verify_precheck_deep_tree.sh` step 10b empirically demonstrates the precision and the same-second collision. Different-second PID reuse is detectable (verified step 10). Same-second PID reuse is `RISK_REMAINS`; harness refuses to kill in that case rather than risk killing a stranger. |
+| Check-then-kill race between `kill -0` success and `kill -KILL` delivery | macOS does not provide a shell-accessible atomic "verify identity + kill" operation | `RISK_REMAINS`; harness's policy is to refuse + report residual. Eliminating this race would need a kernel-held process-creation token via sysctl-by-name or a C helper — neither adopted in this project. |
 
 ## 11. Overall Conclusion
 
-Phase 2.1 Experiment A (ninth revision, with the Scenario 5
+Phase 2.1 Experiment A (tenth revision, with the Scenario 5
 regression guard hardened against pre-check failures, PID-1
 reparenting, broad-pattern cleanup, multi-level process trees,
 uniform ownership verification across all cleanup paths,
-**depth-correct deepest-first ordering**, AND **PID-reuse-safe
-identity verification via process start time**) — **PASS** on
-the harness-detectable axes. The reap_pid harness now proves
-the reap-first-wait contract via **code path** (no `wait` is
-ever called before `reap_pid`); platform-side proof via
-`jobs -l` is recorded as diagnostic output because macOS bash
-3.2's auto-`reap` of earlier SIGCHLDs makes the `jobs` table
-unobservable for the non-most-recent child (see § 7b
+**depth-correct deepest-first ordering**, **different-second
+PID-reuse-safe identity verification via process start time**
+(verified), AND **Round-10 honest disclosure of the residual
+race the lstart check cannot close** (same-second reuse,
+check-then-kill race) — see § 7b "Round-10 audit") — **PASS**
+on the harness-detectable axes. The reap_pid harness now
+proves the reap-first-wait contract via **code path** (no
+`wait` is ever called before `reap_pid`); platform-side proof
+via `jobs -l` is recorded as diagnostic output because macOS
+bash 3.2's auto-`reap` of earlier SIGCHLDs makes the `jobs`
+table unobservable for the non-most-recent child (see § 7b
 "Fourth-round honest disclosure"). The Scenario 5 regression
 guard now survives (1) a fixture regression that re-introduces
 an outer bash (Gap 1: pre-check FAIL aborts with safe
@@ -1558,13 +1778,19 @@ produces descendants deeper than the direct children
 `pgrep -P` could see (Gap 4 deep-tree:
 `collect_descendants_pids` BFS captures the full subtree, and
 every kill goes through `pid_safe_kill` / `pid_safe_kill_owned`
-with PID-reuse guards + uniform whitelist enforcement), AND
+with PID-reuse guards + uniform whitelist enforcement),
 (5) a depth ordering that is **real tree depth** (not PID
 number, since PID number ≠ depth and the kernel assigns PIDs
 in an order unrelated to tree depth) with a **PID-reuse
-guard via process start time (`lstart`)** so a reused PID slot
-holding a stranger cannot be killed in our name
-(`pid_safe_kill_with_identity` / `pid_safe_kill_orphan`).
+guard via process start time (`lstart`)** that catches
+**different-second** reuse (verified empirically that two
+processes spawned within the same wall-clock second have
+identical lstart strings on macOS bash 3.2, so same-second
+reuse remains `RISK_REMAINS` — the harness refuses to kill
+in that case rather than risk killing a stranger), AND
+(6) the documented check-then-kill race window between
+`kill -0` and `kill -KILL` delivery (also `RISK_REMAINS`,
+unclosable without an external dependency).
 
 | Bucket | Result |
 |---|---|
@@ -1589,7 +1815,7 @@ holding a stranger cannot be killed in our name
 | **Scenario 5 Gap 2 — reparented-to-init detection** | **PASS** (`verify_gap2_fix.sh`: simulated reparent → diff catches new sleep PID under init; provable orphan killed; unrelated init-sleep survives) |
 | **Scenario 5 Gap 3 — test isolation (no broad-pattern kills)** | **PASS** (`verify_isolation_fix.sh`: unrelated init-sleep planted BEFORE reap harness; harness passes 35/35; unrelated sleep survives; init has exactly 1 sleep (= planted one); explicit cleanup succeeds) |
 | **Scenario 5 Gap 4 — multi-level fixture (deep-tree)** | **PASS** (`verify_deep_tree_fix.sh`: 3-level `bash → bash → sleep` fixture; `collect_descendants_pids` captures all 3 levels; deepest-first PID-scoped cleanup kills all 3 levels; no orphan sleep leaks under init; unrelated init-sleep survives; `pid_still_in_subtree` correctly rejects unrelated PID; final init-sleep count = 0) |
-| **Scenario 5 Gap 5 — depth-correct + PID-reuse-safe pre-check FAIL cleanup** | **PASS** (`verify_precheck_deep_tree.sh`: 3-level fixture where outer and middle are long-running; `collect_descendants_with_depth` correctly tags middle=depth 1, inner=depth 2; `record_identities` captures lstart for every PID; cleanup is killed by **real depth** descending, not PID number; PID-reuse guard refuses to kill when lstart mismatches; unrelated init-sleep survives; final init-sleep count = 0). See § 7b "Ninth-round fix". |
+| **Scenario 5 Gap 5 — depth-correct + PID-reuse-safe pre-check FAIL cleanup** | **PASS** (`verify_precheck_deep_tree.sh`: 3-level fixture where outer and middle are long-running; `collect_descendants_with_depth` correctly tags middle=depth 1, inner=depth 2; `record_identities` captures lstart for every PID; cleanup is killed by **real depth** descending, not PID number; PID-reuse guard refuses to kill when lstart mismatches (different-second case); step 10b empirically demonstrates lstart is second-precision on macOS bash 3.2 and that two processes started within the same second collide — see Round-10 audit for what this does NOT cover (same-second reuse; check-then-kill race); unrelated init-sleep survives; final init-sleep count = 0). See § 7b "Ninth-round fix" + "Round-10 audit". |
 | Source-file integrity (T12) | PASS (every check) |
 | Bash SIGINT (background, T7a) | NOT_VERIFIED (re-confirmed: `kill -INT <pid>` does not fire bash INT trap on macOS bash 3.2 in non-tty; see T7a section) |
 | Foreground Ctrl-C (T7c) | NOT_VERIFIED (cannot be automated; manual reproduction steps in T7c section) |

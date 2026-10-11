@@ -253,6 +253,23 @@ pid_still_in_subtree() {
 #   Format on macOS bash 3.2:
 #     "Sun Oct 11 15:24:37 2026"
 #   No tabs. Safe to use TAB as the field separator in TSVs.
+#
+#   **Precision is ONE SECOND on macOS.** `ps -o lstart=` is
+#   formatted via strftime `%c` (man ps); the macOS `ps` does
+#   not expose any sub-second field for process start time.
+#   Two processes spawned within the same wall-clock second
+#   yield identical lstart strings (empirically verified in
+#   `verify_precheck_deep_tree.sh` step 10b, see also Round-10
+#   section of REPORT.md). Implications:
+#     - Different-second PID reuse IS detectable: the stranger
+#       has a different lstart string from what we recorded.
+#     - Same-second PID reuse is NOT distinguishable by lstart.
+#     - The "check then kill" race (between kill -0 and the
+#       actual kill -KILL delivery) remains unprovably closed.
+#   On macOS bash 3.2 no shell-accessible sub-second identity
+#   exists (no /proc, no etimes field, no sysctl process-
+#   creation timestamp). lstart is a best-effort identity check
+#   and the harness documents this remaining race.
 pid_get_lstart() {
   local pid="$1"
   [[ -z "$pid" ]] && return 1
@@ -355,14 +372,36 @@ record_identities() {
 #     1. PID appears in identities_tsv (we observed it at T0).
 #     2. PID is alive (kill -0).
 #     3. PID's current lstart matches the lstart we recorded.
-#        (Detects PID reuse — if the PID was reused by an
-#        unrelated process, lstart differs and we refuse.)
+#        This catches "different-second" PID reuse — a stranger
+#        holding the slot after the original died at a different
+#        wall-clock second has a different lstart string.
+#        **It does NOT catch "same-second" reuse** because macOS
+#        `ps -o lstart=` is second-precision; see the precision
+#        note in `pid_get_lstart` above.
 #     4. If root_pid is still alive: PID is still in root's
 #        subtree (parent chain leads to root). If root is dead,
 #        we skip the subtree check (root's death may have
 #        legitimately reparented the descendant, in which case
 #        pid_safe_kill_orphan is the right primitive, not this
 #        one). The caller decides whether to fall back.
+#
+#   Honest residual risks:
+#     - Same-second PID reuse (a different process started within
+#       the same wall-clock second as the original) is
+#       indistinguishable by lstart.
+#     - Check-then-kill race: between `kill -0` succeeding and
+#       `kill -KILL` being delivered, an unrelated process could
+#       reuse the PID slot and be killed in our name. We do NOT
+#       hold a process-creation lock between the two; macOS does
+#       not expose one through shell-accessible interfaces.
+#     - lstart format drift: if `ps -o lstart=` ever formats
+#       the same logical time as different strings between calls,
+#       the comparison would falsely reject a real target
+#       (safer failure mode) or — in the worst case — falsely
+#       accept a same-format-but-different-process. We have
+#       not observed format drift on macOS bash 3.2 but cannot
+#       prove the kernel will never produce a different string
+#       for the same logical time.
 #
 #   The optional [depth] arg, when non-empty, is recorded into
 #   the kill log (if $KILL_LOG_FILE is set) so verifiers can
@@ -430,7 +469,18 @@ pid_safe_kill_with_identity() {
 #     2. PID is alive (kill -0).
 #     3. PID's current lstart matches the lstart we recorded.
 #        This is the ONLY proof of identity we have for orphans;
-#        without it, a reused PID would be killed.
+#        without it, a different-second PID reuse would be killed
+#        in our name. Same-second reuse is NOT distinguishable
+#        because lstart is second-precision on macOS — see the
+#        precision note in `pid_get_lstart` above.
+#
+#   Same check-then-kill race and format-drift caveats as
+#   `pid_safe_kill_with_identity` apply here. Because the
+#   orphan's parent is now init, there is no subtree fallback
+#   at all — the lstart check is the only defense. If the
+#   harness ever encounters an orphan whose lstart format
+#   drift would mask a reuse, the orphan must be reported as
+#   residual and NOT killed.
 #
 #   This primitive REPLACES the eighth-round pid_safe_kill_owned
 #   for scenario 5's post-check 3 (Gap 2) cleanup path.
