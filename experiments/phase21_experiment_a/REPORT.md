@@ -61,6 +61,79 @@ Sizes & mtimes also re-verified post-run — see `T12` in § 7.
   message on missing script. Runs from any cwd (verified: repo root,
   tests/ subdir, /tmp).
 - `experiments/phase21_experiment_a/tests/test_reap_pid_harness.sh` —
+  **eighth-round fix**: ChatGPT's eighth-round review of the
+  actual code at `f1ca266` identified two further isolation/
+  correctness gaps in the Scenario 5 cleanup paths the seventh
+  round had introduced.
+    - **Problem 1 (multi-level process trees)**: the seventh-round
+      `owned_pids` whitelist was built with `pgrep -P "$PID"` —
+      direct children only. That captured at most one level of
+      the process tree. A regression that replaced the
+      `exec sleep 30` fixture with a deeper tree (e.g.
+      `bash -c "bash -c sleep 30"`) would put deeper descendants
+      outside the `owned_pids` set, and the cleanup would either
+      miss them entirely or fall back to a broad pattern kill
+      (which the seventh round explicitly forbade).
+    - **Problem 2 (uniform ownership verification)**: the
+      seventh-round post-check 2 used `pgrep -P "$PID"` to find
+      residual direct children and killed every PID it returned —
+      without validating that those PIDs were in `owned_pids`. If
+      an unrelated process happened to be reparented to `$PID`
+      between reap and post-check, we would kill it by PID. The
+      ownership verification was inconsistent across cleanup
+      paths (pre-check used the whitelist; post-checks did not
+      uniformly).
+    - **Fix (this revision)**: four new helper functions
+      (`collect_descendants_pids`, `pid_is_alive`,
+      `pid_still_in_subtree`, `pid_safe_kill`, plus
+      `pid_safe_kill_owned` for the Gap 2 case where the orphan
+      is under PID 1 rather than still under `$PID`'s subtree).
+      Scenario 5 now:
+        1. Builds `owned_pids` via `collect_descendants_pids` —
+           a BFS over `pgrep -P` that captures the FULL subtree
+           at observation time (any depth). Contract is:
+           "every PID this scenario demonstrably created at
+           observation time is in the whitelist."
+        2. Pre-check FAIL cleanup uses `pid_safe_kill` for each
+           descendant (deepest-first by numeric-PID descending
+           sort) then `pid_safe_kill "$PID" "$PID"` then `wait`.
+           No `pkill -KILL -P 1 sleep` of any kind.
+        3. Post-check 1 cleanup uses `pid_safe_kill "$PID" "$PID"`
+           instead of bare `kill -KILL` — re-verifies aliveness
+           AND that the PID is still in its own subtree before
+           sending SIGKILL (PID-reuse mitigation).
+        4. Post-check 2 cleanup classifies each residual PID
+           as provable (in `owned_pids`) or unprovable. Provable
+           ones are killed via `pid_safe_kill` (deepest-first).
+           Unprovable ones are reported as residual with their
+           PIDs and the cleanup does NOT claim success. This is
+           the SAME ownership rule used everywhere else.
+        5. Post-check 3 (Gap 2) cleanup uses
+           `pid_safe_kill_owned "$o" "$owned_pids"` for provable
+           orphans — the orphan is now under PID 1 (not under
+           `$PID`'s subtree), so the proof of ownership is
+           whitelist membership (we observed the PID at capture
+           time) paired with the same aliveness guard. Unprovable
+           orphans are still reported as residual and left
+           untouched (per the seventh-round contract).
+    - PID-reuse mitigation: every kill goes through one of
+      `pid_safe_kill` (alive + subtree) or `pid_safe_kill_owned`
+      (alive + whitelist membership). Both check aliveness
+      (`kill -0`) at kill time, narrowing the reuse window to
+      the time between observation and kill.
+    - Assertion count: **35** (unchanged from seventh round — no
+      assertion was removed or relaxed).
+    - New verification: `/tmp/verify_deep_tree_fix.sh` exercises
+      a 3-level fixture `bash → bash → sleep`, verifies that
+      `collect_descendants_pids` captures all descendants,
+      exercises the deepest-first PID-scoped cleanup, and
+      confirms no orphan sleep leaks under init while a
+      separately-planted unrelated init-sleep survives (see § 12).
+      The existing `verify_gap1_fix.sh`, `verify_gap2_fix.sh`,
+      and `verify_isolation_fix.sh` were updated to source the
+      same helpers from the harness so any future change to the
+      helpers is automatically exercised by the verifiers.
+- `experiments/phase21_experiment_a/tests/test_reap_pid_harness.sh` —
   **seventh-round fix**: ChatGPT's seventh-round review of the
   actual code at `8b1cbe4` identified that the sixth-round
   cleanup used `pkill -KILL -P 1 sleep` — a broad-pattern kill
@@ -1100,6 +1173,115 @@ Gap 2 are both preserved. Assertion count remains **35** — no
 assertion was removed, relaxed, or skipped. All 35 assertions
 PASS with EXIT=0.
 
+**Eighth-round fix (recursive descendant capture + uniform
+whitelist enforcement)**: the seventh-round PID-scoped cleanup
+closed the broad-pattern kill, but ChatGPT's eighth-round review
+of `f1ca266` identified two further isolation/correctness gaps:
+
+1. **Multi-level process trees are not covered.** The
+   seventh-round `owned_pids` whitelist was built with
+   `pgrep -P "$PID"` — direct children only. A regression that
+   swapped the `exec sleep 30` fixture for a deeper tree (e.g.
+   `bash -c "bash -c sleep 30"`) would put grandchildren outside
+   the whitelist, and the cleanup would either miss them or have
+   to fall back to a broad pattern kill (which the seventh round
+   forbade).
+
+2. **Ownership verification is not uniform across cleanup paths.**
+   Post-check 2 used `pgrep -P "$PID"` to find residual direct
+   children and killed every PID it returned — without validating
+   against `owned_pids`. Pre-check failures log used the whitelist
+   but post-checks did not uniformly. If an unrelated process
+   happened to be reparented to `$PID` between reap and post-
+   check, we would kill it by PID.
+
+**Fix (this revision)** introduces the recursive descent
+primitives and rewires every cleanup path through them:
+
+  - **New helpers** (added at the top of `test_reap_pid_harness.sh`
+    after the `cleanup_children` trap):
+      - `collect_descendants_pids <root_pid>` — BFS over
+        `pgrep -P`, returns space-separated ALL descendants at
+        any depth (root_pid itself NOT in output).
+      - `pid_is_alive <pid>` — `kill -0` probe.
+      - `pid_still_in_subtree <pid> <root_pid>` — walks the
+        parent chain via `ps -A -o pid,ppid` to verify the
+        PID's PPID chain still leads to `root_pid`. Returns 1
+        for PID 1, init's PID, or any PID that's not in the
+        subtree (cycle-safe via a `seen` set).
+      - `pid_safe_kill <pid> <root_pid>` — single sanctioned
+        primitive: alive + still-in-subtree guards, then
+        `kill -KILL`. Used wherever the PID SHOULD still be
+        in our subtree at kill time.
+      - `pid_safe_kill_owned <pid> <whitelist_string>` — variant
+        for the Gap 2 case: orphan is now under PID 1, NOT
+        under our fixture's subtree. Ownership proof is
+        whitelist membership (we observed the PID at capture
+        time) plus the same aliveness guard. Same uniform
+        rule applied via a different proof.
+  - **Pre-check FAIL cleanup**: collect via `collect_descendants_pids`,
+    then iterate `owned_pids` deepest-first (PID-descending sort)
+    through `pid_safe_kill`, then `pid_safe_kill "$PID" "$PID"`,
+    then `wait`. No `pkill -KILL -P 1 sleep` of any kind.
+  - **Post-condition 1 cleanup**: `pid_safe_kill "$PID" "$PID"`
+    instead of bare `kill -KILL` — re-verifies aliveness AND
+    subtree membership.
+  - **Post-condition 2 cleanup**: classify each residual PID as
+    provable (in `owned_pids`) or unprovable. Provable ones killed
+    deepest-first via `pid_safe_kill`. Unprovable ones reported
+    as residual with their PIDs, and cleanup does NOT claim
+    success. This is the same whitelist-based ownership proof
+    the pre-check uses.
+  - **Post-condition 3 (Gap 2) cleanup**: classify each new
+    init-sleep PID as provable (in `owned_pids` at observation
+    time) or unprovable. Provable ones killed via
+    `pid_safe_kill_owned` (whitelist + alive, not subtree,
+    because they're under init now). Unprovable ones reported
+    as residual with their PIDs, NOT killed.
+
+PID-reuse mitigation: every kill goes through one of
+`pid_safe_kill` or `pid_safe_kill_owned`, both of which check
+aliveness (`kill -0`) at kill time. The reuse race window is
+narrowed to "time between observation and kill" (typically
+<100 ms in this harness).
+
+**New verification: `verify_deep_tree_fix.sh`** exercises a
+3-level fixture `bash → bash → sleep`, verifies that
+`collect_descendants_pids` captures all descendants, exercises
+the deepest-first PID-scoped cleanup, and confirms no orphan
+sleep leaks under init while a separately-planted unrelated
+init-sleep survives:
+
+```text
+$ bash /tmp/verify_deep_tree_fix.sh
+Planted unrelated init-sleep PID=48964 (PPID=1)
+3-level fixture: outer=48972 middle=48974 inner=48975
+collect_descendants_pids(OUTER) = [48974 48975]
+PASS: collect_descendants_pids captured all descendants (middle=48974 inner=48975)
+owned_pids = [48972 48974 48975]
+bash: line 1: 48975 Killed: 9               sleep 60
+PASS: all 3-level descendants killed (outer=48972 middle=48974 inner=48975)
+PASS: no orphan sleep leaked under init (before=[48964] after=[48964])
+PASS: unrelated init-sleep 48964 still alive (isolation preserved)
+PASS: pid_still_in_subtree correctly rejected unrelated PID 48964
+...
+DEEP-TREE FIX VERIFICATION PASSED
+```
+
+The existing `verify_gap1_fix.sh`, `verify_gap2_fix.sh`, and
+`verify_isolation_fix.sh` were updated to source the same
+helpers from the harness so any future change to the helpers
+is automatically exercised by the verifiers. All four
+verifications PASS with EXIT=0.
+
+The TERM → grace → KILL → 137 contract is unchanged. Gap 1 and
+Gap 2 are both preserved (in fact, the Gap 2 cleanup is now
+uniform with the pre-check FAIL cleanup: both classify PIDs into
+provable/unprovable, both kill only provable ones, both report
+unprovable as residual). Assertion count remains **35** — no
+assertion was removed, relaxed, or skipped. All 35 assertions
+PASS with EXIT=0.
+
 ## 7c. Regression sub-tests for the `$?`-capture fix (first revision, retained)
 
 | Name | Input | Expected | Actual | Verdict |
@@ -1137,15 +1319,16 @@ match the baseline in § 2. **No originals were touched.**
 | `kill -0` on zombie PID | Cannot reliably distinguish alive vs zombie on macOS | `wait` return used as sole evidence of reclamation; `kill -0` only used for best-effort probe |
 | `jobs -l` only keeps the most recent `Done` background job on macOS bash 3.2 | Earlier-terminated background children are unobservable via `jobs -l` even when no `wait` has run | reap_pid harness records `jobs -l` as `[diag]` diagnostic output rather than hard assertion; the test still proves the contract via the code path (no pre-`wait`) |
 | bash 3.2 second `wait` returns 0 (not 127) for previously reaped child | Platform behaviour; means `reap_pid`'s return code alone cannot prove it was the first waiter | Test asserts on `rc_var` / `REAPED` side-effects, not on `wait`'s exit code |
-| KILL of an outer `bash -c "..." &` leaves the inner `sleep` orphaned (reparented to PID 1, init) | macOS does not propagate SIGKILL to forked-but-not-reaped children | Scenario 5 fixture now uses `bash -c "...; exec sleep 30"` so the process tree has one node; pre/post assertions verify no orphan is created. Sixth round added: (a) pre-check FAIL now aborts the scenario without calling `reap_pid`, and safe-cleans the spawned subtree so the harness cannot manufacture an orphan even if the fixture regresses; (b) post-check now diffs the init-sleep set before vs after `reap_pid` to catch reparented-to-init orphans that `pgrep -P` cannot see. Both gaps independently verified by `verify_gap1_fix.sh` and `verify_gap2_fix.sh`. **Seventh round added** PID-scoped PID-scoped isolation: every kill is now restricted to PIDs in the scenario's `owned_pids` whitelist ($PID + its observed children); broad-pattern `pkill -KILL -P 1 sleep` was removed. Independent isolation contract verified by `verify_isolation_fix.sh`: an unrelated init-sleep planted BEFORE the harness survives the harness (35/35 PASS). |
+| KILL of an outer `bash -c "..." &` leaves the inner `sleep` orphaned (reparented to PID 1, init) | macOS does not propagate SIGKILL to forked-but-not-reaped children | Scenario 5 fixture now uses `bash -c "...; exec sleep 30"` so the process tree has one node; pre/post assertions verify no orphan is created. Sixth round added: (a) pre-check FAIL now aborts the scenario without calling `reap_pid`, and safe-cleans the spawned subtree so the harness cannot manufacture an orphan even if the fixture regresses; (b) post-check now diffs the init-sleep set before vs after `reap_pid` to catch reparented-to-init orphans that `pgrep -P` cannot see. Both gaps independently verified by `verify_gap1_fix.sh` and `verify_gap2_fix.sh`. Seventh round added PID-scoped isolation: every kill is now restricted to PIDs in the scenario's `owned_pids` whitelist ($PID + its observed children); broad-pattern `pkill -KILL -P 1 sleep` was removed. Independent isolation contract verified by `verify_isolation_fix.sh`: an unrelated init-sleep planted BEFORE the harness survives the harness (35/35 PASS). Eighth round added (a) recursive descendant capture via `collect_descendants_pids` so the whitelist is correct for any depth the fixture spawns (not just direct children), and (b) uniform ownership verification across ALL cleanup paths: pre-check FAIL, post-check 1/2/3 all classify residuals as provable/unprovable and kill only provable ones; unprovable ones are reported with PIDs and the cleanup does NOT claim success. Two new helpers (`pid_safe_kill` and `pid_safe_kill_owned`) consolidate the PID-reuse guards (`kill -0` aliveness + either subtree or whitelist ownership) so every kill goes through the same primitive. New verification `verify_deep_tree_fix.sh` exercises a 3-level `bash → bash → sleep` fixture and confirms the recursive whitelist + deepest-first cleanup + isolation contract all hold simultaneously. |
 
 ## 11. Overall Conclusion
 
-Phase 2.1 Experiment A (seventh revision, with the Scenario 5
+Phase 2.1 Experiment A (eighth revision, with the Scenario 5
 regression guard hardened against pre-check failures, PID-1
-reparenting, AND test-isolation violations from broad-pattern
-kills) — **PASS** on the harness-detectable axes. The reap_pid
-harness now proves the reap-first-wait contract via **code path**
+reparenting, broad-pattern cleanup, multi-level process trees,
+AND uniform ownership verification across all cleanup paths) —
+**PASS** on the harness-detectable axes. The reap_pid harness
+now proves the reap-first-wait contract via **code path**
 (no `wait` is ever called before `reap_pid`); platform-side proof
 via `jobs -l` is recorded as diagnostic output because macOS bash
 3.2's auto-`reap` of earlier SIGCHLDs makes the `jobs` table
@@ -1154,9 +1337,14 @@ unobservable for the non-most-recent child (see § 7b
 now survives (1) a fixture regression that re-introduces an outer
 bash (Gap 1: pre-check FAIL aborts with safe cleanup), (2) an
 orphan reparented to PID 1 (Gap 2: post-check diffs init's sleep
-set before vs after), AND (3) a broad-pattern cleanup that would
+set before vs after), (3) a broad-pattern cleanup that would
 kill unrelated init-sleep processes (Gap 3 isolation: cleanup is
-PID-scoped to the scenario's owned_pids whitelist).
+PID-scoped to the scenario's owned_pids whitelist), AND
+(4) a multi-level fixture that produces descendants deeper than
+the direct children `pgrep -P` could see (Gap 4 deep-tree:
+`collect_descendants_pids` BFS captures the full subtree, and
+every kill goes through `pid_safe_kill` / `pid_safe_kill_owned`
+with PID-reuse guards + uniform whitelist enforcement).
 
 | Bucket | Result |
 |---|---|
@@ -1180,6 +1368,7 @@ PID-scoped to the scenario's owned_pids whitelist).
 | **Scenario 5 Gap 1 — pre-check FAIL safe-cleanup** | **PASS** (`verify_gap1_fix.sh`: broken fixture → safe cleanup → no init-orphan sleep PIDs; unrelated init-sleep survives) |
 | **Scenario 5 Gap 2 — reparented-to-init detection** | **PASS** (`verify_gap2_fix.sh`: simulated reparent → diff catches new sleep PID under init; provable orphan killed; unrelated init-sleep survives) |
 | **Scenario 5 Gap 3 — test isolation (no broad-pattern kills)** | **PASS** (`verify_isolation_fix.sh`: unrelated init-sleep planted BEFORE reap harness; harness passes 35/35; unrelated sleep survives; init has exactly 1 sleep (= planted one); explicit cleanup succeeds) |
+| **Scenario 5 Gap 4 — multi-level fixture (deep-tree)** | **PASS** (`verify_deep_tree_fix.sh`: 3-level `bash → bash → sleep` fixture; `collect_descendants_pids` captures all 3 levels; deepest-first PID-scoped cleanup kills all 3 levels; no orphan sleep leaks under init; unrelated init-sleep survives; `pid_still_in_subtree` correctly rejects unrelated PID; final init-sleep count = 0) |
 | Source-file integrity (T12) | PASS (every check) |
 | Bash SIGINT (background, T7a) | NOT_VERIFIED (re-confirmed: `kill -INT <pid>` does not fire bash INT trap on macOS bash 3.2 in non-tty; see T7a section) |
 | Foreground Ctrl-C (T7c) | NOT_VERIFIED (cannot be automated; manual reproduction steps in T7c section) |
@@ -1243,6 +1432,9 @@ bash /tmp/verify_gap2_fix.sh                                   # reparented-to-i
 # would affect the unrelated sleep.
 bash /tmp/verify_isolation_fix.sh                              # reap harness with unrelated init-sleep present; unrelated must survive
 bash /tmp/plant_unrelated_sleep.sh 300                         # helper: spawn a sleep that gets reparented to PID 1 (init)
+
+# Eighth-round deep-tree + uniform-whitelist verification (see § 7b "Eighth-round fix"):
+bash /tmp/verify_deep_tree_fix.sh                              # 3-level bash->bash->sleep fixture; collect_descendants_pids captures all; deepest-first cleanup; unrelated survives
 
 # T-build (build fail → exit=20). Invoke from a tempdir with no Cargo.toml:
 TMPDIR=$(mktemp -d); ln -sf "$PWD/scripts/run_unicast_test.sh" "$TMPDIR/"

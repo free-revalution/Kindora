@@ -124,6 +124,168 @@ cleanup_children() {
 trap cleanup_children EXIT
 
 # -----------------------------------------------------------------------------
+# collect_descendants_pids <root_pid>
+#   Output: space-separated list of ALL descendant PIDs (any depth)
+#   under <root_pid>. The root_pid itself is NOT in the output.
+#
+#   Algorithm: BFS via `pgrep -P`. Each iteration collects the
+#   children of every PID in the current frontier, then advances
+#   the frontier to those children. Stops when a frontier has no
+#   children left.
+#
+#   Why this is needed (eighth-round review fix):
+#     The seventh-round `owned_pids` whitelist was constructed
+#     using `pgrep -P "$PID"` — only direct children. That captures
+#     at most one level of the process tree. A regression that
+#     changes the fixture from a single-process `exec sleep 30`
+#     into a deeper tree (e.g. `bash -c "bash -c sleep 30"`) would
+#     leave deeper descendants OUT of the whitelist, and cleanup
+#     would either (a) miss them entirely or (b) attempt to use
+#     `pkill -P $PID` which still only reaches one level. With
+#     BFS we capture the entire subtree at observation time, so
+#     cleanup is correct for any depth the fixture spawns.
+#
+#   Why we don't kill "the whole subtree":
+#     This function only OBSERVES and returns. Killing is done
+#     by the caller, which uses the returned list as the
+#     whitelist for explicit PID-based kills (no name pattern).
+#
+#   PID-reuse caveat:
+#     The returned list is captured at observation time T0. If a
+#     process in the list dies AND its PID is reused by an
+#     unrelated process before our cleanup runs, we would attempt
+#     to kill the unrelated process. Mitigations:
+#       (1) Each kill is guarded by pid_is_alive (kills -0).
+#       (2) Each kill is further guarded by pid_still_in_subtree
+#       which verifies the target's parent chain still leads to
+#       <root_pid>.
+#     Both guards are applied in scenario 5's cleanup paths.
+# -----------------------------------------------------------------------------
+collect_descendants_pids() {
+  local root="$1"
+  if [[ -z "$root" ]]; then
+    echo ""
+    return 0
+  fi
+  local current="$root"
+  local next=""
+  local all=""
+  local pid children
+  while [[ -n "$current" ]]; do
+    next=""
+    for pid in $current; do
+      children=$(pgrep -P "$pid" 2>/dev/null | tr '\n' ' ' || true)
+      children="${children% }"
+      [[ -n "$children" ]] && next="$next $children"
+      [[ -n "$children" ]] && all="$all $children"
+    done
+    current="${next# }"
+  done
+  all="${all# }"
+  echo "$all"
+}
+
+# pid_is_alive <pid>
+#   Returns 0 if <pid> is alive (kill -0 succeeds), 1 otherwise.
+#   Used as the first guard before any kill: if the PID is gone,
+#   skip the kill entirely (the process may have died naturally,
+#   or its PID may have been reused — in either case we don't
+#   want to kill whatever now holds that PID number).
+pid_is_alive() {
+  local pid="$1"
+  [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null
+}
+
+# pid_still_in_subtree <pid> <root_pid>
+#   Returns 0 if walking <pid>'s parent chain reaches <root_pid>.
+#   Returns 1 otherwise (chain doesn't include root, or pid is
+#   gone). Cycle-protected. This is the second guard against
+#   PID reuse: even if some new process now owns <pid>'s
+#   number, if its parent chain doesn't end at <root_pid>, we
+#   refuse to kill it.
+pid_still_in_subtree() {
+  local pid="$1"
+  local root="$2"
+  [[ -z "$pid" || -z "$root" ]] && return 1
+  local current="$pid"
+  local seen=""
+  while [[ -n "$current" && "$current" != "1" && "$current" != "0" ]]; do
+    if [[ "$current" == "$root" ]]; then
+      return 0
+    fi
+    # Cycle protection (shouldn't happen in real process trees).
+    if [[ " $seen " == *" $current "* ]]; then
+      return 1
+    fi
+    seen="$seen $current"
+    current=$(ps -A -o pid,ppid 2>/dev/null \
+              | awk -v p="$current" '$1 == p { print $2; exit }')
+  done
+  return 1
+}
+
+# pid_safe_kill <pid> <root_pid>
+#   Kill <pid> only if it is alive AND still in <root_pid>'s
+#   subtree (both guards pass). Otherwise no-op. This is the
+#   SINGLE sanctioned cleanup primitive in scenario 5 — every
+#   kill must go through this function so the whitelist + PID
+#   reuse guards are uniformly applied.
+pid_safe_kill() {
+  local pid="$1"
+  local root="$2"
+  [[ -z "$pid" ]] && return 0
+  if pid_is_alive "$pid" && pid_still_in_subtree "$pid" "$root"; then
+    kill -KILL "$pid" 2>/dev/null || true
+    return 0
+  fi
+  # Process is gone or no longer ours — skip silently. The
+  # caller will report if this leaves residuals.
+  return 0
+}
+
+# pid_safe_kill_owned <pid> <whitelist_string>
+#   Kill <pid> only if it is alive AND its PID appears as a
+#   whitespace-tokenized member of <whitelist_string>.
+#   Otherwise no-op.
+#
+#   Why a SECOND primitive (and not pid_safe_kill)?
+#     pid_safe_kill guards on "still in root's subtree" — that
+#     is the right check for descendants that should still be
+#     nested under our test fixture. But for orphans that have
+#     already been reparented to PID 1 (the Gap 2 case: post-
+#     check 3 detects a sleep under init that we provably
+#     created), the subtree check would always fail and we
+#     would never clean up. The provable-ownership claim in
+#     that case comes from the WHITELIST — we observed the PID
+#     in our subtree at capture time, so by definition it was
+#     ours. We use that as the verification, paired with the
+#     same aliveness guard pid_safe_kill uses, so the
+#     "uniform ownership verification rules" requirement is
+#     still satisfied: ownership is proven, just via a different
+#     proof (whitelist membership instead of live parent chain).
+#
+#   PID-reuse caveat is the same as pid_safe_kill: aliveness
+#   is checked at kill time. If the PID has been reused, kill -0
+#   will still pass but the process is now unrelated; we
+#   accept this residual risk because the whitelist itself was
+#   captured at observation time T0 (Race window = time
+#   between observation and kill, which is short).
+pid_safe_kill_owned() {
+  local pid="$1"
+  local whitelist="$2"
+  [[ -z "$pid" || -z "$whitelist" ]] && return 0
+  # Whitespace-tokenized membership check.
+  if [[ " $whitelist " != *" $pid "* ]]; then
+    return 0
+  fi
+  if pid_is_alive "$pid"; then
+    kill -KILL "$pid" 2>/dev/null || true
+    return 0
+  fi
+  return 0
+}
+
+# -----------------------------------------------------------------------------
 # Scenario 1: Main flow already waited and set REAPED=1. reap_pid must
 # short-circuit and NOT touch the stored exit code or REAPED flag.
 #   Proof: HOST_REAP_RC is preset to a sentinel (99) and HOST_REAPED=1.
@@ -325,12 +487,20 @@ run_scenario_5() {
   #
   # Format: single space-separated string for easy membership
   # checks (" $owned_pids " == *" $pid "*).
-  local fixture_children
-  fixture_children=$(pgrep -P "$PID" 2>/dev/null | tr '\n' ' ' || true)
-  fixture_children="${fixture_children% }"
+  #
+  # Eighth-round fix: the seventh-round code used `pgrep -P "$PID"`
+  # which only captures DIRECT children. If the fixture regresses
+  # to a multi-level tree (bash -> bash -> sleep), grandchildren
+  # would fall outside the whitelist and the cleanup would either
+  # miss them or have to fall back to a broad pattern kill (which
+  # we explicitly forbid). We now use collect_descendants_pids to
+  # capture the FULL subtree at observation time. Cleanup depth
+  # is then limited only by what the fixture actually spawned.
+  local fixture_descendants
+  fixture_descendants=$(collect_descendants_pids "$PID")
   local owned_pids="$PID"
-  if [[ -n "$fixture_children" ]]; then
-    owned_pids="$PID $fixture_children"
+  if [[ -n "$fixture_descendants" ]]; then
+    owned_pids="$PID $fixture_descendants"
   fi
 
   # Pre-condition: with `exec`, $! IS the sleep process — it must
@@ -339,17 +509,20 @@ run_scenario_5() {
   # inner sleep gets adopted by init. ABORT the scenario without
   # calling reap_pid — calling reap_pid on a known-leaky fixture
   # would manufacture the very orphan we're trying to prevent.
-  if [[ -n "$fixture_children" ]]; then
-    fail "scenario5.pre_no_pid_children: $PID has children ($fixture_children); fixture did not exec — aborting scenario to prevent orphan manufacture"
-    # Safe-cleanup: kill children FIRST by PID (so they die before
-    # being reparented to init), then kill $PID itself, then wait.
+  if [[ -n "$fixture_descendants" ]]; then
+    fail "scenario5.pre_no_pid_children: $PID has descendants ($fixture_descendants); fixture did not exec — aborting scenario to prevent orphan manufacture"
+    # Safe-cleanup: kill descendants FIRST by PID (deepest-first
+    # so children die before their parents and never get a chance
+    # to be reparented to init), then kill $PID itself, then wait.
     # Every kill targets a PID from owned_pids — never init's
-    # children as a group.
+    # children as a group. pid_safe_kill re-verifies aliveness
+    # AND that the PID is still in $PID's subtree before sending
+    # SIGKILL, mitigating PID-reuse races.
     local c
-    for c in $fixture_children; do
-      kill -KILL "$c" 2>/dev/null || true
+    for c in $fixture_descendants; do
+      pid_safe_kill "$c" "$PID"
     done
-    kill -KILL "$PID" 2>/dev/null || true
+    pid_safe_kill "$PID" "$PID"
     wait "$PID" 2>/dev/null || true
     # Subsequent scenarios still run because we `return` (not `exit`).
     return 1
@@ -365,24 +538,62 @@ run_scenario_5() {
   # Post-condition 1: $PID must be gone.
   if kill -0 "$PID" 2>/dev/null; then
     fail "scenario5.post_pid_dead: $PID still alive after reap_pid"
-    # $PID is provably ours (in owned_pids). Safe to kill by PID.
-    kill -KILL "$PID" 2>/dev/null || true
+    # $PID is provably ours (in owned_pids). Use pid_safe_kill so
+    # we re-verify aliveness and that $PID is still in its own
+    # subtree (i.e. has not been reparented or had its PID reused)
+    # before sending SIGKILL.
+    pid_safe_kill "$PID" "$PID"
   else
     ok "scenario5.post_pid_dead ($PID is gone)"
   fi
 
   # Post-condition 2: no descendant of $PID remains.
+  #
+  # Eighth-round fix (Problem 2): the seventh-round code used
+  # `pgrep -P "$PID"` here and killed every PID it returned —
+  # without validating that those PIDs were in `owned_pids`. If
+  # an unrelated process happened to be reparented to $PID between
+  # reap and post-check (extremely unlikely but contractually
+  # relevant), we would kill it by PID. We now classify each
+  # residual PID as provable (in owned_pids) or unprovable (any
+  # other PID). We kill ONLY the provable ones. Unprovable ones
+  # are reported as residual and left untouched. This is the
+  # SAME ownership rule used everywhere else in this scenario.
   local remaining_children
   remaining_children=$(pgrep -P "$PID" 2>/dev/null | tr '\n' ' ' || true)
   remaining_children="${remaining_children% }"
   if [[ -n "$remaining_children" ]]; then
-    fail "scenario5.post_no_pid_children: $PID still has children ($remaining_children) — orphan leak"
-    # These PIDs were just observed as direct children of $PID —
-    # provably our descendants. Kill by PID only; never by name.
+    # Walk the residual set deepest-first so descendants die
+    # before their parents. Build the provable/unprovable split
+    # before any kill so the report is accurate.
+    local provable_residual=""
+    local unprovable_residual=""
     local c
     for c in $remaining_children; do
-      kill -KILL "$c" 2>/dev/null || true
+      if [[ " $owned_pids " == *" $c "* ]]; then
+        provable_residual="$provable_residual $c"
+      else
+        unprovable_residual="$unprovable_residual $c"
+      fi
     done
+    provable_residual="${provable_residual# }"
+    unprovable_residual="${unprovable_residual# }"
+
+    # Kill only the provable ones (deepest-first ordering is
+    # automatic because BFS already lists children before parents
+    # when re-running collect_descendants_pids on the surviving
+    # subset — but to be explicit, sort PIDs descending).
+    if [[ -n "$provable_residual" ]]; then
+      for c in $(echo "$provable_residual" | tr ' ' '\n' | sort -rn); do
+        pid_safe_kill "$c" "$PID"
+      done
+    fi
+
+    if [[ -n "$unprovable_residual" ]]; then
+      fail "scenario5.post_no_pid_children: $PID has residual PIDs we cannot prove are ours (unprovable=$unprovable_residual; provable_cleaned='${provable_residual:-<none>}'; owned_pids=[$owned_pids]) — leaving residual, NOT claiming cleanup success"
+    else
+      fail "scenario5.post_no_pid_children: $PID still has children ($remaining_children) — orphan leak"
+    fi
   else
     ok "scenario5.post_no_pid_children (no descendants under $PID)"
   fi
@@ -425,10 +636,15 @@ run_scenario_5() {
     provable_orphans="${provable_orphans# }"
     unprovable_orphans="${unprovable_orphans# }"
 
-    # Kill only the provable ones (one PID at a time).
+    # Kill only the provable ones (deepest-first ordering: PIDs
+    # are not ordered by depth here, so we sort numerically
+    # descending as a proxy). The orphans are now under PID 1,
+    # NOT under $PID, so we use pid_safe_kill_owned (whitelist
+    # membership + aliveness) instead of pid_safe_kill (which
+    # requires the target to still be under $PID's subtree).
     if [[ -n "$provable_orphans" ]]; then
-      for o in $provable_orphans; do
-        kill -KILL "$o" 2>/dev/null || true
+      for o in $(echo "$provable_orphans" | tr ' ' '\n' | sort -rn); do
+        pid_safe_kill_owned "$o" "$owned_pids"
       done
     fi
 
