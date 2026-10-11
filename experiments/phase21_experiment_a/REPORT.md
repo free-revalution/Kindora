@@ -8,7 +8,7 @@ Rust processes, isolated from the main Tauri project.
 | Item | Value |
 |---|---|
 | HEAD commit (pre-experiment) | `009f8fa37ccd04527809e5f33e874805f7b6bfde` |
-| HEAD commit (this revision)  | `bd2ff3dafae64a7b47745366b79e9a532e0ebe20` |
+| HEAD commit (this revision)  | `52c1bc2` (sixth round: Scenario 5 Gap 1 + Gap 2 closure; SHA in this row is the SHA of the parent of the commit that added the row — the actual HEAD is `git log -1`.) |
 | Branch | `main` |
 | rustc | 1.77.2 (25ef9e3d8 2024-04-09) |
 | cargo | 1.77.2 (e52e36006 2024-03-26) |
@@ -61,7 +61,50 @@ Sizes & mtimes also re-verified post-run — see `T12` in § 7.
   message on missing script. Runs from any cwd (verified: repo root,
   tests/ subdir, /tmp).
 - `experiments/phase21_experiment_a/tests/test_reap_pid_harness.sh` —
-  **fifth-round fix**: Scenario 5's fixture now uses
+  **sixth-round fix**: ChatGPT reviewed the actual code at
+  `cfb2f28` and identified two residual gaps in the Scenario 5
+  regression protection added in the fifth round. **Gap 1**: the
+  `pre_no_pid_children` check only logged `fail` and CONTINUED,
+  so if the fixture ever regressed to a non-`exec` form,
+  `reap_pid` would then be called on the outer bash, the inner
+  sleep would be reparented to PID 1, and the harness would
+  manufacture the very orphan the test was designed to prevent.
+  **Gap 2**: the `post_no_pid_children` check used
+  `pgrep -P "$PID"`, which CANNOT see a process that has been
+  reparented to PID 1 (init) — so it would not detect the
+  exactly-the-same leak mode that motivated the fifth round.
+  **Fix (this revision)**: (a) the entire Scenario 5 body is
+  now wrapped in a `run_scenario_5()` function. If the
+  pre-check fails, the function runs a SAFE-CLEANUP sequence
+  (`pkill -KILL -P "$PID"`, `kill -KILL "$PID"`, `wait "$PID"`,
+  plus `pkill -KILL -P 1 sleep` to reap any orphans init may
+  have just adopted) and then `return`s WITHOUT calling
+  `reap_pid` and WITHOUT running the post-checks (which would
+  have been meaningless on a half-cleaned fixture). Subsequent
+  scenarios still run because `return` (not `exit`) is used.
+  (b) A new post-condition `scenario5.post_no_init_orphans`
+  records the set of `sleep` PIDs whose PPID is 1 (init)
+  BEFORE the fixture is spawned, and computes the set
+  difference AFTER `reap_pid`. Any new sleep PIDs adopted by
+  init are an orphan leak — exactly the bug the fifth round
+  fixed but the fifth-round post-check could not see. The
+  diff uses an explicit empty-string sentinel-free branch
+  rather than a `(none)` placeholder (an earlier draft used
+  `(none)` as a sentinel and produced a spurious FAIL when
+  both before/after were empty; this revision strips the
+  trailing newline from the sorted PIDs and branches on
+  emptiness). The core TERM → grace → KILL → rc=137 contract
+  is UNCHANGED: the `trap '' TERM` is still installed before
+  `exec sleep 30`, the inherited SIGTERM-ignore disposition
+  still makes TERM a no-op, the grace window still elapses,
+  and `reap_pid` still reaps the same PID with rc=137.
+  Assertion count: **35** (up from 34; +1 for
+  `scenario5.post_no_init_orphans`). Gap 1's safe-cleanup
+  branch and Gap 2's diff-based detection are both
+  independently verified by `verify_gap1_fix.sh` and
+  `verify_gap2_fix.sh` (see § 12).
+- `experiments/phase21_experiment_a/tests/test_reap_pid_harness.sh` —
+  **fifth-round fix** (retained): Scenario 5's fixture now uses
   `bash -c "trap '' TERM; exec sleep 30"` (added `exec`) so the
   process tree has a single node instead of two. Previously the
   fixture was `bash -c "trap '' TERM; sleep 30"` — that left an
@@ -75,8 +118,7 @@ Sizes & mtimes also re-verified post-run — see `T12` in § 7.
   KILL-escalates → rc=137 contract is unchanged: the `trap '' TERM`
   is installed before `exec`, so the new sleep process inherits
   the SIGTERM-ignore disposition (signal dispositions are
-  inherited across `execve`). Assertion count: 34 (up from 31;
-  +3 for scenario 5 pre/post-checks).
+  inherited across `execve`).
 - `experiments/phase21_experiment_a/REPORT.md` — third-round
   fixes documented; § 7 T-stress rewritten with explicit
   race-fix description + 20/20 evidence; § 7b expanded from 9 to 29
@@ -712,12 +754,12 @@ platform-specific `jobs` behaviour that bash 3.2 makes unobservable.
 | 2          | reap_pid completes wait on a zombie child → rc=0, REAPED=1 (no pre-`wait`); jobs snapshot recorded | 2 |
 | 3          | First reap → rc=0, REAPED=1; sentinel rc=55 survives second reap (no pre-`wait`) | 4 |
 | 4          | Active child TERM'd → rc=143, child reaped (ps no longer sees it) | 3 |
-| 5          | TERM-ignored → KILL → rc=137 (joiner-side variables); fixture uses `exec` so process tree is a single node; pre-reap asserts PID has no children (proves exec worked); post-reap asserts PID is dead AND has no children (proves no orphan leak) | 5 |
+| 5          | TERM-ignored → KILL → rc=137 (joiner-side variables); fixture uses `exec` so process tree is a single node; pre-reap asserts PID has no children (proves exec worked); post-reap asserts PID is dead AND has no children AND PID 1 (init) has no new sleep children adopted (proves no orphan leak — including the reparented-to-init case that `pgrep -P` cannot see) | 6 |
 | 6          | Empty PID leaves HOST_REAP_RC=88, HOST_REAPED=1 untouched | 2 |
 | 6b         | Empty PID leaves JOINER_REAP_RC='' , JOINER_REAPED=0 untouched | 2 |
 | 7          | Host-side and joiner-side variables are independent in both directions; no pre-`wait` (jobs snapshots recorded) | 12 |
 
-Total: 34 assertions.
+Total: 35 assertions.
 
 ```text
 $ bash tests/test_reap_pid_harness.sh
@@ -737,31 +779,32 @@ OK  [10] scenario3.reaped_still_1: got='1'
 OK  [11] scenario4.rc_is_143: got='143'
 OK  [12] scenario4.reaped_is_1: got='1'
 OK  [13] scenario4.child_not_alive
-OK  [14] scenario5.pre_no_pid_children (32873 has no children)
+OK  [14] scenario5.pre_no_pid_children (36901 has no children)
 OK  [15] scenario5.rc_is_137: got='137'
 OK  [16] scenario5.reaped_is_1: got='1'
-OK  [17] scenario5.post_pid_dead (32873 is gone)
-OK  [18] scenario5.post_no_pid_children (no orphans under 32873)
-OK  [19] scenario6.rc_unchanged: got='88'
-OK  [20] scenario6.reaped_unchanged: got='1'
-OK  [21] scenario6b.empty_rc_empty: got=''
-OK  [22] scenario6b.empty_reaped_0: got='0'
-[diag] scenario7:before_host:   jobs does NOT list 23796 (...)
-[diag] scenario7:before_joiner: jobs lists 23797 (...)
-OK  [23] scenario7.host_rc: got='0'
-OK  [24] scenario7.joiner_rc: got='0'
-OK  [25] scenario7.host_reaped: got='1'
-OK  [26] scenario7.joiner_reaped: got='1'
-OK  [27] scenario7.host_rc_independent: got='11'
-OK  [28] scenario7.joiner_rc_independent: got='0'
-OK  [29] scenario7.host_reaped_independent: got='1'
-OK  [30] scenario7.joiner_reaped_independent: got='1'
-OK  [31] scenario7.host_rc_rev: got='11'
-OK  [32] scenario7.joiner_rc_rev: got='22'
-OK  [33] scenario7.host_reaped_rev: got='1'
-OK  [34] scenario7.joiner_reaped_rev: got='1'
+OK  [17] scenario5.post_pid_dead (36901 is gone)
+OK  [18] scenario5.post_no_pid_children (no descendants under 36901)
+OK  [19] scenario5.post_no_init_orphans (init has no new sleep children; before=[<empty>] after=[<empty>])
+OK  [20] scenario6.rc_unchanged: got='88'
+OK  [21] scenario6.reaped_unchanged: got='1'
+OK  [22] scenario6b.empty_rc_empty: got=''
+OK  [23] scenario6b.empty_reaped_0: got='0'
+[diag] scenario7:before_host:   jobs does NOT list 36928 (...)
+[diag] scenario7:before_joiner: jobs lists 36929 (...)
+OK  [24] scenario7.host_rc: got='0'
+OK  [25] scenario7.joiner_rc: got='0'
+OK  [26] scenario7.host_reaped: got='1'
+OK  [27] scenario7.joiner_reaped: got='1'
+OK  [28] scenario7.host_rc_independent: got='11'
+OK  [29] scenario7.joiner_rc_independent: got='0'
+OK  [30] scenario7.host_reaped_independent: got='1'
+OK  [31] scenario7.joiner_reaped_independent: got='1'
+OK  [32] scenario7.host_rc_rev: got='11'
+OK  [33] scenario7.joiner_rc_rev: got='22'
+OK  [34] scenario7.host_reaped_rev: got='1'
+OK  [35] scenario7.joiner_reaped_rev: got='1'
 ----
-PASS: 34 / 34
+PASS: 35 / 35
 ALL TESTS PASSED
 ```
 
@@ -813,13 +856,14 @@ Verification that the new fixture has no orphan leak:
 ```text
 $ bash tests/test_reap_pid_harness.sh
 ...
-OK  [14] scenario5.pre_no_pid_children (32873 has no children)
+OK  [14] scenario5.pre_no_pid_children (36901 has no children)
 OK  [15] scenario5.rc_is_137: got='137'
 OK  [16] scenario5.reaped_is_1: got='1'
-OK  [17] scenario5.post_pid_dead (32873 is gone)
-OK  [18] scenario5.post_no_pid_children (no orphans under 32873)
+OK  [17] scenario5.post_pid_dead (36901 is gone)
+OK  [18] scenario5.post_no_pid_children (no descendants under 36901)
+OK  [19] scenario5.post_no_init_orphans (init has no new sleep children; before=[<empty>] after=[<empty>])
 ...
-PASS: 34 / 34
+PASS: 35 / 35
 ALL TESTS PASSED
 
 # After the harness:
@@ -830,6 +874,85 @@ $ ps -A -o pid,ppid,comm | awk '$2 == 1 && $3 == "sleep"'    # → (none)
 The pre-reap and post-reap assertions were added so the harness
 fails LOUDLY if the fixture is ever changed back to a non-`exec`
 form.
+
+**Sixth-round fix (two residual gaps in the Scenario 5 regression
+guard, flagged by ChatGPT in the cfb2f28 review)**: the fifth-round
+regression guard above proved that the *currently-installed* fixture
+has no orphan leak. But it left two structural gaps that would
+re-introduce a leak the moment the fixture regressed, silently:
+
+1. **Gap 1 — pre-check failure did not abort.** When
+   `scenario5.pre_no_pid_children` failed, the harness logged `fail`
+   and *kept going* into `reap_pid`. If the fixture were ever
+   reverted to `bash -c "trap '' TERM; sleep 30"` (no `exec`), then
+   `reap_pid` would KILL the outer bash, the inner sleep would be
+   reparented to PID 1, and the harness would manufacture the exact
+   orphan the test exists to prevent. Verified locally:
+   ```text
+   $ bash -c "trap '' TERM; sleep 30" &
+   OUTER=35745
+   $ pgrep -P 35745
+   35747                              # inner sleep present → pre-check FAILS
+   $ kill -KILL 35745                 # simulates reap_pid KILL-ing outer
+   $ ps -A -o pid,ppid,comm | awk '$2 == 1 && $3 == "sleep"'
+   35747   1 sleep                    # orphan, leaked under init
+   ```
+   The new Scenario 5 body is wrapped in a `run_scenario_5()` shell
+   function. On pre-check failure the function runs the same
+   safe-cleanup sequence the orphan-manufacturing case above
+   requires (`pkill -KILL -P "$PID"`, `kill -KILL "$PID"`,
+   `wait "$PID"`, plus `pkill -KILL -P 1 sleep` to reap any orphan
+   init may have already adopted) and then `return`s WITHOUT calling
+   `reap_pid` and WITHOUT running the post-checks (which would
+   have been meaningless on a half-cleaned fixture). Subsequent
+   scenarios still run because `return` (not `exit`) is used.
+   Verified by `verify_gap1_fix.sh` (see § 12):
+   ```text
+   $ bash /tmp/verify_gap1_fix.sh
+   Repro fixture: PID=37149 has children=[37151] (broken as intended)
+   bash: line 1: 37151 Killed: 9               sleep 30
+   PASS: Gap 1 cleanup correctly leaves no init-orphan sleep PIDs
+     before=[<empty>] after=[<empty>]
+   ```
+
+2. **Gap 2 — post-check missed PID-1 reparenting.** The
+   `scenario5.post_no_pid_children` assertion used `pgrep -P "$PID"`,
+   which only enumerates *direct children* of `$PID`. An orphan
+   reparented to PID 1 is no longer a child of `$PID` and would
+   never appear in the check. Verified locally:
+   ```text
+   # setup: non-exec fixture, KILL outer only
+   $ bash -c "trap '' TERM; sleep 30" &
+   OUTER=35801
+   INNER=$(pgrep -P 35801)            # → 35802
+   $ kill -KILL 35801
+   $ ps -A -o pid,ppid,comm | awk -v p=35802 '$1 == p { print $2 }'
+   1                                  # inner is now under init
+   $ pgrep -P 35801
+   (empty)                            # ← previous post-check would PASS this!
+   ```
+   The new `scenario5.post_no_init_orphans` assertion records the
+   set of `sleep` PIDs whose PPID is 1 (init) BEFORE the fixture is
+   spawned, then computes the set difference AFTER `reap_pid`. Any
+   new sleep PIDs adopted by init are an orphan leak — exactly the
+   case the previous post-check could not see. The diff uses an
+   explicit empty-string sentinel-free branch (the first draft used
+   a `(none)` placeholder and produced a spurious FAIL when both
+   before and after were empty — fixed by stripping them and branching
+   on emptiness). Verified by `verify_gap2_fix.sh` (see § 12):
+   ```text
+   $ bash /tmp/verify_gap2_fix.sh
+   After KILL outer: inner sleep 37279 has PPID=1 (1 = reparented to init, OK)
+   PASS: Gap 2 detection CAUGHT the reparented orphan (new=[37279] includes inner 37279)
+   After final cleanup: init-orphans=0
+   ```
+
+Both gaps are now closed by code that runs **on every harness
+execution**, not by ad-hoc out-of-band checks. The TERM → grace →
+KILL → 137 contract is unchanged: `trap '' TERM` is still installed
+before `exec`, the inherited SIGTERM-ignore still makes TERM a no-op,
+the grace window still elapses, and `reap_pid` still reaps the same
+PID with rc=137.
 
 ## 7c. Regression sub-tests for the `$?`-capture fix (first revision, retained)
 
@@ -868,19 +991,23 @@ match the baseline in § 2. **No originals were touched.**
 | `kill -0` on zombie PID | Cannot reliably distinguish alive vs zombie on macOS | `wait` return used as sole evidence of reclamation; `kill -0` only used for best-effort probe |
 | `jobs -l` only keeps the most recent `Done` background job on macOS bash 3.2 | Earlier-terminated background children are unobservable via `jobs -l` even when no `wait` has run | reap_pid harness records `jobs -l` as `[diag]` diagnostic output rather than hard assertion; the test still proves the contract via the code path (no pre-`wait`) |
 | bash 3.2 second `wait` returns 0 (not 127) for previously reaped child | Platform behaviour; means `reap_pid`'s return code alone cannot prove it was the first waiter | Test asserts on `rc_var` / `REAPED` side-effects, not on `wait`'s exit code |
-| KILL of an outer `bash -c "..." &` leaves the inner `sleep` orphaned (reparented to PID 1, init) | macOS does not propagate SIGKILL to forked-but-not-reaped children | Scenario 5 fixture now uses `bash -c "...; exec sleep 30"` so the process tree has one node; pre/post assertions verify no orphan is created |
+| KILL of an outer `bash -c "..." &` leaves the inner `sleep` orphaned (reparented to PID 1, init) | macOS does not propagate SIGKILL to forked-but-not-reaped children | Scenario 5 fixture now uses `bash -c "...; exec sleep 30"` so the process tree has one node; pre/post assertions verify no orphan is created. Sixth round added: (a) pre-check FAIL now aborts the scenario without calling `reap_pid`, and safe-cleans the spawned subtree so the harness cannot manufacture an orphan even if the fixture regresses; (b) post-check now diffs the init-sleep set before vs after `reap_pid` to catch reparented-to-init orphans that `pgrep -P` cannot see. Both gaps independently verified by `verify_gap1_fix.sh` and `verify_gap2_fix.sh` (see § 12). |
 
 ## 11. Overall Conclusion
 
-Phase 2.1 Experiment A (fourth revision, with `decide_priority()`,
-single-source reaping, host-ready synchronization, and the reap_pid
-harness rewritten to drop pre-`wait` calls) — **PASS** on the
-harness-detectable axes. The reap_pid harness now proves the
-reap-first-wait contract via **code path** (no `wait` is ever
-called before `reap_pid`); platform-side proof via `jobs -l` is
-recorded as diagnostic output because macOS bash 3.2's auto-`reap`
-of earlier SIGCHLDs makes the `jobs` table unobservable for the
-non-most-recent child (see § 7b "Fourth-round honest disclosure").
+Phase 2.1 Experiment A (sixth revision, with the Scenario 5
+regression guard hardened against pre-check failures and PID-1
+reparenting) — **PASS** on the harness-detectable axes. The
+reap_pid harness now proves the reap-first-wait contract via
+**code path** (no `wait` is ever called before `reap_pid`); platform-
+side proof via `jobs -l` is recorded as diagnostic output because
+macOS bash 3.2's auto-`reap` of earlier SIGCHLDs makes the `jobs`
+table unobservable for the non-most-recent child (see § 7b
+"Fourth-round honest disclosure"). The Scenario 5 regression guard
+now survives both a fixture regression that re-introduces an outer
+bash (Gap 1: pre-check FAIL aborts with safe cleanup) AND an
+orphan reparented to PID 1 (Gap 2: post-check diffs init's sleep
+set before vs after).
 
 | Bucket | Result |
 |---|---|
@@ -900,7 +1027,9 @@ non-most-recent child (see § 7b "Fourth-round honest disclosure").
 | **Stress: 20x normal handshake (T-stress)** | **PASS (20/20 rc=0, hostOK + joinerOK both verified per iteration; failure evidence recording active but no failures occurred)** |
 | Cleanup `$?`-capture fix (regression-30/20/0/child-fail) | PASS |
 | **decide_priority() unit tests (18/18)** | **PASS** |
-| **reap_pid() idempotency unit tests (34/34)** | **PASS (scenarios 2/3/7 fixed: no pre-`wait`; jobs snapshots are diagnostic-only on bash 3.2; scenario 5 fixture uses `exec` to avoid orphan leak)** |
+| **reap_pid() idempotency unit tests (35/35)** | **PASS (scenarios 2/3/7 fixed: no pre-`wait`; jobs snapshots are diagnostic-only on bash 3.2; scenario 5 fixture uses `exec`; sixth-round hardening: pre-check FAIL aborts safely, post-check diffs init-sleep set to catch reparented orphans)** |
+| **Scenario 5 Gap 1 — pre-check FAIL safe-cleanup** | **PASS** (`verify_gap1_fix.sh`: broken fixture → safe cleanup → no init-orphan sleep PIDs) |
+| **Scenario 5 Gap 2 — reparented-to-init detection** | **PASS** (`verify_gap2_fix.sh`: simulated reparent → diff catches new sleep PID under init) |
 | Source-file integrity (T12) | PASS (every check) |
 | Bash SIGINT (background, T7a) | NOT_VERIFIED (re-confirmed: `kill -INT <pid>` does not fire bash INT trap on macOS bash 3.2 in non-tty; see T7a section) |
 | Foreground Ctrl-C (T7c) | NOT_VERIFIED (cannot be automated; manual reproduction steps in T7c section) |
@@ -952,7 +1081,11 @@ SKIP_BUILD=1 JOINER_BIN_OVERRIDE=/nonexistent/joiner bash scripts/run_unicast_te
 bash -n scripts/run_unicast_test.sh                            # T10
 cargo test --offline --manifest-path Cargo.toml --bin lan_cross_process_host                 # T11
 bash tests/test_priority_harness.sh                            # § 7a (18/18 priority unit tests)
-bash tests/test_reap_pid_harness.sh                            # § 7b (34/34 reap_pid unit tests)
+bash tests/test_reap_pid_harness.sh                            # § 7b (35/35 reap_pid unit tests)
+
+# Sixth-round Gap 1 / Gap 2 independent verifications (see § 7b "Sixth-round fix"):
+bash /tmp/verify_gap1_fix.sh                                   # pre-check FAIL safe-cleanup → no init-orphan
+bash /tmp/verify_gap2_fix.sh                                   # reparented-to-init detection via init-sleep diff
 
 # T-build (build fail → exit=20). Invoke from a tempdir with no Cargo.toml:
 TMPDIR=$(mktemp -d); ln -sf "$PWD/scripts/run_unicast_test.sh" "$TMPDIR/"
