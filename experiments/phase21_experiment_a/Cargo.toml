@@ -1,0 +1,39 @@
+[package]
+name = "kindora-phase21-experiment-a"
+version = "0.0.1"
+edition = "2021"
+rust-version = "1.77.2"
+publish = false
+description = "Phase 2.1 Experiment A — cross-process UDP unicast verification"
+
+[[bin]]
+name = "lan_cross_process_host"
+path = "src/bin/lan_cross_process_host.rs"
+
+[[bin]]
+name = "lan_cross_process_joiner"
+path = "src/bin/lan_cross_process_joiner.rs"
+
+[[bin]]
+name = "host_silent"
+path = "tests/fixtures/host_silent.rs"
+
+[[bin]]
+name = "joiner_silent"
+path = "tests/fixtures/joiner_silent.rs"
+
+[[bin]]
+name = "host_bad_protocol"
+path = "tests/fixtures/host_bad_protocol.rs"
+
+[[bin]]
+name = "host_sleep_forever"
+path = "tests/fixtures/host_sleep_forever.rs"
+
+[profile.dev]
+opt-level = 0
+debug = true
+
+[profile.release]
+panic = "abort"
+opt-level = "s"
