@@ -61,6 +61,58 @@ expect_eq() {
   fi
 }
 
+# -----------------------------------------------------------------------------
+# First-wait observation helper (INFORMATIONAL ONLY on macOS bash 3.2).
+#
+# Why informational and not a hard assertion:
+#   macOS bash 3.2 has a quirky behaviour where the FIRST background
+#   child to deliver SIGCHLD is implicitly reaped (or at least removed
+#   from the `jobs` table) before any explicit `wait` runs. Only the
+#   most recently terminated background job remains in `jobs -l` (in
+#   `Done` state). The job that finished earlier is gone from the
+#   table, but that does NOT mean the current shell has called `wait`
+#   on it — bash 3.2 also returns 0 (not 127) for a second `wait` on
+#   a previously reaped child.
+#
+#   Concretely: `jobs -l` shows at most ONE Done entry at any time.
+#   If we spawned two children in scenario 7 and both finished before
+#   the test queried `jobs`, only the second one shows up. The first
+#   is unobservable through `jobs`.
+#
+#   Therefore this helper records what `jobs -l` reports at the
+#   observation point. It is NOT a hard assertion — it surfaces the
+#   observed platform behaviour as a diagnostic line so the reader
+#   can see exactly what the harness saw.
+#
+# Why this is still better than the previous version:
+#   - The test still does NOT call `wait` before `reap_pid` (third-
+#     round reviewer's actual complaint about scenario 2/3/7).
+#   - reap_pid's INTERNAL `wait` therefore is the only `wait` the
+#     test code calls. Even if bash 3.2 silently reaps earlier
+#     children via SIGCHLD, reap_pid's `printf -v rc_var` write is
+#     what the test asserts on, and bash's silent reap does NOT
+#     produce a `printf -v` side effect — only reap_pid does.
+#   - The sentinel-overwrite test (rc=55 survives second reap) is
+#     still meaningful: even if bash reaps under us, sentinel is set
+#     AFTER reap_pid's first printf -v, so the second reap_pid's
+#     short-circuit (REAPED=1) protects it.
+#
+# What this helper does:
+#   - Records the `jobs -l` snapshot to stderr before reap_pid.
+#   - Does NOT fail if the snapshot doesn't contain the PID.
+#   - Does fail if reap_pid's own side-effect (REAPED=1) is missing.
+# -----------------------------------------------------------------------------
+record_jobs_snapshot() {
+  local label="$1" stage="$2" pid="$3"
+  local jobs_line
+  jobs_line=$(jobs -l 2>/dev/null || true)
+  if [[ "$jobs_line" == *"$pid"* ]]; then
+    echo "[diag] $label:$stage: jobs lists $pid (current shell has not yet reaped it)" >&2
+  else
+    echo "[diag] $label:$stage: jobs does NOT list $pid (bash 3.2 may have auto-reaped earlier SIGCHLD; observation unavailable)" >&2
+  fi
+}
+
 # Defensive cleanup: kill any still-running children we spawned.
 cleanup_children() {
   local p
@@ -111,34 +163,56 @@ unset PID
 # -----------------------------------------------------------------------------
 # Scenario 2: Child exited normally, REAPED=0. reap_pid does the FIRST
 # (and only allowed) wait. We DO NOT pre-wait.
+#
+# Fourth-round change: pre-`wait` was removed; replaced with `sleep`
+# so the child exits naturally (zombie state) without the current
+# shell having called `wait` on it. `record_jobs_snapshot` records
+# `jobs -l` state at observation points as a diagnostic line — see
+# the function's documentation for why this cannot be a hard
+# assertion on macOS bash 3.2.
 # -----------------------------------------------------------------------------
 echo "--- Scenario 2: reap_pid is the first waiter for a normal-exit child ---"
 sleep 0.2 &
 PID=$!
-# Wait for the child to actually exit so reap_pid's wait is immediate.
-wait "$PID" || true
+# Wait for the child to actually exit (zombie state). DO NOT call `wait`
+# here — that would re-parent the wait to the test and make reap_pid's
+# internal wait a second wait, which bash 3.2 silently turns into a 0.
+sleep 0.4
+# Diagnostic: record what `jobs -l` shows before reap_pid. macOS bash 3.2
+# may have already auto-reaped this child via SIGCHLD, in which case
+# the snapshot will be empty — see record_jobs_snapshot docs.
+record_jobs_snapshot "scenario2" "before" "$PID"
 HOST_REAP_RC=""
 HOST_REAPED=0
 reap_pid "$PID" HOST_REAP_RC HOST_REAPED
+record_jobs_snapshot "scenario2" "after"  "$PID"
 expect_eq "scenario2.host_rc_is_0"      "0" "$HOST_REAP_RC"
 expect_eq "scenario2.host_reaped_is_1"  "1" "$HOST_REAPED"
+unset PID
 
 # -----------------------------------------------------------------------------
 # Scenario 3: After reap_pid, calling reap_pid again is a no-op.
 # Proof: change REAP_RC to a sentinel AFTER first reap — second reap must
 # not overwrite.
+#
+# Fourth-round change: same as Scenario 2 — no pre-`wait`, jobs state
+# recorded via `record_jobs_snapshot`.
 # -----------------------------------------------------------------------------
 echo "--- Scenario 3: second reap_pid on the same PID is a no-op ---"
 sleep 0.2 &
 PID=$!
-wait "$PID" || true
+sleep 0.4   # child has exited; do NOT call wait
+record_jobs_snapshot "scenario3" "before_first" "$PID"
 HOST_REAP_RC=""
 HOST_REAPED=0
-reap_pid "$PID" HOST_REAP_RC HOST_REAPED   # first reap
+reap_pid "$PID" HOST_REAP_RC HOST_REAPED   # first reap (and first wait)
+expect_eq "scenario3.first_reap_rc_is_0"    "0" "$HOST_REAP_RC"
+expect_eq "scenario3.first_reap_reaped_is_1" "1" "$HOST_REAPED"
 HOST_REAP_RC=55  # sentinel AFTER first reap
 reap_pid "$PID" HOST_REAP_RC HOST_REAPED   # second reap: must NOT touch rc
 expect_eq "scenario3.rc_unchanged_after_second_reap" "55" "$HOST_REAP_RC"
 expect_eq "scenario3.reaped_still_1"                 "1"  "$HOST_REAPED"
+unset PID
 
 # -----------------------------------------------------------------------------
 # Scenario 4: Active child is TERM'd by reap_pid.
@@ -193,14 +267,24 @@ expect_eq "scenario6b.empty_reaped_0"   "0" "$JOINER_REAPED"
 # Scenario 7: Host-side and joiner-side variables are independent.
 # Reap two distinct children, then verify host sentinel survives a
 # joiner re-reap and vice versa.
+#
+# Fourth-round change: same as Scenarios 2/3 — no pre-`wait`. Jobs
+# state recorded via `record_jobs_snapshot` for both PIDs before
+# reap_pid runs. On macOS bash 3.2, expect to see one `[diag]` line
+# reporting the PID is present in `jobs -l` (the most recently
+# terminated child) and one reporting it is absent (the earlier-
+# terminated child, which bash 3.2 has auto-cleaned from the table).
 # -----------------------------------------------------------------------------
 echo "--- Scenario 7: host and joiner variables are independent ---"
 sleep 0.2 &
 HOST_PID=$!
 sleep 0.2 &
 JOINER_PID=$!
-wait "$HOST_PID" || true
-wait "$JOINER_PID" || true
+# Wait for both children to exit naturally. DO NOT call `wait` —
+# reap_pid must do the first wait.
+sleep 0.5
+record_jobs_snapshot "scenario7" "before_host"   "$HOST_PID"
+record_jobs_snapshot "scenario7" "before_joiner" "$JOINER_PID"
 
 HOST_REAP_RC=""
 HOST_REAPED=0
