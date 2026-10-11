@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
-# test_lstart_precision.sh — in-tree Round-10/11/12 verifier for the
+# test_lstart_precision.sh — in-tree Round-10/11/12/13 verifier for the
 # `ps -o lstart=` precision property used by the reap harness's
 # PID-reuse guards.
 #
-# Purpose (Round-10 audit carried forward to Round-11 and
-# Round-12 boundary fix):
+# Purpose (Round-10 audit carried forward to Round-11 wording
+# calibration, Round-12 set -u boundary fix, Round-13 exit-code
+# policy):
 #   The reap harness relies on `ps -o lstart=` (process start time
 #   via strftime %c) as an identity token to detect different-second
 #   PID reuse. Two properties matter:
@@ -39,6 +40,24 @@
 #   The cleanup policy in this script and in the reap harness
 #   is therefore "allowed by this check, not identity-confirmed",
 #   and treats any PID that does not pass as residual (refused).
+#
+# Exit-code policy (Round-13):
+#   This script is meant to be runnable from automation. The
+#   prior rounds returned exit 0 unconditionally, so a residual
+#   PIDs case (cleanup failure) was indistinguishable from a
+#   clean run. Round-13 gates the exit code on CLEANUP_OK:
+#     - Cleanup failure (STEP5 detected residual PIDs):
+#         exit code = 1 — regardless of the collision verdict.
+#         A NOT_VERIFIED verdict for collision does NOT excuse
+#         a failed cleanup.
+#     - Cleanup success (STEP5 reports no residual PIDs):
+#         exit code = 0 — regardless of whether the collision
+#         observation is PASS or NOT_VERIFIED. NOT_VERIFIED for
+#         the same-second collision property is independent of
+#         cleanup outcome.
+#   Both verdict branches (COLLIDED=1 and COLLIDED=0) flow
+#   through the same CLEANUP_OK gate, so neither branch can
+#   leak a stale exit 0 when cleanup actually failed.
 #
 # Constraints:
 #   - Bash 3.2 compatible (no ${var,,} / ${var^^}, no associative arrays).
@@ -79,6 +98,12 @@ REPORTED_RESIDUAL=""
 STILL_ALIVE=""
 DISTINCT_COUNT=0
 TOTAL_COUNT=0
+# Round-13: cleanup outcome (1=success / 0=failure). Initialized
+# up front because set -u forbids reading an unset variable. The
+# final verdict branch checks this and overrides the collision
+# verdict — NOT_VERIFIED for collision behavior alone does NOT
+# excuse a failed cleanup.
+CLEANUP_OK=1
 
 # --- Environment banner ---
 ENV_OS="$(uname -s 2>/dev/null || echo unknown)"
@@ -252,10 +277,18 @@ for p in $PIDS; do
 done
 STILL_ALIVE="${STILL_ALIVE# }"
 if [[ -n "$STILL_ALIVE" ]]; then
+  # Round-13: residual PIDs after cleanup. Round-12 wording kept
+  # "NOT_VERIFIED" here which conflated a missing collision
+  # observation with a cleanup failure. They are different
+  # things — a NOT_VERIFIED collision verdict does NOT excuse
+  # a failed cleanup. Flag the failure here; the verdict
+  # summary at the end maps CLEANUP_OK=0 to a non-zero exit.
+  CLEANUP_OK=0
   echo "STEP5: residual PIDs from this script still alive: [$STILL_ALIVE]"
-  echo "STEP5_VERDICT: NOT_VERIFIED — could not fully clean up; processes may have reparented and are under PID 1, or identity was ambiguous per this check"
+  echo "STEP5_VERDICT: FAIL — cleanup left residual PIDs; final exit will be non-zero"
 else
   echo "STEP5: no residual PIDs from this script"
+  echo "STEP5_VERDICT: PASS — cleanup left no residual PIDs"
 fi
 
 # --- 6. Final verdict summary ---
@@ -263,12 +296,47 @@ echo ""
 echo "=========================================="
 echo "LSTART PRECISION VERIFIER — verdict summary"
 echo "=========================================="
-# COLLIDED is initialized at top, so this branch is set -u safe.
+# Lstart-stability verdict is always PASS (STEP1/2 already exit
+# non-zero on failure). COLLIDED (initialized at top) is set -u
+# safe in both branches.
+echo "  - lstart stability within <1s:        PASS"
 if [[ "$COLLIDED" -eq 1 ]]; then
-  echo "  - lstart stability within <1s:        PASS"
   echo "  - same-second collision demonstrated: PASS"
-  echo "  - cleanup lstart-check policy:        PASS (only killed on lstart match; same-second reuse RISK_REMAINS)"
+else
+  echo "  - same-second collision:              NOT_VERIFIED${COLLIDED_NOTE} (this run did not observe a collision)"
+fi
+
+# Cleanup verdict (Round-13: this row gates the exit code).
+if [[ "$CLEANUP_OK" -eq 1 ]]; then
+  echo "  - cleanup (no residual):             PASS (only killed on lstart match; same-second reuse RISK_REMAINS)"
+else
+  echo "  - cleanup (residual detected):       FAIL — residual PIDs: [$STILL_ALIVE]"
+fi
+
+# Round-13 exit-code policy:
+#   - Cleanup failure (CLEANUP_OK=0) → exit 1, regardless of the
+#     collision verdict. NOT_VERIFIED for collision does NOT
+#     excuse a failed cleanup.
+#   - Cleanup success (CLEANUP_OK=1) → exit 0, regardless of
+#     whether the collision verdict was PASS or NOT_VERIFIED.
+#   - All branches flow through the same gate so neither verdict
+#     branch can leak a stale exit 0 when cleanup actually failed.
+if [[ "$CLEANUP_OK" -ne 1 ]]; then
   echo ""
+  echo "  IMPLICATION: STEP5 reported residual PIDs [$STILL_ALIVE]."
+  echo "    Cleanup did not terminate every process this script"
+  echo "    started. This is independent of the same-second collision"
+  echo "    observation (Round-10 RISK_REMAINS) and of the"
+  echo "    check-then-kill race window."
+  echo ""
+  echo "  FINAL: FAIL — cleanup left residual processes; exit non-zero"
+  exit 1
+fi
+
+# Cleanup succeeded — print the same IMPLICATION / RESULT lines
+# the prior rounds carried, with the Round-12 wording preserved.
+echo ""
+if [[ "$COLLIDED" -eq 1 ]]; then
   echo "  IMPLICATION (documented in REPORT § 7b Round-10 audit):"
   echo "    lstart is second-precision on this host; same-second PID"
   echo "    reuse is NOT distinguishable. The reap harness's"
@@ -278,17 +346,18 @@ if [[ "$COLLIDED" -eq 1 ]]; then
   echo ""
   echo "  RESULT: PASS for stability and same-second collision."
   echo "          RISK_REMAINS for same-second reuse (documented)."
-  exit 0
-else
-  echo "  - lstart stability within <1s:        PASS"
-  echo "  - same-second collision:              NOT_VERIFIED${COLLIDED_NOTE} (this run did not observe a collision)"
-  echo "  - cleanup lstart-check policy:        PASS (only killed on lstart match; same-second reuse RISK_REMAINS)"
   echo ""
+  echo "  CLEANUP OK: PASS — exit 0"
+else
   echo "  IMPLICATION: Round-10 audit documented same-second collision"
   echo "  on macOS bash 3.2 + ps -o lstart=; this run did not reproduce"
   echo "  it but the documented result stands. RISK_REMAINS unchanged."
   echo ""
   echo "  RESULT: PASS for stability. NOT_VERIFIED for same-second"
   echo "          collision in this specific run."
-  exit 0
+  echo ""
+  echo "  CLEANUP OK: PASS — exit 0 (NOT_VERIFIED for collision is"
+  echo "              preserved; cleanup success is independent)"
 fi
+
+exit 0
