@@ -224,12 +224,259 @@ pid_still_in_subtree() {
   return 1
 }
 
+# -----------------------------------------------------------------------------
+# pid_get_lstart <pid>
+#   Output: the lstart (process start time) string for <pid>, with
+#   leading/trailing whitespace stripped. Empty output if <pid> is
+#   gone (ps can't find it). lstart is a stable identity token:
+#   two `ps` calls for the SAME process return the SAME lstart
+#   regardless of timing. Two DIFFERENT processes at the SAME
+#   PID (PID reuse) return DIFFERENT lstart values (because they
+#   started at different times). This is what makes lstart usable
+#   as a PID-reuse-detection token: if lstart at observation time
+#   differs from lstart at kill time, the PID was reused.
+#
+#   Why lstart (and not etime):
+#     etime is the elapsed time SINCE the process started,
+#     computed at the moment `ps` runs. Two `ps` calls for the
+#     same process return DIFFERENT etime values (the process
+#     has aged by a few microseconds). lstart is the absolute
+#     start time — stable across calls.
+#
+#   Why lstart (and not just parent-chain walking):
+#     Parent chains are stable BUT can be reparented (an orphan
+#     loses its real parent and gets PPID=1). They also don't
+#     distinguish "same PID, same parent, different process"
+#     after a reuse. lstart is orthogonal: it depends only on
+#     which process currently holds that PID number.
+#
+#   Format on macOS bash 3.2:
+#     "Sun Oct 11 15:24:37 2026"
+#   No tabs. Safe to use TAB as the field separator in TSVs.
+pid_get_lstart() {
+  local pid="$1"
+  [[ -z "$pid" ]] && return 1
+  ps -p "$pid" -o lstart= 2>/dev/null \
+    | sed 's/^[[:space:]]*//; s/[[:space:]]*$//'
+}
+
+# identity_lookup_lstart <identities_tsv> <pid>
+#   Look up the recorded lstart for <pid> in a TSV string.
+#   <identities_tsv> format: one "<pid><TAB><lstart>" per line.
+#   Returns the lstart string, or empty if <pid> is not in the TSV.
+identity_lookup_lstart() {
+  local tsv="$1"
+  local pid="$2"
+  [[ -z "$tsv" || -z "$pid" ]] && return 1
+  printf '%s\n' "$tsv" | awk -F'\t' -v p="$pid" '$1 == p { print $2; exit }'
+}
+
+# collect_descendants_with_depth <root_pid>
+#   Output: one "<depth><TAB><pid>" line per descendant. Root is
+#   NOT included (we never need its depth to kill it). Depth 1 =
+#   direct children of root; depth 2 = grandchildren; etc.
+#
+#   BFS over `pgrep -P`, same as collect_descendants_pids, but
+#   records the depth of each descendant so callers can sort by
+#   real depth (not by PID number, which is unrelated to depth).
+#
+#   Why a separate function (not just a flag on collect_descendants_pids):
+#     The BFS list and the depth-tagged list have different shapes
+#     (space-separated PIDs vs TSV). Mixing them in one function
+#     would require callers to parse different formats. Cleaner to
+#     keep two outputs.
+collect_descendants_with_depth() {
+  local root="$1"
+  if [[ -z "$root" ]]; then
+    echo ""
+    return 0
+  fi
+  local current="$root" depth=0 next="" all="" pid="" children="" first=1 line
+  while [[ -n "$current" ]]; do
+    next=""
+    for pid in $current; do
+      if [[ "$depth" -gt 0 ]]; then
+        line="$depth	$pid"
+        if [[ "$first" -eq 1 ]]; then
+          all="$line"
+          first=0
+        else
+          all="$all"$'\n'"$line"
+        fi
+      fi
+      children=$(pgrep -P "$pid" 2>/dev/null | tr '\n' ' ' || true)
+      children="${children% }"
+      [[ -n "$children" ]] && next="$next $children"
+    done
+    current="${next# }"
+    depth=$((depth + 1))
+  done
+  echo "$all"
+}
+
+# record_identities <root_pid>
+#   Output: one "<pid><TAB><lstart>" line per PID in the subtree
+#   (including the root). Each lstart is captured at the time
+#   this function is called. Callers should call this AT
+#   OBSERVATION TIME (before any cleanup), then pass the output
+#   to pid_safe_kill_with_identity / pid_safe_kill_orphan as a
+#   snapshot of which PIDs were ours at T0.
+#
+#   PIDs that no longer exist (lstart is empty after ps lookup)
+#   are skipped. In practice every PID in a freshly-spawned
+#   subtree will have an lstart, but the filter makes the helper
+#   robust to a race where a child exits between collect and
+#   record.
+record_identities() {
+  local root="$1"
+  [[ -z "$root" ]] && return 0
+  local descendants
+  descendants=$(collect_descendants_pids "$root")
+  local pids="$root"
+  [[ -n "$descendants" ]] && pids="$root $descendants"
+  local pid lstart first=1 line
+  for pid in $pids; do
+    lstart=$(pid_get_lstart "$pid")
+    if [[ -n "$lstart" ]]; then
+      line="$pid	$lstart"
+      if [[ "$first" -eq 1 ]]; then
+        echo "$line"
+        first=0
+      else
+        echo "$line"
+      fi
+    fi
+  done
+}
+
+# pid_safe_kill_with_identity <pid> <root_pid> <identities_tsv> [depth]
+#   Sanctioned kill primitive for descendants still expected to
+#   be in <root_pid>'s subtree. Kill <pid> ONLY if ALL of:
+#     1. PID appears in identities_tsv (we observed it at T0).
+#     2. PID is alive (kill -0).
+#     3. PID's current lstart matches the lstart we recorded.
+#        (Detects PID reuse — if the PID was reused by an
+#        unrelated process, lstart differs and we refuse.)
+#     4. If root_pid is still alive: PID is still in root's
+#        subtree (parent chain leads to root). If root is dead,
+#        we skip the subtree check (root's death may have
+#        legitimately reparented the descendant, in which case
+#        pid_safe_kill_orphan is the right primitive, not this
+#        one). The caller decides whether to fall back.
+#
+#   The optional [depth] arg, when non-empty, is recorded into
+#   the kill log (if $KILL_LOG_FILE is set) so verifiers can
+#   assert the actual kill order.
+#
+#   This primitive REPLACES the eighth-round pid_safe_kill for
+#   scenario 5 paths where the descendant is still expected to
+#   be in the fixture's subtree. The old pid_safe_kill is
+#   retained (renamed/refactored) but scenario 5 does not use it.
+pid_safe_kill_with_identity() {
+  local pid="$1"
+  local root="$2"
+  local identities_tsv="$3"
+  local depth="${4:-}"
+  [[ -z "$pid" || -z "$root" || -z "$identities_tsv" ]] && return 0
+
+  # (1) Membership.
+  local expected_lstart
+  expected_lstart=$(identity_lookup_lstart "$identities_tsv" "$pid")
+  [[ -z "$expected_lstart" ]] && return 0
+
+  # (2) Aliveness.
+  if ! pid_is_alive "$pid"; then return 0; fi
+
+  # (3) Identity (lstart match).
+  local current_lstart
+  current_lstart=$(pid_get_lstart "$pid")
+  if [[ "$current_lstart" != "$expected_lstart" ]]; then
+    # PID reused — refuse to kill. Log so verifiers can observe
+    # the refusal if they care.
+    if [[ -n "${KILL_LOG_FILE:-}" ]]; then
+      printf 'REFUSE pid=%s root=%s reason=pid-reuse expected_lstart=[%s] current_lstart=[%s]\n' \
+        "$pid" "$root" "$expected_lstart" "${current_lstart:-<empty>}" \
+        >>"$KILL_LOG_FILE"
+    fi
+    return 0
+  fi
+
+  # (4) Subtree check (only if root is alive).
+  if pid_is_alive "$root"; then
+    if ! pid_still_in_subtree "$pid" "$root"; then
+      if [[ -n "${KILL_LOG_FILE:-}" ]]; then
+        printf 'REFUSE pid=%s root=%s reason=not-in-subtree\n' \
+          "$pid" "$root" >>"$KILL_LOG_FILE"
+      fi
+      return 0
+    fi
+  fi
+
+  # All guards passed. Kill and log.
+  kill -KILL "$pid" 2>/dev/null || true
+  if [[ -n "${KILL_LOG_FILE:-}" ]]; then
+    printf 'KILL pid=%s root=%s depth=%s\n' "$pid" "$root" "${depth:-?}" \
+      >>"$KILL_LOG_FILE"
+  fi
+  return 0
+}
+
+# pid_safe_kill_orphan <pid> <identities_tsv>
+#   Sanctioned kill primitive for descendants that have been
+#   reparented to PID 1 (init). Cannot use subtree check (the
+#   orphan's parent chain leads to init, not to our root).
+#   Kill <pid> ONLY if ALL of:
+#     1. PID appears in identities_tsv (we observed it at T0).
+#     2. PID is alive (kill -0).
+#     3. PID's current lstart matches the lstart we recorded.
+#        This is the ONLY proof of identity we have for orphans;
+#        without it, a reused PID would be killed.
+#
+#   This primitive REPLACES the eighth-round pid_safe_kill_owned
+#   for scenario 5's post-check 3 (Gap 2) cleanup path.
+pid_safe_kill_orphan() {
+  local pid="$1"
+  local identities_tsv="$2"
+  [[ -z "$pid" || -z "$identities_tsv" ]] && return 0
+
+  # (1) Membership.
+  local expected_lstart
+  expected_lstart=$(identity_lookup_lstart "$identities_tsv" "$pid")
+  [[ -z "$expected_lstart" ]] && return 0
+
+  # (2) Aliveness.
+  if ! pid_is_alive "$pid"; then return 0; fi
+
+  # (3) Identity (lstart match).
+  local current_lstart
+  current_lstart=$(pid_get_lstart "$pid")
+  if [[ "$current_lstart" != "$expected_lstart" ]]; then
+    if [[ -n "${KILL_LOG_FILE:-}" ]]; then
+      printf 'REFUSE_ORPHAN pid=%s reason=pid-reuse expected_lstart=[%s] current_lstart=[%s]\n' \
+        "$pid" "$expected_lstart" "${current_lstart:-<empty>}" \
+        >>"$KILL_LOG_FILE"
+    fi
+    return 0
+  fi
+
+  # All guards passed. Kill and log.
+  kill -KILL "$pid" 2>/dev/null || true
+  if [[ -n "${KILL_LOG_FILE:-}" ]]; then
+    printf 'KILL_ORPHAN pid=%s\n' "$pid" >>"$KILL_LOG_FILE"
+  fi
+  return 0
+}
+
 # pid_safe_kill <pid> <root_pid>
 #   Kill <pid> only if it is alive AND still in <root_pid>'s
-#   subtree (both guards pass). Otherwise no-op. This is the
-#   SINGLE sanctioned cleanup primitive in scenario 5 — every
-#   kill must go through this function so the whitelist + PID
-#   reuse guards are uniformly applied.
+#   subtree (both guards pass). Otherwise no-op.
+#
+#   NOTE (ninth round): this is the EIGHTH-ROUND primitive.
+#   Scenario 5 does NOT use this directly anymore — it uses
+#   pid_safe_kill_with_identity instead, which adds the lstart
+#   identity check. This function is retained so the verification
+#   scripts can still source the harness to get the full helper
+#   set without breaking; it is not used in any cleanup path.
 pid_safe_kill() {
   local pid="$1"
   local root="$2"
@@ -238,43 +485,19 @@ pid_safe_kill() {
     kill -KILL "$pid" 2>/dev/null || true
     return 0
   fi
-  # Process is gone or no longer ours — skip silently. The
-  # caller will report if this leaves residuals.
   return 0
 }
 
 # pid_safe_kill_owned <pid> <whitelist_string>
-#   Kill <pid> only if it is alive AND its PID appears as a
-#   whitespace-tokenized member of <whitelist_string>.
-#   Otherwise no-op.
-#
-#   Why a SECOND primitive (and not pid_safe_kill)?
-#     pid_safe_kill guards on "still in root's subtree" — that
-#     is the right check for descendants that should still be
-#     nested under our test fixture. But for orphans that have
-#     already been reparented to PID 1 (the Gap 2 case: post-
-#     check 3 detects a sleep under init that we provably
-#     created), the subtree check would always fail and we
-#     would never clean up. The provable-ownership claim in
-#     that case comes from the WHITELIST — we observed the PID
-#     in our subtree at capture time, so by definition it was
-#     ours. We use that as the verification, paired with the
-#     same aliveness guard pid_safe_kill uses, so the
-#     "uniform ownership verification rules" requirement is
-#     still satisfied: ownership is proven, just via a different
-#     proof (whitelist membership instead of live parent chain).
-#
-#   PID-reuse caveat is the same as pid_safe_kill: aliveness
-#   is checked at kill time. If the PID has been reused, kill -0
-#   will still pass but the process is now unrelated; we
-#   accept this residual risk because the whitelist itself was
-#   captured at observation time T0 (Race window = time
-#   between observation and kill, which is short).
+#   EIGHTH-ROUND primitive. Scenario 5 does NOT use this
+#   directly anymore — post-check 3 uses pid_safe_kill_orphan
+#   (which adds the lstart identity check). This function is
+#   retained so verification scripts that source the helpers
+#   don't see a missing-symbol error.
 pid_safe_kill_owned() {
   local pid="$1"
   local whitelist="$2"
   [[ -z "$pid" || -z "$whitelist" ]] && return 0
-  # Whitespace-tokenized membership check.
   if [[ " $whitelist " != *" $pid "* ]]; then
     return 0
   fi
@@ -485,23 +708,38 @@ run_scenario_5() {
   # so we cannot affect unrelated processes (including unrelated
   # sleep processes that happen to be parented to PID 1).
   #
-  # Format: single space-separated string for easy membership
-  # checks (" $owned_pids " == *" $pid "*).
+  # Ninth-round addition: in addition to the PID whitelist, we
+  # also capture the lstart (process start time) of every PID
+  # in the subtree. lstart is the second proof of identity —
+  # even if a PID is reused by an unrelated process before our
+  # cleanup runs (rare but possible on a long-running host),
+  # comparing lstart at kill time to lstart at observation time
+  # detects the reuse and refuses the kill. Without lstart, the
+  # whitelist check + alive check would both pass for a reused
+  # PID (the new process is alive AND has the same PID number)
+  # and we would kill an unrelated process.
   #
-  # Eighth-round fix: the seventh-round code used `pgrep -P "$PID"`
-  # which only captures DIRECT children. If the fixture regresses
-  # to a multi-level tree (bash -> bash -> sleep), grandchildren
-  # would fall outside the whitelist and the cleanup would either
-  # miss them or have to fall back to a broad pattern kill (which
-  # we explicitly forbid). We now use collect_descendants_pids to
-  # capture the FULL subtree at observation time. Cleanup depth
-  # is then limited only by what the fixture actually spawned.
+  # We keep both:
+  #   - owned_pids: simple space-separated PIDs (used for the
+  #     membership branch of pid_safe_kill_with_identity /
+  #     pid_safe_kill_orphan, and for the provable/unprovable
+  #     classification in post-checks 2/3).
+  #   - identities_tsv: "<pid><TAB><lstart>" per line (used by
+  #     pid_safe_kill_with_identity and pid_safe_kill_orphan
+  #     to verify the PID hasn't been reused).
+  #
+  # Both are captured at the SAME instant (T0 = observation
+  # time). The race window between observation and kill is
+  # the only window where reuse can slip through; we narrow
+  # it by recording lstart immediately before each kill call.
   local fixture_descendants
   fixture_descendants=$(collect_descendants_pids "$PID")
   local owned_pids="$PID"
   if [[ -n "$fixture_descendants" ]]; then
     owned_pids="$PID $fixture_descendants"
   fi
+  local identities_tsv
+  identities_tsv=$(record_identities "$PID")
 
   # Pre-condition: with `exec`, $! IS the sleep process — it must
   # have no children. If it does, the fixture is wrong AND any
@@ -509,20 +747,40 @@ run_scenario_5() {
   # inner sleep gets adopted by init. ABORT the scenario without
   # calling reap_pid — calling reap_pid on a known-leaky fixture
   # would manufacture the very orphan we're trying to prevent.
+  #
+  # Ninth-round cleanup (this revision):
+  #     1. Walk the subtree in REAL DEPTH order (deepest first),
+  #        computed by collect_descendants_with_depth. We do NOT
+  #        use PID numeric order as a depth proxy — a higher-
+  #        numbered PID can be a direct child of a lower-numbered
+  #        parent, and a lower-numbered PID can be a grandchild.
+  #     2. Within each depth, sort by PID ascending for
+  #        determinism (so verifiers can assert a specific kill
+  #        sequence, not just "some ordering").
+  #     3. Each kill goes through pid_safe_kill_with_identity,
+  #        which verifies (a) PID in identities_tsv,
+  #        (b) PID alive, (c) lstart matches (PID-reuse guard),
+  #        (d) PID still in $PID's subtree.
+  #     4. After all descendants are gone, kill $PID itself via
+  #        pid_safe_kill_with_identity (identity check still
+  #        applies to $PID).
+  #     5. wait $PID so subsequent scenarios see a clean state.
+  #   No `pkill -KILL -P 1 sleep` of any kind.
   if [[ -n "$fixture_descendants" ]]; then
     fail "scenario5.pre_no_pid_children: $PID has descendants ($fixture_descendants); fixture did not exec — aborting scenario to prevent orphan manufacture"
-    # Safe-cleanup: kill descendants FIRST by PID (deepest-first
-    # so children die before their parents and never get a chance
-    # to be reparented to init), then kill $PID itself, then wait.
-    # Every kill targets a PID from owned_pids — never init's
-    # children as a group. pid_safe_kill re-verifies aliveness
-    # AND that the PID is still in $PID's subtree before sending
-    # SIGKILL, mitigating PID-reuse races.
-    local c
-    for c in $fixture_descendants; do
-      pid_safe_kill "$c" "$PID"
-    done
-    pid_safe_kill "$PID" "$PID"
+    # Depth-first kill order. The sort key is depth (descending),
+    # then PID (ascending). Tab-separated because depth and PID
+    # are guaranteed to be on the same line.
+    local depth_pids_sorted
+    depth_pids_sorted=$(collect_descendants_with_depth "$PID" \
+                          | sort -t$'\t' -k1,1nr -k2,2n)
+    local line depth pid
+    while IFS=$'\t' read -r depth pid; do
+      [[ -z "$pid" ]] && continue
+      pid_safe_kill_with_identity "$pid" "$PID" "$identities_tsv" "$depth"
+    done <<<"$depth_pids_sorted"
+    # Kill the root last.
+    pid_safe_kill_with_identity "$PID" "$PID" "$identities_tsv" "0"
     wait "$PID" 2>/dev/null || true
     # Subsequent scenarios still run because we `return` (not `exit`).
     return 1
@@ -538,34 +796,30 @@ run_scenario_5() {
   # Post-condition 1: $PID must be gone.
   if kill -0 "$PID" 2>/dev/null; then
     fail "scenario5.post_pid_dead: $PID still alive after reap_pid"
-    # $PID is provably ours (in owned_pids). Use pid_safe_kill so
-    # we re-verify aliveness and that $PID is still in its own
-    # subtree (i.e. has not been reparented or had its PID reused)
-    # before sending SIGKILL.
-    pid_safe_kill "$PID" "$PID"
+    # $PID is provably ours. Use pid_safe_kill_with_identity so
+    # we re-verify aliveness, lstart (PID-reuse guard), and that
+    # $PID is still in its own subtree.
+    pid_safe_kill_with_identity "$PID" "$PID" "$identities_tsv" "0"
   else
     ok "scenario5.post_pid_dead ($PID is gone)"
   fi
 
   # Post-condition 2: no descendant of $PID remains.
   #
-  # Eighth-round fix (Problem 2): the seventh-round code used
-  # `pgrep -P "$PID"` here and killed every PID it returned —
-  # without validating that those PIDs were in `owned_pids`. If
-  # an unrelated process happened to be reparented to $PID between
-  # reap and post-check (extremely unlikely but contractually
-  # relevant), we would kill it by PID. We now classify each
-  # residual PID as provable (in owned_pids) or unprovable (any
-  # other PID). We kill ONLY the provable ones. Unprovable ones
-  # are reported as residual and left untouched. This is the
-  # SAME ownership rule used everywhere else in this scenario.
+  # Ninth-round (problem 2 uniform ownership): every residual
+  # PID is classified as provable (in owned_pids) or unprovable.
+  # Provable ones are killed via pid_safe_kill_with_identity
+  # (membership + alive + lstart + subtree). Unprovable ones
+  # are reported as residual with their PIDs, NOT killed.
+  #
+  # Kill order: deepest-first by REAL depth (not by PID number).
+  # We re-query depth from the current pgrep -P because the
+  # subtree may have shifted slightly since observation; using
+  # observed depths would skip newly-orphaned-to-$PID PIDs.
   local remaining_children
   remaining_children=$(pgrep -P "$PID" 2>/dev/null | tr '\n' ' ' || true)
   remaining_children="${remaining_children% }"
   if [[ -n "$remaining_children" ]]; then
-    # Walk the residual set deepest-first so descendants die
-    # before their parents. Build the provable/unprovable split
-    # before any kill so the report is accurate.
     local provable_residual=""
     local unprovable_residual=""
     local c
@@ -579,14 +833,19 @@ run_scenario_5() {
     provable_residual="${provable_residual# }"
     unprovable_residual="${unprovable_residual# }"
 
-    # Kill only the provable ones (deepest-first ordering is
-    # automatic because BFS already lists children before parents
-    # when re-running collect_descendants_pids on the surviving
-    # subset — but to be explicit, sort PIDs descending).
+    # Kill provable ones deepest-first. Build a depth-ordered
+    # list restricted to the provable set.
     if [[ -n "$provable_residual" ]]; then
-      for c in $(echo "$provable_residual" | tr ' ' '\n' | sort -rn); do
-        pid_safe_kill "$c" "$PID"
-      done
+      local depth_pids_sorted
+      depth_pids_sorted=$(collect_descendants_with_depth "$PID" \
+                            | sort -t$'\t' -k1,1nr -k2,2n \
+                            | awk -F'\t' -v prov=" $provable_residual " \
+                                'index(prov, " " $2 " ") > 0')
+      local line depth pid
+      while IFS=$'\t' read -r depth pid; do
+        [[ -z "$pid" ]] && continue
+        pid_safe_kill_with_identity "$pid" "$PID" "$identities_tsv" "$depth"
+      done <<<"$depth_pids_sorted"
     fi
 
     if [[ -n "$unprovable_residual" ]]; then
@@ -636,15 +895,16 @@ run_scenario_5() {
     provable_orphans="${provable_orphans# }"
     unprovable_orphans="${unprovable_orphans# }"
 
-    # Kill only the provable ones (deepest-first ordering: PIDs
-    # are not ordered by depth here, so we sort numerically
-    # descending as a proxy). The orphans are now under PID 1,
-    # NOT under $PID, so we use pid_safe_kill_owned (whitelist
-    # membership + aliveness) instead of pid_safe_kill (which
-    # requires the target to still be under $PID's subtree).
+    # Kill only the provable ones. The orphans are now under
+    # PID 1, NOT under $PID, so we use pid_safe_kill_orphan
+    # (membership + lstart identity) instead of
+    # pid_safe_kill_with_identity (which requires the target
+    # to still be under $PID's subtree). The lstart check is
+    # the ONLY proof of identity we have for orphans; without
+    # it, a reused PID under init would be killed.
     if [[ -n "$provable_orphans" ]]; then
-      for o in $(echo "$provable_orphans" | tr ' ' '\n' | sort -rn); do
-        pid_safe_kill_owned "$o" "$owned_pids"
+      for o in $provable_orphans; do
+        pid_safe_kill_orphan "$o" "$identities_tsv"
       done
     fi
 
