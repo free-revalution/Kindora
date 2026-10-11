@@ -57,6 +57,7 @@ CLEANUP_OK=1
 INTERRUPTED=0
 TRAP_REENTERED=0
 CLEANUP_FINAL_RC=0
+CHILDREN_STARTED=0   # 1 only after both children were spawned
 SKIP_BUILD=${SKIP_BUILD:-0}     # 1 = skip cargo build (fixture scenario)
 
 # Best-effort alive probe. macOS ps -p may misreport zombies; we use it only
@@ -102,14 +103,19 @@ reap_pid() {
 }
 
 cleanup() {
+  # CRITICAL: capture $? as the very first statement. Any subsequent
+  # assignment / command would clobber $?, so do NOT move this line below
+  # any other statement. On direct entry this is the script's pre-cleanup
+  # exit code; on re-entry it is the previous trap's exit code, which we
+  # discard via TRAP_REENTERED.
+  local trap_rc=$?
+
   if [[ "$TRAP_REENTERED" -eq 1 ]]; then
     exit "$CLEANUP_FINAL_RC"
   fi
   TRAP_REENTERED=1
 
-  local trap_rc=$?
-
-  echo "[cleanup] run_id=$RUN_ID host_pid=${HOST_PID:-?} joiner_pid=${JOINER_PID:-?}" >&2
+  echo "[cleanup] run_id=$RUN_ID host_pid=${HOST_PID:-?} joiner_pid=${JOINER_PID:-?} trap_rc=$trap_rc" >&2
 
   reap_pid "$HOST_PID" HOST_REAP_RC
   reap_pid "$JOINER_PID" JOINER_REAP_RC
@@ -139,19 +145,41 @@ cleanup() {
   echo "host_exit=${HOST_REAP_RC:-?} joiner_exit=${JOINER_REAP_RC:-?} host_ok=$HOST_OK_LINE joiner_ok=$JOINER_OK_LINE cleanup_ok=$CLEANUP_OK interrupted=$INTERRUPTED" >&2
 
   local rc=0
+  # Priority ladder (highest first):
+  #   130  SIGINT / SIGTERM (interrupt flag set by trap)
+  #    12  cleanup fail — child survived cleanup
+  #    20  build fail (preserved from the early exit in stage 1)
+  #    30  precondition fail (preserved from the early exit in stage 2)
+  #    11  joiner fail (joiner non-zero exit OR missing OK line)
+  #    10  host   fail (host   non-zero exit OR missing OK line)
+  #     0  success
+  #
+  # If the script exited before children started (build/precond fail),
+  # CHILDREN_STARTED=0 and we MUST honour trap_rc (20 or 30) — otherwise
+  # the host/joiner empty-string checks below would demote it to 10.
   if [[ "$INTERRUPTED" -eq 1 ]]; then
     rc=130
   elif [[ "$CLEANUP_OK" -eq 0 ]]; then
     rc=12
   fi
-  if [[ "$trap_rc" -gt "$rc" ]]; then
-    rc="$trap_rc"
-  fi
-  if [[ "$rc" -eq 0 ]]; then
-    if [[ "${HOST_REAP_RC:-X}" != "0" || "$HOST_OK_LINE" -ne 0 ]]; then
-      rc=10
-    elif [[ "${JOINER_REAP_RC:-X}" != "0" || "$JOINER_OK_LINE" -ne 0 ]]; then
-      rc=11
+  if [[ "$CHILDREN_STARTED" -eq 0 ]]; then
+    # No children were ever spawned; trap_rc is the authoritative code.
+    if [[ "$trap_rc" -gt "$rc" ]]; then
+      rc="$trap_rc"
+    fi
+  else
+    # Children were spawned; trust the reaped exit codes over trap_rc
+    # for the host/joiner buckets, but still let trap_rc win for any
+    # higher-priority code (20 / 30 / 130) it carries.
+    if [[ "$trap_rc" -gt "$rc" && "$trap_rc" -ne 0 ]]; then
+      rc="$trap_rc"
+    fi
+    if [[ "$rc" -eq 0 ]]; then
+      if [[ "${HOST_REAP_RC:-X}" != "0" || "$HOST_OK_LINE" -ne 0 ]]; then
+        rc=10
+      elif [[ "${JOINER_REAP_RC:-X}" != "0" || "$JOINER_OK_LINE" -ne 0 ]]; then
+        rc=11
+      fi
     fi
   fi
 
@@ -200,6 +228,8 @@ echo "[main] host_pid=$HOST_PID" >&2
 "$JOINER_BIN" "$JOINER_PORT" "$HOST_PORT" >"$JOINER_LOG" 2>&1 &
 JOINER_PID=$!
 echo "[main] joiner_pid=$JOINER_PID" >&2
+
+CHILDREN_STARTED=1
 
 # --- 6) Watchdog: TERM/KILL if TIMEOUT_S exceeded ---
 TOTAL_WAIT_S=$(( TIMEOUT_S + 2 ))

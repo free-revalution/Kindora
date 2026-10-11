@@ -30,6 +30,10 @@ path = "tests/fixtures/host_bad_protocol.rs"
 name = "host_sleep_forever"
 path = "tests/fixtures/host_sleep_forever.rs"
 
+[[bin]]
+name = "host_ignore_term"
+path = "tests/fixtures/host_ignore_term.rs"
+
 [profile.dev]
 opt-level = 0
 debug = true
