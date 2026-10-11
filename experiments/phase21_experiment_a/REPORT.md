@@ -61,20 +61,22 @@ Sizes & mtimes also re-verified post-run — see `T12` in § 7.
   message on missing script. Runs from any cwd (verified: repo root,
   tests/ subdir, /tmp).
 - `experiments/phase21_experiment_a/tests/test_reap_pid_harness.sh` —
-  **fourth-round fix**: scenarios 2/3/7 no longer call `wait` before
-  `reap_pid` (the third-round reviewer's complaint). Pre-`wait` was
-  removed and replaced with `sleep` so the child exits naturally
-  (becomes a zombie) without the current shell having called `wait`
-  on it. `jobs -l` snapshots are now recorded as **diagnostic
-  output** (not assertions) because macOS bash 3.2 keeps only the
-  most recent `Done` job in the table, making the earlier-terminated
-  child unobservable. The core contract assertions (`rc`, `REAPED`,
-  sentinel survives second reap, host/joiner independence) are
-  unchanged. Assertion count: 31 (up from 29 in the third round,
-  because scenario 3 gained a "first reap is the first wait" pair and
-  scenarios 2/3/7 gained `record_jobs_snapshot` diagnostic lines
-  that produce one `[diag]` line each — those are not in the OK
-  count but are emitted to stderr).
+  **fifth-round fix**: Scenario 5's fixture now uses
+  `bash -c "trap '' TERM; exec sleep 30"` (added `exec`) so the
+  process tree has a single node instead of two. Previously the
+  fixture was `bash -c "trap '' TERM; sleep 30"` — that left an
+  outer bash and an inner sleep; when reap_pid KILL'd the outer
+  bash, the inner sleep was reparented to PID 1 (init) and ran
+  for the full 30 seconds as an orphan. The harness now (a) uses
+  `exec` so reap_pid kills sleep itself, (b) asserts
+  pre-reap that the PID has no children (proving `exec` worked),
+  (c) asserts post-reap that the PID is dead and has no children
+  (proving no orphan was created). The core TERM-ignored →
+  KILL-escalates → rc=137 contract is unchanged: the `trap '' TERM`
+  is installed before `exec`, so the new sleep process inherits
+  the SIGTERM-ignore disposition (signal dispositions are
+  inherited across `execve`). Assertion count: 34 (up from 31;
+  +3 for scenario 5 pre/post-checks).
 - `experiments/phase21_experiment_a/REPORT.md` — third-round
   fixes documented; § 7 T-stress rewritten with explicit
   race-fix description + 20/20 evidence; § 7b expanded from 9 to 29
@@ -250,7 +252,7 @@ Tested via `tests/test_priority_harness.sh` — 18/18 cases pass.
 end of the script) captures each exit code and sets
 `HOST_REAPED=1` / `JOINER_REAPED=1`. `cleanup()`'s `reap_pid` then
 short-circuits, so the same PID is **never** `wait`-ed twice. Verified
-by `tests/test_reap_pid_harness.sh` — 31/31 assertions pass — and observed
+by `tests/test_reap_pid_harness.sh` — 34/34 assertions pass — and observed
 in real-script runs: e.g. T1 cleanup shows `host_reaped=1 joiner_reaped=1`
 followed by `host_reap_rc=0 joiner_reap_rc=0`, proving the second
 `wait` did not run and did not clobber the exit code.
@@ -663,7 +665,7 @@ ALL 18 CASES PASSED
 ## 7b. Reap-pid idempotency unit tests (this revision)
 
 `tests/test_reap_pid_harness.sh` extracts `reap_pid()` and `is_alive()`
-from the real script and exercises **31 assertions** across the 7
+from the real script and exercises **34 assertions** across the 7
 scenarios from the reviewer spec.
 
 **Critical invariant documented in the test file**: children must be
@@ -710,12 +712,12 @@ platform-specific `jobs` behaviour that bash 3.2 makes unobservable.
 | 2          | reap_pid completes wait on a zombie child → rc=0, REAPED=1 (no pre-`wait`); jobs snapshot recorded | 2 |
 | 3          | First reap → rc=0, REAPED=1; sentinel rc=55 survives second reap (no pre-`wait`) | 4 |
 | 4          | Active child TERM'd → rc=143, child reaped (ps no longer sees it) | 3 |
-| 5          | TERM-ignored → KILL → rc=137 (joiner-side variables for host/joiner independence) | 2 |
+| 5          | TERM-ignored → KILL → rc=137 (joiner-side variables); fixture uses `exec` so process tree is a single node; pre-reap asserts PID has no children (proves exec worked); post-reap asserts PID is dead AND has no children (proves no orphan leak) | 5 |
 | 6          | Empty PID leaves HOST_REAP_RC=88, HOST_REAPED=1 untouched | 2 |
 | 6b         | Empty PID leaves JOINER_REAP_RC='' , JOINER_REAPED=0 untouched | 2 |
 | 7          | Host-side and joiner-side variables are independent in both directions; no pre-`wait` (jobs snapshots recorded) | 12 |
 
-Total: 31 assertions.
+Total: 34 assertions.
 
 ```text
 $ bash tests/test_reap_pid_harness.sh
@@ -735,28 +737,31 @@ OK  [10] scenario3.reaped_still_1: got='1'
 OK  [11] scenario4.rc_is_143: got='143'
 OK  [12] scenario4.reaped_is_1: got='1'
 OK  [13] scenario4.child_not_alive
-OK  [14] scenario5.rc_is_137: got='137'
-OK  [15] scenario5.reaped_is_1: got='1'
-OK  [16] scenario6.rc_unchanged: got='88'
-OK  [17] scenario6.reaped_unchanged: got='1'
-OK  [18] scenario6b.empty_rc_empty: got=''
-OK  [19] scenario6b.empty_reaped_0: got='0'
+OK  [14] scenario5.pre_no_pid_children (32873 has no children)
+OK  [15] scenario5.rc_is_137: got='137'
+OK  [16] scenario5.reaped_is_1: got='1'
+OK  [17] scenario5.post_pid_dead (32873 is gone)
+OK  [18] scenario5.post_no_pid_children (no orphans under 32873)
+OK  [19] scenario6.rc_unchanged: got='88'
+OK  [20] scenario6.reaped_unchanged: got='1'
+OK  [21] scenario6b.empty_rc_empty: got=''
+OK  [22] scenario6b.empty_reaped_0: got='0'
 [diag] scenario7:before_host:   jobs does NOT list 23796 (...)
 [diag] scenario7:before_joiner: jobs lists 23797 (...)
-OK  [20] scenario7.host_rc: got='0'
-OK  [21] scenario7.joiner_rc: got='0'
-OK  [22] scenario7.host_reaped: got='1'
-OK  [23] scenario7.joiner_reaped: got='1'
-OK  [24] scenario7.host_rc_independent: got='11'
-OK  [25] scenario7.joiner_rc_independent: got='0'
-OK  [26] scenario7.host_reaped_independent: got='1'
-OK  [27] scenario7.joiner_reaped_independent: got='1'
-OK  [28] scenario7.host_rc_rev: got='11'
-OK  [29] scenario7.joiner_rc_rev: got='22'
-OK  [30] scenario7.host_reaped_rev: got='1'
-OK  [31] scenario7.joiner_reaped_rev: got='1'
+OK  [23] scenario7.host_rc: got='0'
+OK  [24] scenario7.joiner_rc: got='0'
+OK  [25] scenario7.host_reaped: got='1'
+OK  [26] scenario7.joiner_reaped: got='1'
+OK  [27] scenario7.host_rc_independent: got='11'
+OK  [28] scenario7.joiner_rc_independent: got='0'
+OK  [29] scenario7.host_reaped_independent: got='1'
+OK  [30] scenario7.joiner_reaped_independent: got='1'
+OK  [31] scenario7.host_rc_rev: got='11'
+OK  [32] scenario7.joiner_rc_rev: got='22'
+OK  [33] scenario7.host_reaped_rev: got='1'
+OK  [34] scenario7.joiner_reaped_rev: got='1'
 ----
-PASS: 31 / 31
+PASS: 34 / 34
 ALL TESTS PASSED
 ```
 
@@ -771,6 +776,60 @@ Diagnostic lines (`[diag] ...`) are emitted by `record_jobs_snapshot`
 to stderr and document what `jobs -l` reported at the observation
 points. They are **observational**, not assertions — see the
 "Fourth-round honest disclosure" section above for why.
+
+**Fifth-round fix (Scenario 5 process-tree leak)**: the Scenario 5
+fixture was previously `bash -c "trap '' TERM; sleep 30"`. That
+launches an outer bash that forks a sleep. When reap_pid sent
+KILL to the outer PID (returned by `$!`), the outer bash died but
+the inner sleep was reparented to PID 1 (init) and ran for the
+full 30 seconds as an orphan. ChatGPT caught this in the
+fifth-round review by inspecting GitHub. Reproduced locally:
+
+```text
+$ bash -c "trap '' TERM; sleep 30" &
+OUTER_PID=33429
+$ ps -p 33429 -o pid,ppid,stat,comm
+33429 33427 SN   bash
+$ pgrep -P 33429
+33431                                # <-- inner sleep, parent=outer bash
+$ kill -KILL 33429; wait 33429; rc=137
+$ ps -A -o pid,ppid,comm | awk '$2 == 33429 || ($2 == 1 && $3 == "sleep")'
+33431     1 sleep                   # <-- orphan, leaked
+```
+
+The fixture is now `bash -c "trap '' TERM; exec sleep 30"`. The
+`exec` replaces the bash process image with `sleep` itself, so:
+
+  - The PID returned by `$!` IS the sleep process (single-node tree).
+  - `trap '' TERM` is installed before `exec`, so the new sleep
+    process inherits the SIGTERM-ignore disposition (signal
+    dispositions are preserved across `execve`). The TERM → grace
+    → KILL escalation contract is unchanged.
+  - reap_pid's KILL now removes the only node in the tree; nothing
+    is reparented to init.
+
+Verification that the new fixture has no orphan leak:
+
+```text
+$ bash tests/test_reap_pid_harness.sh
+...
+OK  [14] scenario5.pre_no_pid_children (32873 has no children)
+OK  [15] scenario5.rc_is_137: got='137'
+OK  [16] scenario5.reaped_is_1: got='1'
+OK  [17] scenario5.post_pid_dead (32873 is gone)
+OK  [18] scenario5.post_no_pid_children (no orphans under 32873)
+...
+PASS: 34 / 34
+ALL TESTS PASSED
+
+# After the harness:
+$ ps -A -o pid,ppid,comm | awk '$3 == "sleep"'    # → (none)
+$ ps -A -o pid,ppid,comm | awk '$2 == 1 && $3 == "sleep"'    # → (none)
+```
+
+The pre-reap and post-reap assertions were added so the harness
+fails LOUDLY if the fixture is ever changed back to a non-`exec`
+form.
 
 ## 7c. Regression sub-tests for the `$?`-capture fix (first revision, retained)
 
@@ -809,6 +868,7 @@ match the baseline in § 2. **No originals were touched.**
 | `kill -0` on zombie PID | Cannot reliably distinguish alive vs zombie on macOS | `wait` return used as sole evidence of reclamation; `kill -0` only used for best-effort probe |
 | `jobs -l` only keeps the most recent `Done` background job on macOS bash 3.2 | Earlier-terminated background children are unobservable via `jobs -l` even when no `wait` has run | reap_pid harness records `jobs -l` as `[diag]` diagnostic output rather than hard assertion; the test still proves the contract via the code path (no pre-`wait`) |
 | bash 3.2 second `wait` returns 0 (not 127) for previously reaped child | Platform behaviour; means `reap_pid`'s return code alone cannot prove it was the first waiter | Test asserts on `rc_var` / `REAPED` side-effects, not on `wait`'s exit code |
+| KILL of an outer `bash -c "..." &` leaves the inner `sleep` orphaned (reparented to PID 1, init) | macOS does not propagate SIGKILL to forked-but-not-reaped children | Scenario 5 fixture now uses `bash -c "...; exec sleep 30"` so the process tree has one node; pre/post assertions verify no orphan is created |
 
 ## 11. Overall Conclusion
 
@@ -840,7 +900,7 @@ non-most-recent child (see § 7b "Fourth-round honest disclosure").
 | **Stress: 20x normal handshake (T-stress)** | **PASS (20/20 rc=0, hostOK + joinerOK both verified per iteration; failure evidence recording active but no failures occurred)** |
 | Cleanup `$?`-capture fix (regression-30/20/0/child-fail) | PASS |
 | **decide_priority() unit tests (18/18)** | **PASS** |
-| **reap_pid() idempotency unit tests (31/31)** | **PASS (scenarios 2/3/7 fixed: no pre-`wait`; jobs snapshots are diagnostic-only on bash 3.2)** |
+| **reap_pid() idempotency unit tests (34/34)** | **PASS (scenarios 2/3/7 fixed: no pre-`wait`; jobs snapshots are diagnostic-only on bash 3.2; scenario 5 fixture uses `exec` to avoid orphan leak)** |
 | Source-file integrity (T12) | PASS (every check) |
 | Bash SIGINT (background, T7a) | NOT_VERIFIED (re-confirmed: `kill -INT <pid>` does not fire bash INT trap on macOS bash 3.2 in non-tty; see T7a section) |
 | Foreground Ctrl-C (T7c) | NOT_VERIFIED (cannot be automated; manual reproduction steps in T7c section) |
@@ -892,7 +952,7 @@ SKIP_BUILD=1 JOINER_BIN_OVERRIDE=/nonexistent/joiner bash scripts/run_unicast_te
 bash -n scripts/run_unicast_test.sh                            # T10
 cargo test --offline --manifest-path Cargo.toml --bin lan_cross_process_host                 # T11
 bash tests/test_priority_harness.sh                            # § 7a (18/18 priority unit tests)
-bash tests/test_reap_pid_harness.sh                            # § 7b (31/31 reap_pid unit tests)
+bash tests/test_reap_pid_harness.sh                            # § 7b (34/34 reap_pid unit tests)
 
 # T-build (build fail → exit=20). Invoke from a tempdir with no Cargo.toml:
 TMPDIR=$(mktemp -d); ln -sf "$PWD/scripts/run_unicast_test.sh" "$TMPDIR/"

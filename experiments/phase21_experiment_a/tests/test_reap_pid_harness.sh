@@ -236,16 +236,65 @@ fi
 # -----------------------------------------------------------------------------
 # Scenario 5: TERM-ignored child escalates to KILL (137). Uses joiner-side
 # variables for host/joiner independence.
+#
+# Fixture: `bash -c "trap '' TERM; exec sleep 30" &`
+#
+# The `exec sleep 30` is critical — it replaces the bash subshell's
+# process image with `sleep` itself. After exec, $! is the sleep
+# process PID, not a bash. When reap_pid later sends TERM, the
+# inherited `trap '' TERM` makes the sleep ignore it (because
+# signals that ignore disposition is inherited across exec), the
+# grace window elapses, reap_pid escalates to KILL, and the SAME
+# PID is reaped. No orphan process is left behind.
+#
+# The pre-fifth-round fixture was `bash -c "trap '' TERM; sleep 30"`
+# (no exec). That left a TWO-process tree: an outer bash and an
+# inner sleep. reap_pid's KILL targeted the outer bash (the PID
+# returned by $!), but the inner sleep survived — bash had
+# already forked it — and was adopted by PID 1 (init). The orphan
+# ran for the full 30 seconds. ChatGPT caught this in the
+# fifth-round review; this scenario now uses `exec` so the
+# process tree has exactly one node.
+#
+# Post-test process-leak guard (the new assertion):
+#   Before reap_pid: assert no sleep child of $PID exists (exec
+#     means there are no children at all).
+#   After reap_pid:  assert no process with $PID as parent exists
+#     (reap_pid's KILL removed the only node; nothing was
+#     reparented to init).
 # -----------------------------------------------------------------------------
-echo "--- Scenario 5: TERM-ignored child → KILL (joiner side) ---"
-bash -c "trap '' TERM; sleep 30" &
+echo "--- Scenario 5: TERM-ignored child escalates to KILL (joiner side) ---"
+bash -c "trap '' TERM; exec sleep 30" &
 PID=$!
 sleep 0.3
+
+# Pre-condition: with `exec`, the launched PID IS sleep — it must
+# have no children. (If this fails, the fixture did not exec and
+# we have a leak waiting to happen.)
+if children=$(pgrep -P "$PID" 2>/dev/null) && [[ -n "$children" ]]; then
+  fail "scenario5.pre_no_pid_children: $PID has children ($children); fixture did not exec — aborting to avoid orphan leak"
+else
+  ok "scenario5.pre_no_pid_children ($PID has no children)"
+fi
+
 JOINER_REAP_RC=""
 JOINER_REAPED=0
 reap_pid "$PID" JOINER_REAP_RC JOINER_REAPED
 expect_eq "scenario5.rc_is_137"   "137" "$JOINER_REAP_RC"
 expect_eq "scenario5.reaped_is_1" "1"   "$JOINER_REAPED"
+
+# Post-condition: no orphan survives. Two checks because init
+# reparenting is platform-dependent and we want to be sure.
+if kill -0 "$PID" 2>/dev/null; then
+  fail "scenario5.post_pid_dead: $PID still alive after reap_pid"
+else
+  ok "scenario5.post_pid_dead ($PID is gone)"
+fi
+if children=$(pgrep -P "$PID" 2>/dev/null) && [[ -n "$children" ]]; then
+  fail "scenario5.post_no_pid_children: $PID still has children ($children) — orphan leak"
+else
+  ok "scenario5.post_no_pid_children (no orphans under $PID)"
+fi
 
 # -----------------------------------------------------------------------------
 # Scenario 6: Empty PID does nothing — no wait, no state change.
