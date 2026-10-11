@@ -293,7 +293,45 @@ echo "[main] run_id=$RUN_ID starting host_pid=$$" >&2
 HOST_PID=$!
 echo "[main] host_pid=$HOST_PID" >&2
 
-# --- 5) Start Joiner (concurrent) ---
+# --- 4b) Synchronize: wait until the host has printed
+# "[host] waiting for 'ready'" (i.e. it has bound its UDP socket and is
+# now actively reading). Without this, the joiner can be spawned and send
+# its "ready" datagram before the host has bound, and UDP gives no signal
+# of the loss — host then times out (rc=7) and decide_priority returns 11.
+#
+# This is a script-level synchronization primitive only. Production Rust
+# binaries are unchanged. We poll HOST_LOG with a small bounded budget
+# (HOST_READY_WAIT_S seconds, polled every ~50ms) and fall through with
+# a clear warning if the marker never appears — the watchdog downstream
+# still reaps the children, so the worst case is a transient T-stress
+# failure, not a hang.
+#
+# Implementation note: bash's [[ ... -lt ... ]] is integer-only, so we
+# track integer iteration counts and derive elapsed time from them.
+HOST_READY_WAIT_S=${HOST_READY_WAIT_S:-5}
+HOST_READY_POLL_ITERS=$(( HOST_READY_WAIT_S * 20 ))   # ~50ms cadence
+host_ready=0
+host_wait_iter=0
+# Note: under `set -u`, `[[ -lt "$VAR" ]]` requires a defaulting expansion
+# (`${VAR:-default}`); a bare `$VAR` reference inside [[ can spuriously
+# trigger "unbound variable". Use the safe pattern.
+while [[ "$host_wait_iter" -lt "${HOST_READY_POLL_ITERS:-100}" ]]; do
+  if [[ -f "$HOST_LOG" ]] && grep -q "waiting for 'ready'" "$HOST_LOG" 2>/dev/null; then
+    host_ready=1
+    break
+  fi
+  if ! is_alive "$HOST_PID"; then
+    echo "[main] host died before reporting 'waiting for ready'" >&2
+    break
+  fi
+  sleep 0.05
+  host_wait_iter=$(( host_wait_iter + 1 ))
+done
+if [[ "$host_ready" -ne 1 ]]; then
+  echo "[main] WARN: host ready-marker not seen after ${HOST_READY_WAIT_S}s; proceeding anyway" >&2
+fi
+
+# --- 5) Start Joiner (after host is confirmed listening) ---
 "$JOINER_BIN" "$JOINER_PORT" "$HOST_PORT" >"$JOINER_LOG" 2>&1 &
 JOINER_PID=$!
 echo "[main] joiner_pid=$JOINER_PID" >&2

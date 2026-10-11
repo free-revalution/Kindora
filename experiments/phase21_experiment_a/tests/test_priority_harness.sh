@@ -10,7 +10,17 @@
 
 set -u
 
-SCRIPT=/Users/jiang/development/Kindora/experiments/phase21_experiment_a/scripts/run_unicast_test.sh
+# Locate the real script relative to this test file's location, so the
+# test works regardless of where the repo is cloned.
+TEST_DIR=$(cd "$(dirname "$0")" && pwd)
+PROJECT_ROOT=$(cd "$TEST_DIR/.." && pwd)
+SCRIPT="$PROJECT_ROOT/scripts/run_unicast_test.sh"
+
+if [[ ! -f "$SCRIPT" ]]; then
+  echo "FATAL: cannot find run_unicast_test.sh at $SCRIPT" >&2
+  echo "  PROJECT_ROOT resolved to: $PROJECT_ROOT" >&2
+  exit 2
+fi
 
 # Reset state between cases.
 reset_state() {

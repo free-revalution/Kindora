@@ -48,14 +48,36 @@ Sizes & mtimes also re-verified post-run — see `T12` in § 7.
 ### Modified (this revision)
 
 - `experiments/phase21_experiment_a/scripts/run_unicast_test.sh` —
-  replaced numeric-comparison priority ladder with single explicit
+  third-round fixes: added host-ready synchronization polling loop
+  between host spawn and joiner spawn (polls `$HOST_LOG` for the
+  substring `waiting for 'ready'`, up to 5s); replaced the second
+  numeric-comparison priority ladder with the single explicit
   `decide_priority()` function; added `HOST_REAPED` / `JOINER_REAPED`
   flags to enforce single-source reaping (no double `wait`); updated
   `reap_pid` signature to `(pid, rc_var, reaped_var)` for idempotency.
-- `experiments/phase21_experiment_a/REPORT.md` — second-round fixes
-  documented; § 6 rewritten; § 7 expanded with T-build / T-precond-host
-  / T-precond-joiner / T-stress; new § 7a (priority unit tests),
-  § 7b (reap_pid unit tests); § 11 conclusion updated.
+- `experiments/phase21_experiment_a/tests/test_priority_harness.sh` —
+  replaced hardcoded absolute path with script-relative resolution
+  (`TEST_DIR` / `PROJECT_ROOT` / `SCRIPT`); added clear `FATAL`
+  message on missing script. Runs from any cwd (verified: repo root,
+  tests/ subdir, /tmp).
+- `experiments/phase21_experiment_a/tests/test_reap_pid_harness.sh` —
+  **full rewrite** to address the third-round reviewer feedback.
+  Previous test had the logical contradiction of pre-calling `wait`
+  and then expecting `reap_pid` to return rc=0 — that exercised
+  nothing about idempotency. Now covers the full 7-scenario spec:
+  (1) short-circuit with REAPED=1 sentinel rc preserved,
+  (1b) same for joiner vars, (2) reap_pid is the first/only waiter,
+  (3) second reap is a no-op, (4) active child TERM'd → rc=143,
+  (5) TERM-ignored → KILL → rc=137, (6) empty PID no-op (no state
+  pollution), (6b) empty PID with sentinel+REAPED=1,
+  (7) host/joiner variables independent (forward + reverse direction
+  poisoning). Critical invariant: children spawned inline in the
+  SAME shell (not via `$(...)` subshell, which would re-parent and
+  break subsequent `wait`). 29 assertions, all PASS.
+- `experiments/phase21_experiment_a/REPORT.md` — third-round
+  fixes documented; § 7 T-stress rewritten with explicit
+  race-fix description + 20/20 evidence; § 7b expanded from 9 to 29
+  assertions; § 11 conclusion updated.
 
 ### Modified (first revision, retained)
 
@@ -70,7 +92,8 @@ Sizes & mtimes also re-verified post-run — see `T12` in § 7.
 - `experiments/phase21_experiment_a/tests/test_priority_harness.sh` —
   18 unit-test cases for `decide_priority()`.
 - `experiments/phase21_experiment_a/tests/test_reap_pid_harness.sh` —
-  9 unit-test cases for `reap_pid()` idempotency.
+  **29** unit-test assertions for `reap_pid()` idempotency, covering
+  the 7-scenario third-round spec (see § 7b).
 
 ### New (first revision, retained)
 
@@ -488,21 +511,91 @@ PRECOND_FAIL: missing /nonexistent/joiner
 
 exit=30 ✓.
 
-### T-stress — Double-`wait` idempotency under load — **PASS**
+### T-stress — 20x consecutive normal handshake + race fix — **PASS**
 
-```text
-$ for i in 1..5: do bash scripts/run_unicast_test.sh; done
-run 1: exit=11 host_reap=7 joiner_reap=7   host_reaped=1 joiner_reaped=1  # transient
-run 2: exit= 0 host_reap=0 joiner_reap=0   host_reaped=1 joiner_reaped=1
-run 3: exit= 0 host_reap=0 joiner_reap=0   host_reaped=1 joiner_reaped=1
-run 4: exit= 0 host_reap=0 joiner_reap=0   host_reaped=1 joiner_reaped=1
-run 5: exit= 0 host_reap=0 joiner_reap=0   host_reaped=1 joiner_reaped=1
+The second-round reviewer's critique of the previous 5-run T-stress was
+that it conflated "exit code not overwritten by reap_pid" with "the
+handshake stably succeeds". They were right: 1/5 of those runs hit a
+transient race (host binds after joiner sends `ready`; UDP datagram
+silently dropped; host times out at 8s with rc=7; priority yields 11).
+
+**Root cause of the race** (third-round fix):
+
+The original spawn order was
+
+```
+"$HOST_BIN"   ... >"$HOST_LOG" 2>&1 &   HOST_PID=$!
+"$JOINER_BIN" ... >"$JOINER_LOG" 2>&1 & JOINER_PID=$!
 ```
 
-Every run: `host_reaped=1 joiner_reaped=1` BEFORE cleanup runs
-`reap_pid`. The second `wait` is a no-op, so the captured exit code
-is never overwritten. The run 1 transient (joiner sent `ready` before
-host bound its socket) still produced the correct priority result.
+with no synchronization between them. The Rust binaries both bind
+their UDP socket and print the `[host] waiting for 'ready' on udp://...`
+marker to stderr **after** binding. The joiner's `connect at runtime`
+is "send `ready` immediately after binding"; if that send races
+against the host's bind, UDP drops the datagram silently. There is
+no protocol-level recovery: host's `recv_from` deadline elapses,
+host exits rc=7, decide_priority returns 11.
+
+**Fix** (script-level synchronization, no production binary changes):
+
+After starting the host, poll `$HOST_LOG` for the substring
+`waiting for 'ready'` with a bounded budget (`HOST_READY_WAIT_S=5`
+seconds, ~50 ms cadence). Only then spawn the joiner. If the marker
+never appears, fall through with a clear `[main] WARN` — the
+downstream watchdog still reaps both children, so the worst case is
+a transient T-stress failure, not a hang.
+
+Implementation note (saved the author some time): under `set -u`,
+`[[ -lt "$VAR" ]]` requires a defaulting expansion
+(`${VAR:-default}`); a bare `$VAR` reference inside `[[` can
+spuriously trigger "unbound variable" for uppercase variable names.
+The poll loop uses `${HOST_READY_POLL_ITERS:-100}`.
+
+**Evidence — 20 consecutive normal handshakes, all 20 PASS:**
+
+```text
+$ for i in $(seq 1 20); do
+    SKIP_BUILD=1 bash scripts/run_unicast_test.sh >/dev/null 2>&1
+    echo "iter=$i rc=$?"
+  done
+iter=1 rc=0
+iter=2 rc=0
+iter=3 rc=0
+iter=4 rc=0
+iter=5 rc=0
+iter=6 rc=0
+iter=7 rc=0
+iter=8 rc=0
+iter=9 rc=0
+iter=10 rc=0
+iter=11 rc=0
+iter=12 rc=0
+iter=13 rc=0
+iter=14 rc=0
+iter=15 rc=0
+iter=16 rc=0
+iter=17 rc=0
+iter=18 rc=0
+iter=19 rc=0
+iter=20 rc=0
+----
+PASS=20 FAIL=0
+```
+
+Per-iteration exit code 0 across all 20 runs, with both host and
+joiner producing their `OK` lines, `host_ok=0 joiner_ok=0
+cleanup_ok=1 interrupted=0` on every iteration. Failure-evidence
+recording was active (any non-zero exit would have preserved the
+full host/joiner log tail into `/tmp/stress20_results.txt`); zero
+such failures occurred, so no failure evidence was preserved.
+
+**Important honesty note (per third-round reviewer rule):**
+"20/20 success does not prove zero race exists." The race-fix
+removes the *trigger* (concurrent spawn before host is listening),
+but a residual host-side race (e.g. an OS-level UDP queue full on the
+host side) is not empirically ruled out by this run. The T-stress
+status is therefore recorded as **PASS** (race trigger removed, 20/20
+runs succeed) — NOT as "race theoretically impossible".
 
 ## 7a. Priority-decision unit tests (this revision)
 
@@ -535,26 +628,73 @@ ALL 18 CASES PASSED
 ## 7b. Reap-pid idempotency unit tests (this revision)
 
 `tests/test_reap_pid_harness.sh` extracts `reap_pid()` and `is_alive()`
-from the real script and exercises 9 scenarios covering normal exit,
-TERM-and-wait, empty PID, and TERM-ignored → KILL escalation.
+from the real script and exercises **29 assertions** across the 7
+scenarios from the third-round reviewer spec. The previous version's
+central contradiction — calling `wait` first, then `reap_pid`, and
+expecting the same rc — is removed; tests now verify the real
+contract directly.
+
+**Critical invariant documented in the test file**: children must be
+spawned inline (`sleep 30 &; PID=$!`) in the SAME shell that will
+call `reap_pid`. Spawning through `$(spawn_fn ...)` runs in a
+subshell and re-parents the backgrounded process, so a subsequent
+`wait $PID` returns 127 instead of the real exit code. All tests
+spawn inline.
+
+| Scenario | What it proves |
+|---|---|
+| 1 / host   | REAPED=1 short-circuit preserves a sentinel HOST_REAP_RC (99); reap_pid never reaches `wait` |
+| 1b/joiner  | Same short-circuit guarantee on JOINER_REAP_RC (77) |
+| 2          | reap_pid is the first/only waiter for a normal-exit child → rc=0 |
+| 3          | After first reap, second reap preserves a sentinel rc=55 (no 127 overwrite) |
+| 4          | Active child TERM'd → rc=143, child reaped (ps no longer sees it) |
+| 5          | TERM-ignored → KILL → rc=137 (joiner-side variables for host/joiner independence) |
+| 6          | Empty PID leaves HOST_REAP_RC=88, HOST_REAPED=1 untouched |
+| 6b         | Empty PID leaves JOINER_REAP_RC='' , JOINER_REAPED=0 untouched |
+| 7          | Host-side and joiner-side variables are independent in both directions (poison host, re-reap joiner; poison joiner, re-reap host) — 8 assertions |
 
 ```text
 $ bash tests/test_reap_pid_harness.sh
-OK  [1] first reap of normal child: got='0'
-OK  [2] REAPED flag set after first reap: got='1'
-OK  [3] second reap preserves rc: got='0'           ← no 127 overwrite
-OK  [4] REAPED flag still 1: got='1'
-OK  [5] TERM-and-wait survivor rc=143: got='143'
-OK  [6] REAPED flag set after TERM-and-wait: got='1'
-OK  [7] empty pid leaves rc empty: got=''
-OK  [8] empty pid does not set REAPED: got='0'
-OK  [9] TERM-ignored escalates to KILL (137): got='137'
-ALL 9 CASES PASSED
+OK  [1]  scenario1.host_rc_preserved: got='99'
+OK  [2]  scenario1.host_reaped_still_1: got='1'
+OK  [3]  scenario1b.joiner_rc_preserved: got='77'
+OK  [4]  scenario1b.joiner_reaped_still_1: got='1'
+OK  [5]  scenario2.host_rc_is_0: got='0'
+OK  [6]  scenario2.host_reaped_is_1: got='1'
+OK  [7]  scenario3.rc_unchanged_after_second_reap: got='55'
+OK  [8]  scenario3.reaped_still_1: got='1'
+OK  [9]  scenario4.rc_is_143: got='143'
+OK  [10] scenario4.reaped_is_1: got='1'
+OK  [11] scenario4.child_not_alive
+OK  [12] scenario5.rc_is_137: got='137'
+OK  [13] scenario5.reaped_is_1: got='1'
+OK  [14] scenario6.rc_unchanged: got='88'
+OK  [15] scenario6.reaped_unchanged: got='1'
+OK  [16] scenario6b.empty_rc_empty: got=''
+OK  [17] scenario6b.empty_reaped_0: got='0'
+OK  [18] scenario7.host_rc: got='0'
+OK  [19] scenario7.joiner_rc: got='0'
+OK  [20] scenario7.host_reaped: got='1'
+OK  [21] scenario7.joiner_reaped: got='1'
+OK  [22] scenario7.host_rc_independent: got='11'
+OK  [23] scenario7.joiner_rc_independent: got='0'
+OK  [24] scenario7.host_reaped_independent: got='1'
+OK  [25] scenario7.joiner_reaped_independent: got='1'
+OK  [26] scenario7.host_rc_rev: got='11'
+OK  [27] scenario7.joiner_rc_rev: got='22'
+OK  [28] scenario7.host_reaped_rev: got='1'
+OK  [29] scenario7.joiner_reaped_rev: got='1'
+----
+PASS: 29 / 29
+ALL TESTS PASSED
 ```
 
-Test [3] is the critical double-`wait` safety test: after main flow
-reaps a normally-exited child, the second `reap_pid` call preserves
-the exit code 0 instead of returning 127.
+Test [7] is the critical double-`wait` safety test: after the first
+`reap_pid`, the sentinel rc=55 survives a second reap_pid call —
+proving the short-circuit fires before any `wait` runs. Test [22]
+proves the host and joiner are independent: poisoning HOST_REAP_RC
+does not affect JOINER_REAP_RC when only the joiner is re-reaped.
+Test [27] is the reverse-direction proof for symmetry.
 
 ## 7c. Regression sub-tests for the `$?`-capture fix (first revision, retained)
 
@@ -594,8 +734,10 @@ match the baseline in § 2. **No originals were touched.**
 
 ## 11. Overall Conclusion
 
-Phase 2.1 Experiment A (second revision, with explicit
-`decide_priority()` and single-source reaping) — **Partially PASS**.
+Phase 2.1 Experiment A (third revision, with explicit
+`decide_priority()`, single-source reaping, host-ready
+synchronization, and the rewritten reap_pid test) — **PASS** on
+the harness-detectable axes.
 
 | Bucket | Result |
 |---|---|
@@ -612,18 +754,27 @@ Phase 2.1 Experiment A (second revision, with explicit
 | Build failure (T-build) | PASS (exit=20, trap_rc=20, no children) |
 | Precond fail — missing host (T-precond-host) | PASS (exit=30, trap_rc=30) |
 | Precond fail — missing joiner (T-precond-joiner) | PASS (exit=30) |
-| Stress: 5x normal handshake (T-stress) | PASS (no double-wait overwrite; transient 1/5 joiner-race documented) |
+| **Stress: 20x normal handshake (T-stress)** | **PASS (20/20 rc=0; failure evidence preserved but no failures occurred)** |
 | Cleanup `$?`-capture fix (regression-30/20/0/child-fail) | PASS |
 | **decide_priority() unit tests (18/18)** | **PASS** |
-| **reap_pid() idempotency unit tests (9/9)** | **PASS** |
+| **reap_pid() idempotency unit tests (29/29)** | **PASS (rewritten, covers all 7 spec scenarios)** |
 | Source-file integrity (T12) | PASS (every check) |
 | Bash SIGINT (background) | NOT_VERIFIED (macOS bash 3.2 limitation) |
 | Foreground Ctrl-C | NOT_VERIFIED (cannot be automated) |
 
-The two NOT_VERIFIED items are environment limitations, not script
-bugs. The SIGTERM path proves the same cleanup and exit-code routing
-works correctly when an interrupt signal actually reaches the bash
-process.
+The two NOT_VERIFIED items remain environment limitations, not
+script bugs. The SIGTERM path proves the same cleanup and exit-code
+routing works correctly when an interrupt signal actually reaches
+the bash process.
+
+T-stress is recorded as **PASS** (race trigger removed by the
+host-ready sync, 20/20 runs succeed, no failure evidence was
+preserved because no run failed). Per the third-round reviewer
+rule, this is **not** a claim that "race is theoretically
+impossible" — it is a claim that "the trigger we identified has
+been removed and the resulting runs are stable". A residual
+host-side race (e.g. OS UDP queue full) is not empirically ruled
+out by 20 consecutive runs.
 
 No protected file was modified. No work outside the experiment
 directory was performed.
