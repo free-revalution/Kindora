@@ -8,7 +8,7 @@ Rust processes, isolated from the main Tauri project.
 | Item | Value |
 |---|---|
 | HEAD commit (pre-experiment) | `009f8fa37ccd04527809e5f33e874805f7b6bfde` |
-| HEAD commit (this revision)  | `52c1bc2` (sixth round: Scenario 5 Gap 1 + Gap 2 closure; SHA in this row is the SHA of the parent of the commit that added the row — the actual HEAD is `git log -1`.) |
+| HEAD commit (this revision)  | `cc16314` (seventh round: PID-scoped cleanup — eliminate over-broad `pkill -KILL -P 1 sleep`; SHA in this row is the SHA of the parent of the commit that added the row — the actual HEAD is `git log -1`.) |
 | Branch | `main` |
 | rustc | 1.77.2 (25ef9e3d8 2024-04-09) |
 | cargo | 1.77.2 (e52e36006 2024-03-26) |
@@ -61,7 +61,46 @@ Sizes & mtimes also re-verified post-run — see `T12` in § 7.
   message on missing script. Runs from any cwd (verified: repo root,
   tests/ subdir, /tmp).
 - `experiments/phase21_experiment_a/tests/test_reap_pid_harness.sh` —
-  **sixth-round fix**: ChatGPT reviewed the actual code at
+  **seventh-round fix**: ChatGPT's seventh-round review of the
+  actual code at `8b1cbe4` identified that the sixth-round
+  cleanup used `pkill -KILL -P 1 sleep` — a broad-pattern kill
+  that would target ANY sleep process parented to PID 1 (init),
+  including unrelated processes that happen to be there. That
+  is a test-isolation violation: the test's cleanup must NEVER
+  affect processes it cannot prove are its own. **Fix (this
+  revision)**: the scenario 5 body now captures an `owned_pids`
+  whitelist at observation time (`$PID` + its direct children
+  observed via `pgrep -P "$PID"`). Every kill below targets a
+  PID from this whitelist — never init's children as a group.
+    - Pre-check FAIL cleanup (Gap 1 abort path): kill children
+      FIRST by PID (so they die before being reparented), then
+      kill `$PID`, then `wait`. No `pkill -P 1` of any kind.
+    - Post-condition 1 cleanup (PID still alive): `kill -KILL $PID`
+      only ($PID is in owned_pids — provably ours).
+    - Post-condition 2 cleanup (descendants remain): kill each
+      remaining child by PID (they were just observed as
+      children of $PID — provably our descendants).
+    - Post-condition 3 cleanup (Gap 2 detection): detect new
+      init-sleep PIDs via diff, then split into "provably ours"
+      (in owned_pids) vs "unprovable" (any other PID). Kill
+      ONLY the provable ones. Unprovable ones are left alone
+      and reported as residual — the requirement
+      "如果某种情况下无法安全清理，应明确报告失败及残留 PID，
+      不得宣称清理成功" is honored. The test contract TERM
+      → grace → KILL → rc=137 is unchanged. Gap 1 and Gap 2
+      detection are both preserved. Assertion count: **35**
+      (unchanged from sixth round — no assertion was removed
+      or relaxed). Gap 1's PID-scoped cleanup, Gap 2's PID-
+      scoped orphan cleanup, and the new isolation contract are
+      all independently verified by `verify_gap1_fix.sh`,
+      `verify_gap2_fix.sh`, and `verify_isolation_fix.sh`
+      (see § 12). The isolation verifier PLANTS an unrelated
+      sleep under PID 1 BEFORE running the reap harness, runs
+      the harness, and asserts (a) the harness still passes
+      35/35 and (b) the unrelated sleep is still alive after
+      the harness — proving the cleanup never reached it.
+- `experiments/phase21_experiment_a/tests/test_reap_pid_harness.sh` —
+  **sixth-round fix** (kept): ChatGPT reviewed the actual code at
   `cfb2f28` and identified two residual gaps in the Scenario 5
   regression protection added in the fifth round. **Gap 1**: the
   `pre_no_pid_children` check only logged `fail` and CONTINUED,
@@ -954,6 +993,113 @@ before `exec`, the inherited SIGTERM-ignore still makes TERM a no-op,
 the grace window still elapses, and `reap_pid` still reaps the same
 PID with rc=137.
 
+**Seventh-round fix (PID-scoped cleanup — over-broad isolation
+violation)**: the sixth-round cleanup used `pkill -KILL -P 1 sleep`
+in four places (pre-check FAIL cleanup, post-condition 1 cleanup,
+post-condition 2 cleanup, post-condition 3 cleanup). That
+broad-pattern kill targets ANY `sleep` process whose parent is
+PID 1 (init), regardless of whether the test created it. If a
+host running this harness happened to have an unrelated sleep
+under init (a long-running background job, a subshell leftover,
+a third-party watcher, etc.), the harness would silently kill
+it. ChatGPT's seventh-round review of `8b1cbe4` flagged this as
+a test-isolation violation. **Fix (this revision)**: every kill
+in scenario 5 is now PID-scoped to an `owned_pids` whitelist
+captured at observation time. The whitelist is the test's own
+`$PID` plus every PID found by `pgrep -P "$PID"` at pre-check
+time. No command broad- or name-pattern-kills anything outside
+this whitelist — and the whitelist never contains anything
+the test did not spawn.
+
+Specifically:
+
+  - **Pre-check FAIL cleanup (Gap 1 abort path):** iterate
+    `fixture_children`, `kill -KILL "$c"` for each (children die
+    before being reparented). Then `kill -KILL "$PID"`, then
+    `wait "$PID"`. No `pkill -P 1` of any kind. The original
+    `pkill -KILL -P 1 sleep` line was deleted.
+  - **Post-condition 1 cleanup (PID still alive):** just
+    `kill -KILL "$PID"` (it's in owned_pids — provably ours).
+    The original `pkill -KILL -P 1 sleep` line was deleted.
+  - **Post-condition 2 cleanup (descendants of $PID left):**
+    iterate `remaining_children` and `kill -KILL "$c"` for each
+    (they were observed as children of $PID — provably our
+    descendants, by PID). The original `pkill -KILL -P 1 sleep`
+    line was deleted.
+  - **Post-condition 3 cleanup (Gap 2 detection):** detect new
+    init-sleep PIDs via diff, then split each into "provably
+    ours" (in `owned_pids` whitelist) vs "unprovable" (any
+    other PID). Kill ONLY the provable ones, one PID at a time.
+    Any unprovable ones are left alone — they may belong to an
+    unrelated process that we cannot prove is ours. The
+    requirement "如果某种情况下无法安全清理，应明确报告失败及
+    残留 PID，不得宣称清理成功" is honored: the failure message
+    includes the residual PID(s) and explicitly states "leaving
+    residual, NOT claiming cleanup success".
+
+Verified by three independent scripts (see § 12):
+
+1. `verify_gap1_fix.sh` — plants an unrelated init-sleep, then
+   runs the scenario 5 safe-cleanup sequence against a broken
+   (non-exec) fixture. Asserts (a) no init-orphan was leaked,
+   (b) the unrelated sleep is still alive after cleanup:
+   ```text
+   $ bash /tmp/verify_gap1_fix.sh
+   Planted unrelated init-sleep PID=44744 (PPID=1)
+   Repro fixture: PID=44752 has children=[44754] (broken as intended)
+   PASS: Gap 1 cleanup correctly leaves no leaked init-orphan sleep PIDs
+     before=[44744] after=[44744]
+     unrelated init-sleep 44744 still alive (isolation preserved)
+   After explicit cleanup: init-sleep processes=0
+   EXIT=0
+   ```
+
+2. `verify_gap2_fix.sh` — plants an unrelated init-sleep, then
+   simulates the leak mode (KILL outer bash → inner sleep
+   reparented to init), then runs the same PID-scoped cleanup.
+   Asserts (a) the orphan is detected, (b) the provable orphan
+   is killed, (c) the unrelated sleep is still alive:
+   ```text
+   $ bash /tmp/verify_gap2_fix.sh
+   Planted unrelated init-sleep PID=44775 (PPID=1)
+   Fixture: outer=44783 inner=44785 owned_pids=[44783 44785]
+   After KILL outer: inner sleep 44785 has PPID=1 (1 = reparented to init, OK)
+   diff new=[44785] provable=[44785] unprovable=[]
+   PASS: Gap 2 detection CAUGHT the reparented orphan (new=[44785] includes inner 44785)
+   PASS: provable orphan 44785 killed; unrelated init-sleep 44775 still alive
+   After explicit cleanup: init-sleep processes=0
+   EXIT=0
+   ```
+
+3. `verify_isolation_fix.sh` — plants an unrelated init-sleep,
+   then runs the FULL reap harness. Asserts (a) the harness
+   still passes 35/35, (b) the unrelated sleep is still alive
+   after the harness, (c) explicit cleanup leaves init empty:
+   ```text
+   $ bash /tmp/verify_isolation_fix.sh
+   Planted unrelated init-sleep PID=45046 (PPID=1)
+   === Running reap harness with unrelated init-sleep 45046 present ===
+   ...
+   PASS: 35 / 35
+   ALL TESTS PASSED
+   PASS: unrelated init-sleep 45046 still alive after reap harness
+   PASS: init has exactly 1 sleep process (= the planted unrelated one)
+   PASS: explicit cleanup succeeded; init has 0 sleep processes
+   ```
+
+**Helper note (macOS bash 3.2 quirk)**: `(sleep N &)` inside a
+command substitution `$(...)` causes the substitution to HANG on
+macOS bash 3.2 (it returns immediately on bash 4+). The
+`plant_unrelated_sleep.sh` helper works around this by running
+as a standalone script (no command substitution around the
+backgrounded `sleep`), capturing the sleep's PID via a normal
+executable path rather than via subshell capture.
+
+The TERM → grace → KILL → 137 contract is unchanged. Gap 1 and
+Gap 2 are both preserved. Assertion count remains **35** — no
+assertion was removed, relaxed, or skipped. All 35 assertions
+PASS with EXIT=0.
+
 ## 7c. Regression sub-tests for the `$?`-capture fix (first revision, retained)
 
 | Name | Input | Expected | Actual | Verdict |
@@ -991,23 +1137,26 @@ match the baseline in § 2. **No originals were touched.**
 | `kill -0` on zombie PID | Cannot reliably distinguish alive vs zombie on macOS | `wait` return used as sole evidence of reclamation; `kill -0` only used for best-effort probe |
 | `jobs -l` only keeps the most recent `Done` background job on macOS bash 3.2 | Earlier-terminated background children are unobservable via `jobs -l` even when no `wait` has run | reap_pid harness records `jobs -l` as `[diag]` diagnostic output rather than hard assertion; the test still proves the contract via the code path (no pre-`wait`) |
 | bash 3.2 second `wait` returns 0 (not 127) for previously reaped child | Platform behaviour; means `reap_pid`'s return code alone cannot prove it was the first waiter | Test asserts on `rc_var` / `REAPED` side-effects, not on `wait`'s exit code |
-| KILL of an outer `bash -c "..." &` leaves the inner `sleep` orphaned (reparented to PID 1, init) | macOS does not propagate SIGKILL to forked-but-not-reaped children | Scenario 5 fixture now uses `bash -c "...; exec sleep 30"` so the process tree has one node; pre/post assertions verify no orphan is created. Sixth round added: (a) pre-check FAIL now aborts the scenario without calling `reap_pid`, and safe-cleans the spawned subtree so the harness cannot manufacture an orphan even if the fixture regresses; (b) post-check now diffs the init-sleep set before vs after `reap_pid` to catch reparented-to-init orphans that `pgrep -P` cannot see. Both gaps independently verified by `verify_gap1_fix.sh` and `verify_gap2_fix.sh` (see § 12). |
+| KILL of an outer `bash -c "..." &` leaves the inner `sleep` orphaned (reparented to PID 1, init) | macOS does not propagate SIGKILL to forked-but-not-reaped children | Scenario 5 fixture now uses `bash -c "...; exec sleep 30"` so the process tree has one node; pre/post assertions verify no orphan is created. Sixth round added: (a) pre-check FAIL now aborts the scenario without calling `reap_pid`, and safe-cleans the spawned subtree so the harness cannot manufacture an orphan even if the fixture regresses; (b) post-check now diffs the init-sleep set before vs after `reap_pid` to catch reparented-to-init orphans that `pgrep -P` cannot see. Both gaps independently verified by `verify_gap1_fix.sh` and `verify_gap2_fix.sh`. **Seventh round added** PID-scoped PID-scoped isolation: every kill is now restricted to PIDs in the scenario's `owned_pids` whitelist ($PID + its observed children); broad-pattern `pkill -KILL -P 1 sleep` was removed. Independent isolation contract verified by `verify_isolation_fix.sh`: an unrelated init-sleep planted BEFORE the harness survives the harness (35/35 PASS). |
 
 ## 11. Overall Conclusion
 
-Phase 2.1 Experiment A (sixth revision, with the Scenario 5
-regression guard hardened against pre-check failures and PID-1
-reparenting) — **PASS** on the harness-detectable axes. The
-reap_pid harness now proves the reap-first-wait contract via
-**code path** (no `wait` is ever called before `reap_pid`); platform-
-side proof via `jobs -l` is recorded as diagnostic output because
-macOS bash 3.2's auto-`reap` of earlier SIGCHLDs makes the `jobs`
-table unobservable for the non-most-recent child (see § 7b
+Phase 2.1 Experiment A (seventh revision, with the Scenario 5
+regression guard hardened against pre-check failures, PID-1
+reparenting, AND test-isolation violations from broad-pattern
+kills) — **PASS** on the harness-detectable axes. The reap_pid
+harness now proves the reap-first-wait contract via **code path**
+(no `wait` is ever called before `reap_pid`); platform-side proof
+via `jobs -l` is recorded as diagnostic output because macOS bash
+3.2's auto-`reap` of earlier SIGCHLDs makes the `jobs` table
+unobservable for the non-most-recent child (see § 7b
 "Fourth-round honest disclosure"). The Scenario 5 regression guard
-now survives both a fixture regression that re-introduces an outer
-bash (Gap 1: pre-check FAIL aborts with safe cleanup) AND an
+now survives (1) a fixture regression that re-introduces an outer
+bash (Gap 1: pre-check FAIL aborts with safe cleanup), (2) an
 orphan reparented to PID 1 (Gap 2: post-check diffs init's sleep
-set before vs after).
+set before vs after), AND (3) a broad-pattern cleanup that would
+kill unrelated init-sleep processes (Gap 3 isolation: cleanup is
+PID-scoped to the scenario's owned_pids whitelist).
 
 | Bucket | Result |
 |---|---|
@@ -1028,8 +1177,9 @@ set before vs after).
 | Cleanup `$?`-capture fix (regression-30/20/0/child-fail) | PASS |
 | **decide_priority() unit tests (18/18)** | **PASS** |
 | **reap_pid() idempotency unit tests (35/35)** | **PASS (scenarios 2/3/7 fixed: no pre-`wait`; jobs snapshots are diagnostic-only on bash 3.2; scenario 5 fixture uses `exec`; sixth-round hardening: pre-check FAIL aborts safely, post-check diffs init-sleep set to catch reparented orphans)** |
-| **Scenario 5 Gap 1 — pre-check FAIL safe-cleanup** | **PASS** (`verify_gap1_fix.sh`: broken fixture → safe cleanup → no init-orphan sleep PIDs) |
-| **Scenario 5 Gap 2 — reparented-to-init detection** | **PASS** (`verify_gap2_fix.sh`: simulated reparent → diff catches new sleep PID under init) |
+| **Scenario 5 Gap 1 — pre-check FAIL safe-cleanup** | **PASS** (`verify_gap1_fix.sh`: broken fixture → safe cleanup → no init-orphan sleep PIDs; unrelated init-sleep survives) |
+| **Scenario 5 Gap 2 — reparented-to-init detection** | **PASS** (`verify_gap2_fix.sh`: simulated reparent → diff catches new sleep PID under init; provable orphan killed; unrelated init-sleep survives) |
+| **Scenario 5 Gap 3 — test isolation (no broad-pattern kills)** | **PASS** (`verify_isolation_fix.sh`: unrelated init-sleep planted BEFORE reap harness; harness passes 35/35; unrelated sleep survives; init has exactly 1 sleep (= planted one); explicit cleanup succeeds) |
 | Source-file integrity (T12) | PASS (every check) |
 | Bash SIGINT (background, T7a) | NOT_VERIFIED (re-confirmed: `kill -INT <pid>` does not fire bash INT trap on macOS bash 3.2 in non-tty; see T7a section) |
 | Foreground Ctrl-C (T7c) | NOT_VERIFIED (cannot be automated; manual reproduction steps in T7c section) |
@@ -1084,8 +1234,15 @@ bash tests/test_priority_harness.sh                            # § 7a (18/18 pr
 bash tests/test_reap_pid_harness.sh                            # § 7b (35/35 reap_pid unit tests)
 
 # Sixth-round Gap 1 / Gap 2 independent verifications (see § 7b "Sixth-round fix"):
-bash /tmp/verify_gap1_fix.sh                                   # pre-check FAIL safe-cleanup → no init-orphan
-bash /tmp/verify_gap2_fix.sh                                   # reparented-to-init detection via init-sleep diff
+bash /tmp/verify_gap1_fix.sh                                   # pre-check FAIL safe-cleanup → no init-orphan; unrelated survives
+bash /tmp/verify_gap2_fix.sh                                   # reparented-to-init detection via init-sleep diff; provable orphan killed; unrelated survives
+
+# Seventh-round isolation verification (see § 7b "Seventh-round fix"):
+# Plant an unrelated init-sleep FIRST, then run the reap harness.
+# Verifies the harness does NOT issue any broad-pattern kill that
+# would affect the unrelated sleep.
+bash /tmp/verify_isolation_fix.sh                              # reap harness with unrelated init-sleep present; unrelated must survive
+bash /tmp/plant_unrelated_sleep.sh 300                         # helper: spawn a sleep that gets reparented to PID 1 (init)
 
 # T-build (build fail → exit=20). Invoke from a tempdir with no Cargo.toml:
 TMPDIR=$(mktemp -d); ln -sf "$PWD/scripts/run_unicast_test.sh" "$TMPDIR/"

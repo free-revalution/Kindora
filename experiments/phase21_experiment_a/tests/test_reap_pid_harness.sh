@@ -256,18 +256,18 @@ fi
 # fifth-round review; this scenario now uses `exec` so the
 # process tree has exactly one node.
 #
-# Sixth-round regression guard (the round that closed two gaps
-# ChatGPT flagged in cfb2f28):
+# Sixth-round regression guard (closed two gaps ChatGPT flagged in
+# cfb2f28).
 #   1. Pre-check `scenario5.pre_no_pid_children` FAILURE used to
 #      only log a fail and CONTINUE — if the fixture were ever
 #      reverted to a non-exec form, reap_pid would then be called
 #      on the outer bash, the outer bash would die, the inner
 #      sleep would be reparented to init, and the harness would
 #      leak an orphan process. Now, if the pre-check fails the
-#      scenario ABORTS: the spawned subtree is KILL'd (including
-#      any descendants), the rest of reap_pid's escalation path
-#      is NOT executed, and the function `return`s immediately
-#      so subsequent scenarios still run.
+#      scenario ABORTS: the spawned subtree is KILL'd (children
+#      FIRST so they die before being reparented, then $PID),
+#      reap_pid is NOT called, and the function `return`s
+#      immediately so subsequent scenarios still run.
 #   2. Post-check `scenario5.post_no_pid_children` used to only
 #      query `pgrep -P "$PID"`. That misses orphans that have
 #      been REPARENTED to PID 1 (init) — which is exactly the
@@ -275,7 +275,28 @@ fi
 #      scenario records the set of `sleep` PIDs that PID 1 had
 #      BEFORE the fixture was spawned, then computes the set
 #      difference AFTER reap_pid. Any new sleep PIDs under init
-#      are an orphan leak that escaped the previous check.
+#      are an orphan leak.
+#
+# Seventh-round isolation hardening (closed over-broad cleanup):
+#   The sixth-round cleanup used `pkill -KILL -P 1 sleep` to
+#   sweep init's sleep children. That is a test-isolation
+#   violation: it would kill ANY sleep under PID 1, including
+#   unrelated processes that happen to be there. The seventh
+#   round replaces every such cleanup with PID-scoped kills:
+#     - Pre-check failure: kill children by PID (whitelisted),
+#       then kill $PID.
+#     - Post-condition 1: kill $PID only (it's in owned_pids).
+#     - Post-condition 2: kill remaining descendants by PID
+#       (they were observed as children of $PID — provably ours).
+#     - Post-condition 3 (Gap 2 detection): detect new init-sleep
+#       PIDs via diff, classify each as "provably ours" (PID was
+#       in owned_pids at observation time) vs "unprovable" (any
+#       other PID). Kill only the provable ones. Any unprovable
+#       ones are left alone and reported as residual — the test
+#       does NOT claim cleanup success in that case.
+#   This preserves both Gap 1 (pre-check abort) and Gap 2 (orphan
+#   detection) while making the cleanup strictly scoped to PIDs
+#   this scenario demonstrably created.
 # -----------------------------------------------------------------------------
 echo "--- Scenario 5: TERM-ignored child escalates to KILL (joiner side) ---"
 run_scenario_5() {
@@ -296,29 +317,41 @@ run_scenario_5() {
   local PID=$!
   sleep 0.3
 
+  # Capture the set of PIDs we can PROVABLY attribute to this
+  # scenario at observation time. This is the WHITELIST for every
+  # kill below — we never target a PID that isn't in this set,
+  # so we cannot affect unrelated processes (including unrelated
+  # sleep processes that happen to be parented to PID 1).
+  #
+  # Format: single space-separated string for easy membership
+  # checks (" $owned_pids " == *" $pid "*).
+  local fixture_children
+  fixture_children=$(pgrep -P "$PID" 2>/dev/null | tr '\n' ' ' || true)
+  fixture_children="${fixture_children% }"
+  local owned_pids="$PID"
+  if [[ -n "$fixture_children" ]]; then
+    owned_pids="$PID $fixture_children"
+  fi
+
   # Pre-condition: with `exec`, $! IS the sleep process — it must
   # have no children. If it does, the fixture is wrong AND any
   # subsequent reap_pid would KILL only the outer shell while the
   # inner sleep gets adopted by init. ABORT the scenario without
-  # calling reap_pid — call reap_pid on a known-leaky fixture
+  # calling reap_pid — calling reap_pid on a known-leaky fixture
   # would manufacture the very orphan we're trying to prevent.
-  local children
-  children=$(pgrep -P "$PID" 2>/dev/null || true)
-  if [[ -n "$children" ]]; then
-    fail "scenario5.pre_no_pid_children: $PID has children ($children); fixture did not exec — aborting scenario to prevent orphan manufacture"
-    # Safe-cleanup: kill the entire spawned subtree, including any
-    # inner sleeps that already exist. Use pkill -P (descendants),
-    # then KILL the outer PID itself. This mirrors what reap_pid
-    # would have done, but without the rc/REAPED side-effects.
-    pkill -KILL -P "$PID" 2>/dev/null || true
+  if [[ -n "$fixture_children" ]]; then
+    fail "scenario5.pre_no_pid_children: $PID has children ($fixture_children); fixture did not exec — aborting scenario to prevent orphan manufacture"
+    # Safe-cleanup: kill children FIRST by PID (so they die before
+    # being reparented to init), then kill $PID itself, then wait.
+    # Every kill targets a PID from owned_pids — never init's
+    # children as a group.
+    local c
+    for c in $fixture_children; do
+      kill -KILL "$c" 2>/dev/null || true
+    done
     kill -KILL "$PID" 2>/dev/null || true
     wait "$PID" 2>/dev/null || true
-    # Also clean up any orphans that init might have just adopted.
-    pkill -KILL -P 1 sleep 2>/dev/null || true
-    # IMPORTANT: return WITHOUT calling reap_pid and WITHOUT
-    # running the post-check (which depends on a successful
-    # reap_pid run). Subsequent scenarios still run because we
-    # `return` rather than `exit`.
+    # Subsequent scenarios still run because we `return` (not `exit`).
     return 1
   fi
   ok "scenario5.pre_no_pid_children ($PID has no children)"
@@ -329,68 +362,84 @@ run_scenario_5() {
   expect_eq "scenario5.rc_is_137"   "137" "$JOINER_REAP_RC"
   expect_eq "scenario5.reaped_is_1" "1"   "$JOINER_REAPED"
 
-  # Post-condition 1: PID itself must be gone.
+  # Post-condition 1: $PID must be gone.
   if kill -0 "$PID" 2>/dev/null; then
     fail "scenario5.post_pid_dead: $PID still alive after reap_pid"
-    # Clean up the live PID to prevent further leak.
-    pkill -KILL -P "$PID" 2>/dev/null || true
+    # $PID is provably ours (in owned_pids). Safe to kill by PID.
     kill -KILL "$PID" 2>/dev/null || true
-    pkill -KILL -P 1 sleep 2>/dev/null || true
   else
     ok "scenario5.post_pid_dead ($PID is gone)"
   fi
 
-  # Post-condition 2: no descendant of $PID remains. (Same as
-  # before, kept for symmetry / partial-failure diagnostics.)
-  children=$(pgrep -P "$PID" 2>/dev/null || true)
-  if [[ -n "$children" ]]; then
-    fail "scenario5.post_no_pid_children: $PID still has children ($children) — orphan leak"
-    pkill -KILL -P "$PID" 2>/dev/null || true
-    pkill -KILL -P 1 sleep 2>/dev/null || true
+  # Post-condition 2: no descendant of $PID remains.
+  local remaining_children
+  remaining_children=$(pgrep -P "$PID" 2>/dev/null | tr '\n' ' ' || true)
+  remaining_children="${remaining_children% }"
+  if [[ -n "$remaining_children" ]]; then
+    fail "scenario5.post_no_pid_children: $PID still has children ($remaining_children) — orphan leak"
+    # These PIDs were just observed as direct children of $PID —
+    # provably our descendants. Kill by PID only; never by name.
+    local c
+    for c in $remaining_children; do
+      kill -KILL "$c" 2>/dev/null || true
+    done
   else
     ok "scenario5.post_no_pid_children (no descendants under $PID)"
   fi
 
-  # Post-condition 3 (NEW, sixth-round): PID 1 (init) must NOT
-  # have any NEW sleep PIDs that weren't there before the
-  # fixture was spawned. This catches the leak that motivated
-  # the fifth-round fix and that the fifth-round's post-check
-  # missed: when reap_pid KILLs the outer bash, an inner sleep
-  # child gets reparented to init and would never appear under
-  # $PID (which is now dead).
-  #
-  # Implementation note (sixth-round patch): we deliberately do
-  # NOT use a "(none)" placeholder sentinel because it would make
-  # the empty-set case look non-empty to the diff (string compare
-  # vs list compare mismatch). Instead we keep the lists as
-  # possibly-empty strings and branch explicitly on the empty
-  # cases before invoking comm.
+  # Post-condition 3 (Gap 2): PID 1 (init) must NOT have any NEW
+  # sleep PIDs that weren't there before the fixture was spawned.
   local init_sleep_after
   init_sleep_after=$(ps -A -o pid,ppid,comm 2>/dev/null \
     | awk '$2 == 1 && $3 ~ /^sleep/ { print $1 }' | sort -n)
-  # Strip trailing newline so an empty pipeline stays empty.
   init_sleep_after=${init_sleep_after%$'\n'}
   local new_orphans=""
   if [[ -z "$init_sleep_before" && -z "$init_sleep_after" ]]; then
-    # Both empty — no orphans.
     new_orphans=""
   elif [[ -z "$init_sleep_before" ]]; then
-    # Nothing before, something after → every entry is a new orphan.
     new_orphans="$init_sleep_after"
   elif [[ -z "$init_sleep_after" ]]; then
-    # Had something, now nothing → no new orphans (any that
-    # disappeared are external cleanup of pre-existing processes,
-    # not our concern).
     new_orphans=""
   else
-    # Both non-empty: true set difference via comm.
     new_orphans=$(comm -13 <(printf '%s\n' "$init_sleep_before") \
                         <(printf '%s\n' "$init_sleep_after") \
                   | grep -v '^$' || true)
   fi
   if [[ -n "$new_orphans" ]]; then
-    fail "scenario5.post_no_init_orphans: init adopted new sleep PIDs ($new_orphans) — orphan leak"
-    pkill -KILL -P 1 sleep 2>/dev/null || true
+    # Split into "provably ours" (in owned_pids whitelist) and
+    # "unprovable" (any other PID). This is the isolation
+    # contract: we only ever kill PIDs we can prove belong to
+    # this scenario. Unrelated sleep processes under init are
+    # NEVER killed by this test.
+    local provable_orphans=""
+    local unprovable_orphans=""
+    local o
+    for o in $new_orphans; do
+      # Whitespace-tokenized membership check.
+      if [[ " $owned_pids " == *" $o "* ]]; then
+        provable_orphans="$provable_orphans $o"
+      else
+        unprovable_orphans="$unprovable_orphans $o"
+      fi
+    done
+    provable_orphans="${provable_orphans# }"
+    unprovable_orphans="${unprovable_orphans# }"
+
+    # Kill only the provable ones (one PID at a time).
+    if [[ -n "$provable_orphans" ]]; then
+      for o in $provable_orphans; do
+        kill -KILL "$o" 2>/dev/null || true
+      done
+    fi
+
+    if [[ -n "$unprovable_orphans" ]]; then
+      # Do NOT kill these — they may belong to an unrelated
+      # process that we cannot prove is ours. Report as failure
+      # with residual PIDs and do NOT claim cleanup success.
+      fail "scenario5.post_no_init_orphans: init adopted sleep PIDs we cannot prove are ours (unprovable=$unprovable_orphans; provable_cleaned='${provable_orphans:-<none>}'; owned_pids=[$owned_pids]; before=[${init_sleep_before:-<empty>}] after=[${init_sleep_after:-<empty>}]) — leaving residual, NOT claiming cleanup success"
+    else
+      fail "scenario5.post_no_init_orphans: init adopted sleep PIDs we provably created ($provable_orphans) — cleaned; before=[${init_sleep_before:-<empty>}] after=[${init_sleep_after:-<empty>}]"
+    fi
   else
     ok "scenario5.post_no_init_orphans (init has no new sleep children; before=[${init_sleep_before:-<empty>}] after=[${init_sleep_after:-<empty>}])"
   fi
