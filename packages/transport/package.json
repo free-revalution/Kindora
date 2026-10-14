@@ -19,6 +19,8 @@
     "@kindora/protocol": "workspace:*"
   },
   "devDependencies": {
-    "typescript": "^5.6.3"
+    "jsdom": "^25.0.1",
+    "typescript": "^5.6.3",
+    "vitest": "^2.1.4"
   }
 }

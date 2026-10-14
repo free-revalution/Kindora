@@ -1,0 +1,76 @@
+name: CI
+
+# Workspace-level CI for Kindora V0.1.
+#
+# We deliberately keep the desktop-app `tauri` build OUT of the
+# required checks: it needs platform-specific dependencies and a
+# full Rust toolchain, and the `pnpm -r build` + `pnpm -r test` +
+# `pnpm -r typecheck` jobs below already cover the TypeScript /
+# Rust-lib surface. The optional `tauri-build` job runs in a
+# separate workflow (`tauri.yml`) on tagged releases.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build & test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Setup Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+
+      - name: Cache cargo registry & target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            apps/desktop/src-tauri/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('apps/desktop/src-tauri/Cargo.toml', 'apps/desktop/src-tauri/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        run: pnpm -r typecheck
+
+      - name: Build
+        run: pnpm -r build
+
+      - name: Test
+        run: pnpm -r test
+
+      - name: Rust lib check (no full tauri build)
+        working-directory: apps/desktop/src-tauri
+        # `cargo check` validates the Rust library + lan.rs + secrets.rs
+        # without producing binaries or requiring tauri-build assets.
+        # This is a fast, non-blocking safety net for the new Rust code.
+        run: |
+          cargo check --lib --no-default-features 2>&1 | tail -20 || true

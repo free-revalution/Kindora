@@ -16,12 +16,19 @@ import {
   type SecretStore,
   type SettingsStore,
 } from '@kindora/storage';
+import { TauriSecretStore, isTauriSecretStoreAvailable } from './tauri-secret-store';
 
 const SETTINGS_KEY = 'llmConfig';
 const secretKeyFor = (provider: LLMProviderKind): string => `llm:${provider}:api-key`;
 
 const _settings: SettingsStore = new BrowserLocalStorageSettingsStore();
-const _secrets: SecretStore = new BrowserLocalStorageEncryptedSecretStore();
+
+// V0.1: prefer the TauriSecretStore (OS keychain) when running in a
+// Tauri webview. Fall back to the browser-local encrypted store for
+// `pnpm dev` (no Tauri runtime). Either way the keyspace is the same.
+const _secrets: SecretStore = isTauriSecretStoreAvailable()
+  ? new TauriSecretStore()
+  : new BrowserLocalStorageEncryptedSecretStore();
 
 export function getSettingsStore(): SettingsStore {
   return _settings;

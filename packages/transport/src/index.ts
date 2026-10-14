@@ -4,13 +4,14 @@
  * Pluggable transport layer.
  *
  *   - `Transport`           — interface (§ 19). connect / send / onMessage / disconnect.
- *   - `LoopbackTransport`   — in-memory dev / test transport (Mode A stand-in).
+ *   - `LoopbackTransport`   — in-memory dev / test transport (Mode A stand-in for browser dev).
+ *   - `LanTransport`        — Tauri-side UDP discovery + TCP (Mode A real, V0.1).
  *   - `WebRtcTransport`     — interface + stub (Mode B / C, not implemented in V0.1 dev).
  *   - `PairingSession`      — finite state machine on top of any Transport.
  *   - `pairingCode*`        — short codes for manual pairing (§ 17).
  *   - `qrPayload*`          — `kindora://pair?c=...&a=...&v=0.1` URLs for QR codes.
  *
- * See 开发手册.md § 17–19, Phase 5.
+ * See 开发手册.md § 17–19, Phase 5 + Phase 13.
  */
 
 import type { KsaMessage } from '@kindora/protocol';
@@ -63,6 +64,12 @@ export {
   type LoopbackTransportOptions,
 } from './loopback-transport';
 export { WebRtcTransport, type WebRtcTransportOptions } from './webrtc-transport';
+export {
+  LanTransport,
+  type LanTransportOptions,
+  type LanHostInfo,
+  type LanJoinPeer,
+} from './lan-transport';
 export {
   PairingSession,
   type PairingState,

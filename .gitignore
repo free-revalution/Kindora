@@ -12,6 +12,12 @@ out/
 src-tauri/target/
 src-tauri/Cargo.lock
 src-tauri/gen/
+apps/desktop/src-tauri/target/
+apps/desktop/src-tauri/Cargo.lock
+apps/desktop/src-tauri/gen/
+
+# Experiments — Rust build artifacts
+experiments/**/target/
 
 # Test / coverage
 coverage/
