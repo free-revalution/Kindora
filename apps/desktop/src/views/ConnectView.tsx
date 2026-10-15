@@ -18,6 +18,7 @@
  */
 
 import { useEffect, useState, type FormEvent } from 'react';
+import type { MatchOrchestrator } from '@kindora/matching';
 import { startHost, startJoin, toConnectInput, type ConnectHandle } from '../lib/connect-service';
 import {
   isLanAvailable,
@@ -182,43 +183,60 @@ function HostPanel({
     };
   }, [llmReady, transport]);
 
-  // When the handle transitions to 'tcp-connected' or 'connected',
-  // call onConnected. The orchestrator accepts either state — it
-  // will perform the `hello` exchange itself from 'tcp-connected' and
-  // proceed straight to the rest of the flow from 'connected'.
+  // When the handle transitions to 'tcp-connected', call onConnected
+  // ONCE. The session subsequently transitions to 'connected' once
+  // the orchestrator (driven from the match view) validates the
+  // peer's `hello` envelope — that transition is not a fresh
+  // "paired" event, it's the match view's own milestone.
+  //
+  // The orchestrator accepts either 'tcp-connected' or 'connected'
+  // as a start state, so it's safe to hand off the handle at the
+  // first transition.
   useEffect(() => {
     if (transport === 'lan' && lanHandle) {
-      // LAN handle exposes a PairingSession; use the same listener.
+      let fired = false;
       const off = lanHandle.session.onStateChange((snap) => {
-        if (snap.state === 'tcp-connected' || snap.state === 'connected') {
-          // Bridge the LanConnectHandle into a ConnectHandle by reusing
-          // the in-process ConnectHandle shape. The downstream views
-          // only need session + selfAgentId + orchestrator + disconnect.
-          // For LAN we synthesise a minimal ConnectHandle.
-          const bridged: ConnectHandle = {
-            pairingCode: lanHandle.pairingCode,
-            session: lanHandle.session,
-            selfAgentId: lanHandle.selfAgentId,
-            get orchestrator() {
-              return lanHandle.getOrchestrator();
-            },
-            state: snap.state,
-            async disconnect(reason: string = 'user-requested') {
-              await lanHandle.disconnect(reason);
-            },
-          };
-          onConnected(bridged);
-        }
+        if (fired) return;
+        if (snap.state !== 'tcp-connected' && snap.state !== 'connected') return;
+        fired = true;
+        // Bridge the LanConnectHandle into a ConnectHandle by reusing
+        // the in-process ConnectHandle shape. The downstream views
+        // only need session + selfAgentId + orchestrator + disconnect.
+        // For LAN we synthesise a minimal ConnectHandle. The
+        // orchestrator is cached so repeated reads of
+        // `bridged.orchestrator` return the SAME instance — calling
+        // `lanHandle.getOrchestrator()` twice would create two
+        // MatchOrchestrators on the same session (double LLM call,
+        // duplicate match_request envelopes).
+        let cachedOrchestrator: MatchOrchestrator | null = null;
+        const bridged: ConnectHandle = {
+          pairingCode: lanHandle.pairingCode,
+          session: lanHandle.session,
+          selfAgentId: lanHandle.selfAgentId,
+          get orchestrator() {
+            if (!cachedOrchestrator) {
+              cachedOrchestrator = lanHandle.getOrchestrator();
+            }
+            return cachedOrchestrator;
+          },
+          state: snap.state,
+          async disconnect(reason: string = 'user-requested') {
+            await lanHandle.disconnect(reason);
+          },
+        };
+        onConnected(bridged);
       });
       return () => {
         off();
       };
     }
     if (transport === 'loopback' && handle) {
+      let fired = false;
       const off = handle.session.onStateChange((snap) => {
-        if (snap.state === 'tcp-connected' || snap.state === 'connected') {
-          onConnected(handle);
-        }
+        if (fired) return;
+        if (snap.state !== 'tcp-connected' && snap.state !== 'connected') return;
+        fired = true;
+        onConnected(handle);
       });
       return () => {
         off();
@@ -284,14 +302,22 @@ function JoinPanel({
       if (transport === 'lan') {
         const input = await toLanInput();
         const h = await startLanJoin(input, code.trim());
+        // Cache the orchestrator so repeated reads of
+        // `bridged.orchestrator` return the SAME instance — calling
+        // `h.getOrchestrator()` twice would create two
+        // MatchOrchestrators on the same session.
+        let cachedOrchestrator: MatchOrchestrator | null = null;
         const bridged: ConnectHandle = {
           pairingCode: h.pairingCode,
           session: h.session,
           selfAgentId: h.selfAgentId,
           get orchestrator() {
-            return h.getOrchestrator();
+            if (!cachedOrchestrator) {
+              cachedOrchestrator = h.getOrchestrator();
+            }
+            return cachedOrchestrator;
           },
-          state: 'connected',
+          state: 'tcp-connected',
           async disconnect(reason: string = 'user-requested') {
             await h.disconnect(reason);
           },

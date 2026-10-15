@@ -336,6 +336,14 @@ export class MatchOrchestrator {
   private readonly peerAnalysisTimeoutMs: number;
   private readonly earlyWaitTimeoutMs: number;
   private readonly helloTimeoutMs: number;
+  /**
+   * Reentrancy guard. A single MatchOrchestrator instance must be
+   * `start()`ed at most once per (session, self) — calling it again
+   * would register a second queue handler, ship a duplicate
+   * `match_request`, and call the LLM twice. We throw on the second
+   * call instead of silently double-driving the wire.
+   */
+  private started = false;
 
   constructor(
     self: MatchOrchestratorSelf,
@@ -372,6 +380,13 @@ export class MatchOrchestrator {
    * The `MatchOutcome` is the success shape; handshake failure throws.
    */
   async start(session: PairingSession): Promise<MatchOutcome> {
+    if (this.started) {
+      throw new Error(
+        'MatchOrchestrator.start has already been called on this instance. ' +
+          'Create a new MatchOrchestrator per pairing attempt.',
+      );
+    }
+    this.started = true;
     const initialState = session.current().state;
     if (initialState !== 'connected' && initialState !== 'tcp-connected') {
       throw new Error(

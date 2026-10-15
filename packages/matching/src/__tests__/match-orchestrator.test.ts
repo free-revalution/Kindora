@@ -287,6 +287,33 @@ describe('@kindora/matching — MatchOrchestrator', () => {
     await expect(orch.start(session)).rejects.toThrow(/connected/i);
   });
 
+  it('rejects a second start() on the same orchestrator instance (reentrancy guard)', async () => {
+    // Defence-in-depth: a single MatchOrchestrator must never be
+    // started twice. The connect-service / ConnectView paths should
+    // cache one instance per pairing, but if a bug ever calls start()
+    // twice the orchestrator throws instead of silently shipping a
+    // second `match_request` and calling the LLM twice.
+    const { sessionA, sessionB } = await makePair({ handshake: false });
+    const aStub = stubProvider(cannedAnalysis('strong'));
+    const bStub = stubProvider(cannedAnalysis('moderate'));
+    const selfA = await makeSelf(ID_A, 'Alice', aStub.provider);
+    const selfB = await makeSelf(ID_B, 'Bob', bStub.provider);
+    const orchA = new MatchOrchestrator(selfToDeps(selfA), ID_B, {
+      peerAnalysisTimeoutMs: 200,
+      earlyWaitTimeoutMs: 100,
+      helloTimeoutMs: 1000,
+    });
+    const orchB = new MatchOrchestrator(selfToDeps(selfB), ID_A, {
+      peerAnalysisTimeoutMs: 200,
+      earlyWaitTimeoutMs: 100,
+      helloTimeoutMs: 1000,
+    });
+    const [outA] = await Promise.all([orchA.start(sessionA), orchB.start(sessionB)]);
+    expect(outA.localAnalysis.compatibilitySignal).toBe('strong');
+    // First start() succeeded; the second must throw.
+    await expect(orchA.start(sessionA)).rejects.toThrow(/already been called/i);
+  });
+
   it('exposes the default peer-analysis timeout constant', () => {
     expect(DEFAULT_PEER_ANALYSIS_TIMEOUT_MS).toBeGreaterThan(0);
   });
