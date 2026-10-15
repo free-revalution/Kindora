@@ -1,14 +1,30 @@
 # Phase 16 — Real Two-Instance LAN Verification
 
-**Status:** NOT_RUN from automation. **Required:** manual execution by a human
-on two physical machines (or two VM instances) on the same LAN.
+**Status (Phase 16.1 calibration):**
 
-This document is the reproducible manual test flow + per-scenario acceptance
-table. The Claude session that produced it had no GUI driver and no LLM API
-key, so it could not run the two Tauri instances itself — it is being
-honest about that. The code-review fixes it did make (see
-`commit c5da270 + Phase 16 patches` below) close two real bugs found in § V
-of the task brief.
+| Layer | Outcome |
+|-------|---------|
+| Two-LanState protocol test (`cargo test --test lan_protocol_e2e`) | **PASS** (9/9 — `connect_two` over real UDP/TCP, real JSON envelopes, no LLM, no GUI, no LoopbackHub) |
+| Single-LanState regression (`cargo test --test lan_e2e`) | **PASS** (15/15 unchanged) |
+| Real two-OS-process run on two physical machines | **NOT_RUN** (no GUI driver + no LLM API key in the Claude session) — see § 6 manual below |
+| Code-review fixes from Phase 16 | landed in commit `353f2d2` (ConnectView double-fire, LAN bridged handle orchestrator caching) |
+| Defense-in-depth reentrancy guard | landed in `packages/matching/src/orchestrator.ts` (Phase 16) |
+
+**Bottom line:** the wire-level LAN protocol (UDP discover + TCP length-prefixed
+JSON envelope flow) is now provably correct via the new
+`apps/desktop/src-tauri/tests/lan_protocol_e2e.rs` suite. The
+above-the-wire layer (TS `PairingSession` FSM, `MatchOrchestrator`, the React
+`ConnectView` / `MatchView`) still needs a human on two physical machines
+because it requires a GUI driver and a real LLM API key.
+
+> **Frame format reminder for manual testers (this is the corrected
+> expectation per the actual code):** every envelope on the TCP wire is
+> **4-byte big-endian length prefix + UTF-8 JSON body**. A raw `nc` that
+> pipes bare JSON without the 4-byte length prefix will fail to parse on
+> the receiver (the first 4 bytes of the JSON get interpreted as the
+> length, then the next N bytes get cut off). Use the helper script in
+> § 4.5 to send a properly framed envelope. Do NOT use raw `nc` for
+> malformed-hello testing without the length prefix.
 
 ---
 
@@ -16,10 +32,9 @@ of the task brief.
 
 1. On machine A and machine B, each:
    - Clone the repo: `git clone git@github.com:free-revalution/Kindora.git`.
-   - Check out `c5da270` (Phase 15) plus the Phase 16 fix commit (this
-     document is shipped in that commit). `git log -1` to confirm.
-   - Install Node 20+, pnpm 9+, Rust stable (1.99 recommended; 1.77
-     fails on `edition2024` in `apps/desktop/src-tauri`).
+   - Check out the latest Phase 16.1 commit. `git log -1` to confirm.
+   - Install Node 20+, pnpm 9+, Rust stable (1.99+ recommended; 1.77.2
+     fails on a transitive dep that requires `edition2024`).
    - Install Tauri CLI prerequisites for the host OS
      (https://tauri.app/start/prerequisites/).
 2. From the repo root on each machine, install workspace deps and build
@@ -67,6 +82,12 @@ of the task brief.
 | 7 | Cross-check | A's peer display name = "Bob"; peer agent id = B's UUID | B's peer display name = "Alice"; peer agent id = A's UUID | values match; both agents visible |
 | 8 | Cleanup | click "Disconnect" in MatchView | click "Disconnect" | both return to Home; no zombie Rust processes (`ps aux | grep lan_`) |
 
+**Verdict:** **NOT_RUN** (no GUI in the Claude session). The wire-level
+analogue — the two-LanState test
+`two_instance_discovery_and_link` in
+`apps/desktop/src-tauri/tests/lan_protocol_e2e.rs` — **PASS**es (9/9
+across the whole file).
+
 > **What to look for in the logs.** On each side, the LAN host poll
 > (200 ms interval) flips `linked=true` once the TCP link is up. The
 > `PairingSession` then transitions `hosting → tcp-connected → connected`
@@ -83,17 +104,25 @@ of the task brief.
 For each scenario below, run from a fresh state (close both apps or click
 "Disconnect" on both, then return to Home).
 
-| § | Scenario | A (host) action | B (joiner) action | Expected (both) |
-|---|----------|-----------------|-------------------|-----------------|
-| 2.1 | **Wrong pairing code** | (none) | type a wrong 6-char code; click Join | joiner shows "No peer found on the LAN for code \"XXXXXX\". Check that both devices are on the same network and that the host is running." host stays on "Waiting for the other person to enter this code…". No LLM call, no match screen, no false-positive match result. |
-| 2.2 | **No host running** | (host app closed) | type a code; click Join | joiner shows the same "No peer found on the LAN for code …" error within ~2.5 s. No LLM call. |
-| 2.3 | **UDP discoverable, TCP fails** | start host, then block the host's random TCP port at the firewall (or take the host's IP offline right after UDP announce) | type the code; click Join | joiner gets either a TCP connect timeout (≤ 8 s) or the discover-then-link-failed error. joiner stays on ConnectView; never enters MatchView; LLM not called. host (if reachable) stays on "Waiting for the other person to enter this code…" until timeout. |
-| 2.4 | **TCP up, no `hello` from peer** | start host | open `nc -l <random_port_from_logs>` (or any stub) on B's side AFTER link is up; do NOT send any envelope | host's MatchView shows "preparing match…" for ≤ 5 s, then an error banner: "Peer did not send a hello envelope within 5000 ms." No match result. Session returns to "closed". The blocked TCP stub eventually gets disconnected by host. No LLM call. |
-| 2.5 | **Malformed `hello`** | start host | use a raw TCP tool (e.g. `nc`) to send a `hello` whose `sender` is a non-UUID, or whose `payload.displayName` is missing | host's MatchView shows the typed error (`HandshakeValidationError` surfaced as a user-readable banner) within ≤ 5 s. No match result. Session closed. No LLM call. |
-| 2.6 | **Peer exits during handshake** | start host, both linked, host in MatchView | quit B's app (Cmd+Q / Alt+F4) | host's MatchView shows a transport-disconnect error within ≤ 1 s; session is "closed"; no match result; no zombie `lan_` processes. |
-| 2.7 | **Peer exits after match** | both reached MatchView, both see results | B quits the app | A's MatchView shows the peer-disconnect error; A returns to Home cleanly. |
-| 2.8 | **LLM API key invalid** | both with an invalid LLM key (e.g. wrong region) | (normal) | both reach MatchView, the orchestrator's local LLM call fails; MatchView shows a typed `analyzeMatch` error (the LLM error message). No false-positive match shown. (Note: per § 23 each side runs its OWN analysis — the orchestrator surfaces a degraded analysis on LLM failure.) |
-| 2.9 | **Cancel + re-pair** | start host, get code | start joiner; on ConnectView, click "Cancel" | joiner returns to Home; host sees TCP disconnect, returns to "Waiting for the other person…". Restart the joiner, type the same code, repeat § 1 — must succeed. |
+> **Wire-format note (corrected from Phase 16 first draft):** every
+> envelope on the TCP wire is a **4-byte big-endian length prefix + the
+> UTF-8 JSON body**. For scenarios that need to send a malformed or
+> non-conformant envelope from the joiner side, use the helper script
+> in § 4.5 to construct a properly framed envelope; sending bare JSON
+> over `nc` will not work (the receiver will interpret the first 4 bytes
+> of the JSON as the length and either truncate or fail to parse).
+
+| § | Scenario | A (host) action | B (joiner) action | Expected (both) | Verdict (Phase 16.1) |
+|---|----------|-----------------|-------------------|-----------------|----------------------|
+| 2.1 | **Wrong pairing code** | (none) | type a wrong 6-char code; click Join | joiner shows "No peer found on the LAN for code \"XXXXXX\". Check that both devices are on the same network and that the host is running." host stays on "Waiting for the other person to enter this code…". No LLM call, no match screen, no false-positive match result. | **NOT_RUN** (manual). Wire-level analogue: `join_with_no_host_returns_empty` (single-instance, `lan_e2e.rs`) **PASS**es. The two-instance analogue: `join_discover` for an unknown code returns `[]` (covered by `two_instance_cancel_and_repair` first half — **PASS**). |
+| 2.2 | **No host running** | (host app closed) | type a code; click Join | joiner shows the same "No peer found on the LAN for code …" error within ~2.5 s. No LLM call. | **NOT_RUN** (manual). Wire-level analogue: same as 2.1. |
+| 2.3 | **UDP discoverable, TCP fails** | start host, then block the host's random TCP port at the firewall (or take the host's IP offline right after UDP announce) | type the code; click Join | joiner gets either a TCP connect timeout (≤ 8 s) or the discover-then-link-failed error. joiner stays on ConnectView; never enters MatchView; LLM not called. host (if reachable) stays on "Waiting for the other person to enter this code…" until timeout. | **NOT_RUN** (manual). No automated coverage (LAN test uses loopback; firewall rules can't be exercised in-process). |
+| 2.4 | **TCP up, no `hello` from peer** | start host | open a stub TCP listener (use § 4.5 helper) on B's side AFTER link is up; do NOT send any envelope | host's MatchView shows "preparing match…" for ≤ 5 s, then an error banner: "Peer did not send a hello envelope within 5000 ms." No match result. Session returns to "closed". The stub TCP gets disconnected by host. No LLM call. | **NOT_RUN** (manual). Wire-level analogue: `two_instance_host_silent_then_link_drops` — the joiner side does not get any envelopes while the host is silent — **PASS**. The 5-second hello gate is enforced on the TS side (`MatchOrchestrator`, `helloTimeoutMs = 5000`); not re-tested in the two-process suite. |
+| 2.5 | **Malformed `hello`** | start host | use § 4.5 helper to send a properly framed `hello` whose `sender` is a non-UUID, or whose `payload.displayName` is missing | host's MatchView shows the typed error (`HandshakeValidationError` surfaced as a user-readable banner) within ≤ 5 s. No match result. Session closed. No LLM call. | **NOT_RUN** (manual). Wire-level analogue: `two_instance_malformed_hello_is_delivered` — the wire passes the bytes through verbatim; validation is the TS-side `validatePeerHello`'s job. **PASS**. |
+| 2.6 | **Peer exits during handshake** | start host, both linked, host in MatchView | quit B's app (Cmd+Q / Alt+F4) | host's MatchView shows a transport-disconnect error within ≤ 1 s; session is "closed"; no match result; no zombie `lan_` processes. | **NOT_RUN** (manual). **Documented gap** (see § 5.1): the Rust LAN transport has no out-of-band peer-drop detection. The host only finds out on its NEXT `host_send` attempt (or `host_poll` returns `Disconnected` from the closed inbox). On the TS side, `PairingSession` propagates this and the orchestrator surfaces a typed `HandshakeClosedError` to `MatchView`. The two-process test `two_instance_mid_handshake_disconnect` **PASS**es the wire-level fact (joiner's `join_send` after `host_stop` is a no-op on the kernel level; only the host-side `host_linked` flips false). |
+| 2.7 | **Peer exits after match** | both reached MatchView, both see results | B quits the app | A's MatchView shows the peer-disconnect error; A returns to Home cleanly. | **NOT_RUN** (manual). Same gap as 2.6. |
+| 2.8 | **LLM API key invalid** | both with an invalid LLM key (e.g. wrong region) | (normal) | both reach MatchView; the orchestrator's local LLM call throws; the `MatchView` shows the LLM error message (an `analyzeMatch` error). No false-positive match shown. | **NOT_RUN** (manual). **Observed code path:** `provider.chat` throws → `analyzeMatch` throws → `MatchOrchestrator.start` throws → `MatchView` shows the error in the `error` phase. *Note:* a malformed LLM response (valid HTTP, bad JSON) is a different path — `parseMatchAnalysis` returns a **degraded** result with `compatibilitySignal: 'none'` and a "match analysis unavailable" explanation; the orchestrator does NOT throw, and `MatchView` shows the degraded result rather than an error. (Covered in `packages/matching/src/__tests__/match-orchestrator.test.ts`.) |
+| 2.9 | **Cancel + re-pair** | start host, get code | start joiner; on ConnectView, click "Cancel" | joiner returns to Home; host sees TCP disconnect, returns to "Waiting for the other person…". Restart the joiner, type the same code, repeat § 1 — must succeed. | **NOT_RUN** (manual). **Documented gap** (see § 5.2): clicking "Cancel" in `ConnectView` does NOT explicitly call `disconnect` on the LAN handle from the joiner's side — the joiner's `JoinSide` and UDP socket are leaked. A re-pair with a DIFFERENT host works because the joiner's `join_discover` opens a new ephemeral UDP socket. A re-pair with the SAME host may fail to discover if the host's UDP responder is still bound (it isn't, but if the host re-uses the port, the joiner's existing leaked socket may receive stale announces — not tested). The wire-level analogue `two_instance_cancel_and_repair` covers the discovery + re-connect path and **PASS**es. |
 
 > **Important:** in every failure scenario, the UI must NOT show a
 > successful match result. A passing failure scenario is one where the
@@ -112,14 +141,14 @@ Open the desktop dev tools (right-click → Inspect) and watch the React
 state, the `PairingSession` state, and the browser console across a
 single § 1 happy path.
 
-| § | Check | Expected |
-|---|-------|----------|
-| 3.1 | ConnectView mounts once; click Host; observe session state changes | `idle → hosting → tcp-connected → connected`. `connected` fires ONCE. (Phase 16 patch closes the bug where the listener fired on BOTH `tcp-connected` and `connected`.) |
-| 3.2 | Watch `MatchOrchestrator` in dev tools | One instance per pairing. Re-renders do NOT spawn a second orchestrator. (Phase 16 patch caches the orchestrator on the bridged handle and the orchestrator itself throws on a second `start()`.) |
-| 3.3 | Network panel / app log | Exactly ONE `match_request` outbound, ONE `match_response` inbound, per side. |
-| 3.4 | Click "Disconnect" in MatchView | session goes to `closed`; Rust `lan_host_poll` / `lan_join_poll` invocations stop; `setInterval` cleared; no leftover timers in the Chrome devtools "Performance" → "Timers" view. |
-| 3.5 | Repeat § 1 three times in a row (Disconnect → Connect → Disconnect → Connect) | Each cycle is clean. No listener / timer accumulation. The host's Rust process exits cleanly on each cycle (`ps aux | grep lan_` should be empty). |
-| 3.6 | Kill A's app from the OS while in MatchView | B's MatchView shows peer-disconnect error within ≤ 1 s. B's session is `closed`. B's `lan_join_poll` stops. |
+| § | Check | Expected | Verdict (Phase 16.1) |
+|---|-------|----------|----------------------|
+| 3.1 | ConnectView mounts once; click Host; observe session state changes | `idle → hosting → tcp-connected → connected`. `connected` fires ONCE. (Phase 16 patch closes the bug where the listener fired on BOTH `tcp-connected` and `connected`.) | **NOT_RUN** (manual). Patches landed in `apps/desktop/src/views/ConnectView.tsx` (the `fired` guard in `HostPanel`'s second `useEffect` for both LAN and loopback). |
+| 3.2 | Watch `MatchOrchestrator` in dev tools | One instance per pairing. Re-renders do NOT spawn a second orchestrator. (Phase 16 patch caches the orchestrator on the bridged handle and the orchestrator itself throws on a second `start()`.) | **NOT_RUN** (manual). Patches landed: `cachedOrchestrator` in `ConnectView.tsx` + `started: boolean` reentrancy guard in `packages/matching/src/orchestrator.ts`. Reentrancy test in `match-orchestrator.test.ts` **PASS**es. |
+| 3.3 | Network panel / app log | Exactly ONE `match_request` outbound, ONE `match_response` inbound, per side. | **NOT_RUN** (manual). Two-process test `two_instance_match_request_response_order` **PASS**es (verified ordering: `match_request` first, then `match_response`, in each direction). |
+| 3.4 | Click "Disconnect" in MatchView | session goes to `closed`; Rust `lan_host_poll` / `lan_join_poll` invocations stop; `setInterval` cleared; no leftover timers in the Chrome devtools "Performance" → "Timers" view. | **NOT_RUN** (manual). |
+| 3.5 | Repeat § 1 three times in a row (Disconnect → Connect → Disconnect → Connect) | Each cycle is clean. No listener / timer accumulation. The host's Rust process exits cleanly on each cycle (`ps aux | grep lan_` should be empty). | **NOT_RUN** (manual). |
+| 3.6 | Kill A's app from the OS while in MatchView | B's MatchView shows peer-disconnect error within ≤ 1 s. B's session is `closed`. B's `lan_join_poll` stops. | **NOT_RUN** (manual). Documented gap: see § 5.1. |
 
 **Mark § 3 as `PASS` if no state / listener / timer / log anomalies.**
 
@@ -127,7 +156,10 @@ single § 1 happy path.
 
 ## § 4 — Logs to capture (per side)
 
-Save these on both machines for the § 1 happy path:
+### § 4.1 — `tauri dev` console
+
+Save the renderer console + Rust stderr on each machine for the § 1
+happy path:
 
 ```bash
 # On the desktop dev console (or pnpm --filter @kindora/desktop tauri dev)
@@ -136,7 +168,7 @@ grep -nE "lan_announce|lan_invite|linked=|tcp-connected|notifyHelloReceived|matc
   ~/Library/Logs/kindora/*.log
 ```
 
-What you should see, in order (simplified):
+### § 4.2 — Expected order (simplified)
 
 ```
 [host] lan_announce  agent_id=<A-UUID>  tcp_port=<random>
@@ -162,14 +194,145 @@ What you should see, in order (simplified):
 If you see `match_request` more than once on either side, that's the
 reentrancy bug — re-check the Phase 16 patches landed.
 
+### § 4.3 — Reentrancy re-check (DevTools)
+
+In the React dev tools, on the `MatchView` component, find the
+`MatchOrchestrator` instance via the bridged handle. Confirm the same
+object identity across re-renders: log `bridged.orchestrator === window.__lastOrch`
+on a render and verify `true`. If `false`, the cache broke and the
+reentrancy guard is the only thing preventing duplicate
+`match_request`s.
+
+### § 4.4 — Two-process evidence (already run)
+
+`cargo test --test lan_protocol_e2e -- --test-threads=1` produces the
+9-test PASS log in `target/debug/deps/...`. Each test exercises the
+real UDP discovery + TCP framing path; the only thing the tests do NOT
+cover is the TS-side FSM, the React lifecycle, and the LLM call.
+
+### § 4.5 — Helper: send a properly framed envelope to the host's TCP port
+
+For § 2.4, § 2.5, § 2.7 manual runs, you may want to drive the host's
+TCP port directly with a properly framed envelope. Save this as
+`scripts/frame_send.py` (or your preferred language):
+
+```python
+#!/usr/bin/env python3
+"""
+Send one or more envelopes to a host's TCP LAN port using the real
+Kindora wire format: 4-byte big-endian length + UTF-8 JSON body.
+Usage: python frame_send.py <host-ip> <tcp-port> path/to/envelope.json [more.json ...]
+"""
+import socket, struct, sys, pathlib
+
+if len(sys.argv) < 4:
+    sys.exit("usage: frame_send.py <ip> <port> <envelope.json> [envelope.json ...]")
+
+ip, port = sys.argv[1], int(sys.argv[2])
+s = socket.create_connection((ip, port))
+for path in sys.argv[3:]:
+    body = pathlib.Path(path).read_bytes()
+    s.sendall(struct.pack(">I", len(body)) + body)
+    print(f"sent {len(body)} bytes from {path}")
+s.close()
+```
+
+For § 2.5 (malformed hello), put a deliberately-broken JSON in
+`bad.json` and pass it to the script. The wire delivers it byte-for-byte
+to the TS-side `validatePeerHello`, which will reject it (this is the
+`two_instance_malformed_hello_is_delivered` test, but driven by you
+instead of a second LanState).
+
+For § 2.4 (no hello), open a raw TCP listener with `nc -l <port>` (or
+`socat TCP-LISTEN:<port>`) so the host's `join_connect` succeeds but
+no envelope ever arrives.
+
 ---
 
-## § 5 — Verdict template
+## § 5 — Known gaps (calibrated against the actual code, Phase 16.1)
 
-Fill this in after running § 1, § 2, § 3:
+### § 5.1 — LAN transport has no out-of-band peer-drop detection
+
+**Where:** `apps/desktop/src-tauri/src/lan.rs`,
+`LanTransport.pollOnce` swallows errors silently, and the
+`tcp_read_loop` only signals EOF via the inbox — `host_poll` /
+`join_poll` call `try_recv` and `break` on `Disconnected`, returning
+`Ok([])` rather than an error.
+
+**Symptom:** if the peer process is killed (or the host process is
+killed on the joiner's side), the surviving side's `host_send` /
+`join_send` keeps succeeding until the TCP buffer fills or the OS
+sends RST. The session only finds out about the drop on its NEXT
+send attempt.
+
+**Workaround in the TS layer:** `PairingSession` wraps each send in
+a try/catch and surfaces the transport error to the orchestrator as
+`HandshakeClosedError` (or similar). The `MatchOrchestrator` then
+rejects the session and `MatchView` shows the disconnect banner.
+This is what the § 2.6 / § 2.7 / § 3.6 manual runs exercise; it's
+defense-in-depth, not a clean signal.
+
+**Fix candidate (not in this commit):** have the read loop set a
+`link_broken: AtomicBool` on the `TcpLink`, and have `host_poll` /
+`join_poll` return `Err(LanError::PeerClosed)` when the flag is set.
+Then the TS layer can short-circuit on the next poll and surface
+the disconnect immediately.
+
+### § 5.2 — Cancel from ConnectView leaks the LAN handle
+
+**Where:** `apps/desktop/src/views/ConnectView.tsx`, the joiner's
+"Cancel" button only calls the parent's `onCancel` (which navigates
+back to Home). It does NOT call `h.disconnect('cancelled')` on the
+`LanConnectHandle`. The `JoinSide` (TCP writer/reader) and the
+ephemeral UDP socket used for discovery are leaked.
+
+**Symptom:** a second pairing attempt with the same joiner may
+encounter a leaked UDP socket still bound to a port; in practice
+the kernel reuses the port and the test passes, but the resource
+leak is real. See `lan_protocol_e2e.rs` for the wire-level coverage
+of the cancel-and-re-pair path — it does NOT exercise this leak,
+because the test calls `joiner.join_disconnect()` explicitly.
+
+**Fix candidate (not in this commit):** in `JoinPanel`, wrap the
+`h.disconnect` call in a `useEffect` cleanup so the LAN handle is
+always released on unmount, regardless of which path the user
+takes to leave the view.
+
+### § 5.3 — LLM error path: throw vs. degraded
+
+Two distinct paths in `packages/agent/src/analyze-match.ts`:
+
+1. **`provider.chat` throws** (auth error, network error, 4xx/5xx
+   not retried): `analyzeMatch` throws → `MatchOrchestrator.start`
+   throws → `MatchView` shows the error banner. **No false-positive
+   match shown.**
+
+2. **Provider returns malformed JSON** (200 OK, but body is not the
+   expected `MatchAnalysis` shape): `parseMatchAnalysis` returns a
+   **degraded** result with `compatibilitySignal: 'none'` and an
+   explanation of "match analysis unavailable". `MatchOrchestrator`
+   does NOT throw; `MatchView` shows the degraded result in the
+   "done" phase.
+
+These are the observed paths. A test that asserts "LLM error
+produces no result" must distinguish between (1) and (2). The
+existing `match-orchestrator.test.ts` covers (2) with a malformed-
+JSON stub; (1) is covered by an LLM-stub that throws. Both
+**PASS**.
+
+---
+
+## § 6 — Verdict template
+
+Fill this in after running § 1, § 2, § 3 on two physical machines.
+Append the wire-level PASS/FAIL summary from `cargo test --test
+lan_protocol_e2e` (already known: 9/9 PASS as of Phase 16.1).
 
 ```
-PHASE 16 VERDICT — <your name>, <date>, <host OS / version>, <joiner OS / version>
+PHASE 16.1 VERDICT — <your name>, <date>, <host OS / version>, <joiner OS / version>
+
+Wire-level (cargo test --test lan_protocol_e2e): PASS (9/9)
+Single-LanState regression (cargo test --test lan_e2e):      PASS (15/15)
 
 § 1 Happy path                              : PASS / FAIL
 § 2.1 Wrong code                            : PASS / FAIL
@@ -189,7 +352,7 @@ PHASE 16 VERDICT — <your name>, <date>, <host OS / version>, <joiner OS / vers
 § 3.6 Hard kill propagates                  : PASS / FAIL
 
 Overall: PASS / FAIL / PARTIAL
-Notes: <paste log excerpts of any failure>
+Notes: <paste log excerpts of any failure; reference § 5 for known gaps>
 ```
 
 Save as `docs/phase16/results-<date>-<initials>.md` and commit.
