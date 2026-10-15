@@ -67,10 +67,23 @@ jobs:
       - name: Test
         run: pnpm -r test
 
-      - name: Rust lib check (no full tauri build)
+      - name: Rust lib check (real PASS/FAIL)
         working-directory: apps/desktop/src-tauri
-        # `cargo check` validates the Rust library + lan.rs + secrets.rs
-        # without producing binaries or requiring tauri-build assets.
-        # This is a fast, non-blocking safety net for the new Rust code.
-        run: |
-          cargo check --lib --no-default-features 2>&1 | tail -20 || true
+        # `cargo check --lib --message-format=short` validates the Rust
+        # library + lan.rs + secrets.rs. Exits non-zero on compile
+        # failure; CI must surface this as a real FAIL. We do NOT
+        # gate CI on the full `tauri build` because that requires
+        # platform-specific tauri-build assets (icons, tauri.conf.json
+        # processed by tauri-build) and is verified locally before
+        # release tagging.
+        run: cargo check --lib --message-format=short
+
+      - name: LAN end-to-end Rust tests
+        working-directory: apps/desktop/src-tauri
+        # Exercises the production LanState (host_start, host_poll,
+        # host_send, join_discover, join_connect, host_linked) on real
+        # UDP + TCP loopback. The tests allocate unique UDP ports
+        # per LanState, but parallel test execution is unreliable on
+        # the macOS/Linux kernel UDP buffer pool, so we force
+        # --test-threads=1. cargo exits non-zero on any test failure.
+        run: cargo test --test lan_e2e --message-format=short -- --test-threads=1

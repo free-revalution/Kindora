@@ -12,6 +12,17 @@
 // opens a TCP connection to the chosen peer.
 //
 // Cross-platform: tokio handles bind/connect on macOS / Linux / Windows.
+//
+// ---------------------------------------------------------------------------
+// V0.1 link-handoff invariant
+// ---------------------------------------------------------------------------
+// The host's TCP listener runs in a spawned task. When a peer connects,
+// the listener produces a TcpLink (writer + inbox + shutdown) and must
+// hand it to HostSide. We use a `oneshot`-like direct setter on
+// LanState — the listener task clones the Arc<Mutex<Inner>> and calls
+// `set_host_link` after each accept. This avoids the broken pattern
+// of a local accept_tx/accept_rx that drops the receiver on return.
+// ---------------------------------------------------------------------------
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -84,10 +95,26 @@ pub struct HostInfo {
     pub code: String,
 }
 
+/// TcpLink = the live TCP connection. Cloning `writer` is cheap (Arc);
+/// the inbox is an mpsc receiver; shutdown_tx signals the read loop to
+/// stop and close the underlying socket.
+#[allow(dead_code)]
 struct TcpLink {
     writer: Arc<Mutex<tokio::net::tcp::OwnedWriteHalf>>,
     inbox: mpsc::UnboundedReceiver<String>,
     shutdown_tx: tokio::sync::watch::Sender<bool>,
+}
+
+impl TcpLink {
+    /// Read the next decoded JSON body, returning `None` on EOF or shutdown.
+    #[allow(dead_code)]
+    async fn next(&mut self) -> Option<String> {
+        self.inbox.recv().await
+    }
+
+    fn shutdown(&self) {
+        let _ = self.shutdown_tx.send(true);
+    }
 }
 
 struct HostSide {
@@ -97,8 +124,12 @@ struct HostSide {
     code: String,
     link: Option<TcpLink>,
     udp_shutdown: Option<tokio::sync::watch::Sender<bool>>,
+    /// Signalled when the accept loop has handed off (or failed) so
+    /// host_stop can wait for it to exit instead of racing the lock.
+    accept_task_done: Option<tokio::sync::oneshot::Sender<()>>,
 }
 
+#[allow(dead_code)]
 struct JoinSide {
     peer_ip: String,
     peer_port: u16,
@@ -114,6 +145,7 @@ impl Default for HostSide {
             code: String::new(),
             link: None,
             udp_shutdown: None,
+            accept_task_done: None,
         }
     }
 }
@@ -124,9 +156,28 @@ impl Default for JoinSide {
     }
 }
 
-#[derive(Default)]
+#[allow(dead_code)]
+fn _ensure_joinside_used() {
+    let _ = JoinSide::default();
+}
+
+#[derive(Default, Clone)]
 pub struct LanState {
     inner: Arc<Mutex<Inner>>,
+    /// Override the broadcast address used by `join_discover`. Defaults
+    /// to `255.255.255.255`. Tests set this to the loopback broadcast
+    /// (`127.0.0.1`) on platforms where the loopback interface does
+    /// not have a real broadcast address (e.g. macOS).
+    broadcast_addr: Arc<std::sync::Mutex<Option<String>>>,
+    /// Override the host's UDP bind address. Defaults to `0.0.0.0`
+    /// (all interfaces). Tests bind to `127.0.0.1` to avoid macOS
+    /// routing ambiguity.
+    udp_bind_addr: Arc<std::sync::Mutex<Option<String>>>,
+
+    /// Override the UDP discovery port. Defaults to 52419. Tests
+    /// set this so multiple LanState instances can coexist on the
+    /// same machine without binding conflicts.
+    udp_port: Arc<std::sync::Mutex<Option<u16>>>,
 }
 
 #[derive(Default)]
@@ -140,6 +191,71 @@ impl LanState {
         Self::default()
     }
 
+    /// Override the broadcast address used by `join_discover`. Mostly
+    /// for tests; production code uses the default `255.255.255.255`.
+    /// Synchronous because `broadcast_addr` is a `std::sync::Mutex`,
+    /// not a tokio one — this is a one-shot configuration knob.
+    pub fn set_broadcast_addr(&self, addr: String) {
+        let mut g = self.broadcast_addr.lock().expect("broadcast_addr mutex poisoned");
+        *g = Some(addr);
+    }
+
+    fn current_broadcast_addr(&self) -> String {
+        let g = self.broadcast_addr.lock().expect("broadcast_addr mutex poisoned");
+        g.clone().unwrap_or_else(|| "255.255.255.255".to_string())
+    }
+
+    /// Override the host's UDP bind address. Mostly for tests.
+    /// Synchronous because `udp_bind_addr` is a `std::sync::Mutex`.
+    pub fn set_udp_bind_addr(&self, addr: String) {
+        let mut g = self.udp_bind_addr.lock().expect("udp_bind_addr mutex poisoned");
+        *g = Some(addr);
+    }
+
+    fn current_udp_bind_addr(&self) -> String {
+        let g = self.udp_bind_addr.lock().expect("udp_bind_addr mutex poisoned");
+        g.clone().unwrap_or_else(|| "0.0.0.0".to_string())
+    }
+
+    /// Override the UDP discovery port. Mostly for tests.
+    pub fn set_udp_port(&self, port: u16) {
+        let mut g = self.udp_port.lock().expect("udp_port mutex poisoned");
+        *g = Some(port);
+    }
+
+    fn current_udp_port(&self) -> u16 {
+        let g = self.udp_port.lock().expect("udp_port mutex poisoned");
+        g.unwrap_or(DISCOVERY_PORT)
+    }
+
+    /// Internal handle for the spawned accept loop to push the live link
+    /// into the host side. Acquires the lock briefly; never held across
+    /// an `await` (so it cannot deadlock with `host_poll` / `host_send`).
+    /// Private to the module because `TcpLink` is private.
+    async fn set_host_link(&self, link: TcpLink) {
+        let mut g = self.inner.lock().await;
+        if let Some(h) = g.host.as_mut() {
+            h.link = Some(link);
+        }
+    }
+
+    /// Tell the host accept loop to stop. Called from `host_stop`.
+    pub async fn signal_host_shutdown(&self) {
+        let g = self.inner.lock().await;
+        if let Some(h) = g.host.as_ref() {
+            if let Some(tx) = h.accept_task_done.as_ref() {
+                // The accept task awaits this — we just need to drop the
+                // receiver side of the oneshot to abort the task. Since
+                // we don't have a `cancel` channel here, the simplest
+                // approach: the accept task has a `tokio::select!` on the
+                // oneshot and a `tokio::time::sleep` of nothing — it
+                // wakes on socket activity. We pass a separate shutdown
+                // channel via host_stop; for now this is a no-op.
+                let _ = tx;
+            }
+        }
+    }
+
     // ---------- host ----------
 
     pub async fn host_start(
@@ -148,78 +264,73 @@ impl LanState {
         agent_id: String,
         display_name: String,
     ) -> Result<HostInfo, LanError> {
-        let mut g = self.inner.lock().await;
-        if g.host.is_some() {
-            return Err(LanError::AlreadyRunning("host".into()));
+        // Lock-check: refuse double-start.
+        {
+            let mut g = self.inner.lock().await;
+            if g.host.is_some() {
+                return Err(LanError::AlreadyRunning("host".into()));
+            }
+            // Reserve the host slot by inserting a placeholder; we'll
+            // fill in tcp_port + link + accept_task_done after we bind.
+            // We can't hold the lock across the bind below, so we use
+            // a sentinel-free pattern: bind, then insert.
+            let _ = &mut *g; // keep the lock until end of scope
         }
+
         let listener = TcpListener::bind(("0.0.0.0", 0)).await?;
         let tcp_port = listener.local_addr()?.port();
 
         // UDP responder
-        let (udp_sh_tx, mut udp_sh_rx) = tokio::sync::watch::channel(false);
+        let (udp_sh_tx, udp_sh_rx) = tokio::sync::watch::channel(false);
         let code_u = code.clone();
         let agent_u = agent_id.clone();
         let display_u = display_name.clone();
+        let bind_u = self.current_udp_bind_addr();
+        let port_u = self.current_udp_port();
         tokio::spawn(async move {
-            let res = udp_responder(code_u, agent_u, display_u, tcp_port, udp_sh_rx.clone()).await;
+            let res = udp_responder(code_u, agent_u, display_u, tcp_port, bind_u, port_u, udp_sh_rx).await;
             if let Err(e) = res {
                 log::warn!("[lan] udp responder exited: {e}");
             }
         });
 
-        // TCP accept loop. The link will be filled in on the first accept.
-        let (accept_tx, mut accept_rx) = mpsc::unbounded_channel::<TcpLink>();
+        // Accept loop. Clones the Arc<Mutex<Inner>> so the spawned task
+        // can push the link into HostSide without going through a
+        // local mpsc channel (which was the V0.1 bug: accept_rx was
+        // dropped at end of host_start, so the link was never received).
+        let (accept_done_tx, accept_done_rx) = tokio::sync::oneshot::channel::<()>();
+        let state_for_accept = self.clone();
         let code_a = code.clone();
-        tokio::spawn(async move {
-            loop {
-                match listener.accept().await {
-                    Ok((stream, _addr)) => {
-                        let (reader, writer) = stream.into_split();
-                        let writer = Arc::new(Mutex::new(writer));
-                        let (inbox_tx, inbox_rx) = mpsc::unbounded_channel::<String>();
-                        let (sh_tx, sh_rx) = tokio::sync::watch::channel(false);
-                        let writer_for_loop = writer.clone();
-                        tokio::spawn(async move {
-                            let res = tcp_read_loop(reader, inbox_tx, sh_rx).await;
-                            if let Err(e) = res {
-                                log::debug!("[lan] host read loop ended: {e}");
-                            }
-                        });
-                        // We push the link to the orchestrator via the accept_tx channel
-                        let _ = accept_tx.send(TcpLink {
-                            writer: writer_for_loop,
-                            inbox: inbox_rx,
-                            shutdown_tx: sh_tx,
-                        });
-                        // V0.1: only one peer per session; stop accepting after first.
-                        log::info!("[lan] host accepted one connection, code={code_a}, closing listener");
-                        break;
-                    }
-                    Err(e) => {
-                        log::warn!("[lan] host accept error: {e}");
-                        break;
-                    }
-                }
-            }
+        let accept_handle = tokio::spawn(async move {
+            accept_loop(state_for_accept, listener, code_a, accept_done_rx).await;
         });
+        // The accept_handle itself isn't stored — host_stop is the only
+        // thing that needs to wait for the loop to exit, and that's
+        // handled via the listener being dropped on host_stop.
 
-        let host = HostSide {
-            tcp_port,
-            agent_id: agent_id.clone(),
-            display_name: display_name.clone(),
-            code: code.clone(),
-            link: None,
-            udp_shutdown: Some(udp_sh_tx),
-        };
-        g.host = Some(host);
+        // Insert the host side. Acquire the lock briefly.
+        {
+            let mut g = self.inner.lock().await;
+            // Re-check inside the lock (race-free vs. another host_start).
+            if g.host.is_some() {
+                return Err(LanError::AlreadyRunning("host".into()));
+            }
+            g.host = Some(HostSide {
+                tcp_port,
+                agent_id: agent_id.clone(),
+                display_name: display_name.clone(),
+                code: code.clone(),
+                link: None,
+                udp_shutdown: Some(udp_sh_tx),
+                accept_task_done: Some(accept_done_tx),
+            });
+        }
 
-        // Drop the lock before awaiting the inbox
-        drop(g);
-
-        // Wait briefly for a peer. The Tauri command will see the link once filled.
-        // We don't block here — the host_start returns immediately. The frontend
-        // polls host_poll repeatedly.
-        let _ = accept_rx; // keep the channel open in the spawned task
+        // Keep the JoinHandle alive in a fire-and-forget way — the
+        // accept loop only returns when host_stop closes the listener
+        // or after the first accept (V0.1 single-peer invariant).
+        // The runtime will reap it on completion.
+        drop(accept_handle);
 
         Ok(HostInfo {
             tcp_port,
@@ -234,15 +345,13 @@ impl LanState {
         let Some(h) = g.host.as_mut() else {
             return Err(LanError::NotConnected);
         };
-        // If link not set, try to receive from a one-shot channel stored in the host.
-        // For V0.1 we use a side-channel: the host side stores the next link as
-        // a separate Option. The accept task pushes a fresh link via host_set_link.
-        // To keep this simple, we expose host_take_link as a separate command.
-        if h.link.is_none() {
+        let Some(link) = h.link.as_mut() else {
             return Ok(vec![]);
-        }
-        let link = h.link.as_mut().unwrap();
+        };
         let mut out = Vec::new();
+        // Drain whatever's already in the inbox without awaiting —
+        // poll semantics must not block. If the read loop has more in
+        // flight, the next poll cycle picks it up.
         loop {
             match link.inbox.try_recv() {
                 Ok(s) => out.push(s),
@@ -251,15 +360,6 @@ impl LanState {
             }
         }
         Ok(out)
-    }
-
-    pub async fn host_take_link(&self) -> Result<bool, LanError> {
-        // V0.1 stub: host_start does not return the link in the same call.
-        // The frontend must call host_start, then poll host_status; the
-        // link is filled when the joiner connects. The frontend polls
-        // host_status to detect "linked". For simplicity, this is exposed
-        // as a stub and host_poll only returns when link is set.
-        Ok(false)
     }
 
     pub async fn host_status(&self) -> Result<Option<HostInfo>, LanError> {
@@ -277,13 +377,6 @@ impl LanState {
         g.host.as_ref().and_then(|h| h.link.as_ref()).is_some()
     }
 
-    pub async fn host_set_link(&self, link: TcpLink) {
-        let mut g = self.inner.lock().await;
-        if let Some(h) = g.host.as_mut() {
-            h.link = Some(link);
-        }
-    }
-
     pub async fn host_send(&self, msg: String) -> Result<(), LanError> {
         let g = self.inner.lock().await;
         let h = g.host.as_ref().ok_or(LanError::NotConnected)?;
@@ -294,11 +387,33 @@ impl LanState {
     }
 
     pub async fn host_stop(&self) -> Result<(), LanError> {
-        let mut g = self.inner.lock().await;
-        if let Some(mut h) = g.host.take() {
-            if let Some(u) = h.udp_shutdown.take() { let _ = u.send(true); }
-            if let Some(l) = h.link.take() { let _ = l.shutdown_tx.send(true); }
+        // Take the host side out of the state. After this, all host_*
+        // commands return NotConnected.
+        let mut h = {
+            let mut g = self.inner.lock().await;
+            g.host.take()
+        };
+        if let Some(ref mut host) = h {
+            // 1) Signal the UDP responder to stop (drops its socket).
+            if let Some(u) = host.udp_shutdown.take() {
+                let _ = u.send(true);
+            }
+            // 2) Signal the read loop to stop, then drop the writer
+            //    to close the TCP socket from our side.
+            if let Some(l) = host.link.take() {
+                l.shutdown();
+            }
+            // 3) Tell the accept loop to exit (signal via the oneshot
+            //    which it doesn't actually await — but if it hasn't
+            //    observed the listener drop yet, this is a no-op).
+            //    The accept loop wakes on listener.accept() and on
+            //    read activity; dropping the listener is what stops it.
+            if let Some(tx) = host.accept_task_done.take() {
+                let _ = tx.send(());
+            }
         }
+        // Drop the host side itself, releasing any remaining resources.
+        drop(h);
         Ok(())
     }
 
@@ -317,7 +432,9 @@ impl LanState {
             protocol_version: PROTOCOL_VERSION.to_string(),
         };
         let body = serde_json::to_vec(&discover)?;
-        let broadcast_addr: SocketAddr = format!("255.255.255.255:{DISCOVERY_PORT}")
+        let broadcast_addr_str = self.current_broadcast_addr();
+        let discovery_port = self.current_udp_port();
+        let broadcast_addr: SocketAddr = format!("{broadcast_addr_str}:{discovery_port}")
             .parse()
             .map_err(|e: std::net::AddrParseError| LanError::Invalid(format!("{e}")))?;
         socket.send_to(&body, broadcast_addr).await?;
@@ -365,10 +482,13 @@ impl LanState {
         peer_ip: String,
         peer_port: u16,
     ) -> Result<PeerInfo, LanError> {
-        let mut g = self.inner.lock().await;
-        if g.join.is_some() {
-            return Err(LanError::AlreadyRunning("join".into()));
+        {
+            let g = self.inner.lock().await;
+            if g.join.is_some() {
+                return Err(LanError::AlreadyRunning("join".into()));
+            }
         }
+
         let addr: SocketAddr = format!("{peer_ip}:{peer_port}")
             .parse()
             .map_err(|e: std::net::AddrParseError| LanError::Invalid(format!("{e}")))?;
@@ -394,11 +514,19 @@ impl LanState {
             display_name: peer_display_name,
             code: String::new(),
         };
-        g.join = Some(JoinSide {
-            peer_ip,
-            peer_port,
-            link: Some(link),
-        });
+
+        {
+            let mut g = self.inner.lock().await;
+            // Re-check (race-free vs. another join_connect).
+            if g.join.is_some() {
+                return Err(LanError::AlreadyRunning("join".into()));
+            }
+            g.join = Some(JoinSide {
+                peer_ip,
+                peer_port,
+                link: Some(link),
+            });
+        }
         Ok(info)
     }
 
@@ -427,22 +555,79 @@ impl LanState {
     }
 
     pub async fn join_disconnect(&self) -> Result<(), LanError> {
-        let mut g = self.inner.lock().await;
-        if let Some(mut j) = g.join.take() {
-            if let Some(l) = j.link.take() {
-                let _ = l.shutdown_tx.send(true);
+        let mut j = {
+            let mut g = self.inner.lock().await;
+            g.join.take()
+        };
+        if let Some(ref mut join) = j {
+            if let Some(l) = join.link.take() {
+                l.shutdown();
             }
         }
+        drop(j);
         Ok(())
     }
+}
 
-    pub async fn join_set_peer_link_via_accept(&self, link: TcpLink) {
-        // Reserved for future: when the host side receives a peer, it stores the link.
-        // This setter is exposed so external tasks (the host accept task) can hand off
-        // the link without holding the mutex across await points.
-        let mut g = self.inner.lock().await;
-        if let Some(j) = g.join.as_mut() {
-            j.link = Some(link);
+/// Host accept loop: waits for the first TCP connection, hands the
+/// link to LanState, then exits (V0.1 single-peer invariant). On
+/// shutdown, the caller drops the listener, which makes `accept()` return
+/// an error and the loop exits.
+async fn accept_loop(
+    state: LanState,
+    listener: TcpListener,
+    code: String,
+    mut accept_done_rx: tokio::sync::oneshot::Receiver<()>,
+) {
+    // We don't accept a shutdown signal here — the way to stop this
+    // loop is to drop `listener`, which makes `accept()` return
+    // `Err(BadFileDescriptor)` on the next call. host_stop drops the
+    // TcpListener via the `HostSide` we no longer hold after the
+    // handover. To make this fully reliable, we keep a shutdown
+    // watch: a `oneshot` that, when it fires, exits the loop.
+    let _ = &mut accept_done_rx; // currently unused; drop is enough
+    loop {
+        // Race the next accept against the shutdown signal so a stuck
+        // OS-level accept() doesn't keep us alive forever.
+        let next = tokio::select! {
+            biased;
+            _ = &mut accept_done_rx => {
+                log::debug!("[lan] host accept loop: shutdown signalled");
+                break;
+            }
+            r = listener.accept() => r,
+        };
+        match next {
+            Ok((stream, _addr)) => {
+                let (reader, writer) = stream.into_split();
+                let writer = Arc::new(Mutex::new(writer));
+                let (inbox_tx, inbox_rx) = mpsc::unbounded_channel::<String>();
+                let (sh_tx, sh_rx) = tokio::sync::watch::channel(false);
+                let writer_for_loop = writer.clone();
+                tokio::spawn(async move {
+                    let res = tcp_read_loop(reader, inbox_tx, sh_rx).await;
+                    if let Err(e) = res {
+                        log::debug!("[lan] host read loop ended: {e}");
+                    }
+                });
+                let link = TcpLink {
+                    writer: writer_for_loop,
+                    inbox: inbox_rx,
+                    shutdown_tx: sh_tx,
+                };
+                // Hand the link off to the host side. This is the V0.1
+                // bug fix: previously the link went to a local mpsc
+                // whose receiver was dropped at end of host_start.
+                state.set_host_link(link).await;
+                log::info!("[lan] host accepted one connection, code={code}, closing listener");
+                // V0.1: only one peer per session; stop accepting after first.
+                // Drop the listener so any further accept() calls fail.
+                break;
+            }
+            Err(e) => {
+                log::warn!("[lan] host accept error: {e}");
+                break;
+            }
         }
     }
 }
@@ -452,9 +637,14 @@ async fn udp_responder(
     agent_id: String,
     display_name: String,
     tcp_port: u16,
+    bind_addr: String,
+    bind_port: u16,
     mut shutdown: tokio::sync::watch::Receiver<bool>,
 ) -> Result<(), LanError> {
-    let socket = tokio::net::UdpSocket::bind(("0.0.0.0", DISCOVERY_PORT)).await?;
+    let bind: SocketAddr = format!("{bind_addr}:{bind_port}")
+        .parse()
+        .map_err(|e: std::net::AddrParseError| LanError::Invalid(format!("{e}")))?;
+    let socket = tokio::net::UdpSocket::bind(bind).await?;
     let mut buf = [0u8; 4096];
     loop {
         if *shutdown.borrow() {

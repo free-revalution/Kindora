@@ -290,6 +290,61 @@ describe('LanTransport (Tauri shim)', () => {
     expect(got.length).toBe(1);
     await t.disconnect();
   });
+
+  // ---- Transport.connect() interface ----
+
+  it('connect() in idle mode with peer.hint discovers + dials the first peer', async () => {
+    const t = new LanTransport({ selfAgentId: 'self', selfDisplayName: 'Self' });
+    state.discoverResults = [
+      { ip: '192.168.1.10', port: 52420, agent_id: 'peer', display_name: 'Peer', code: 'ABC123' },
+    ];
+    // Connect via the Transport interface using a PeerInfo whose hint
+    // is the pairing code. The LanTransport should discover by code
+    // and dial the first match.
+    await t.connect({ agentId: 'peer', displayName: 'Peer', hint: 'ABC123' });
+    expect(t.isConnected()).toBe(true);
+    expect(t.connectedPeer()?.hint).toBe('192.168.1.10:52420');
+    await t.disconnect();
+  });
+
+  it('connect() in idle mode throws when no peer is found', async () => {
+    const t = new LanTransport({ selfAgentId: 'self', selfDisplayName: 'Self' });
+    state.discoverResults = [];
+    await expect(
+      t.connect({ agentId: 'peer', displayName: 'Peer', hint: 'NOSUCH' }),
+    ).rejects.toThrow(/no peer on the LAN/i);
+  });
+
+  it('connect() in idle mode throws when peer.hint is missing', async () => {
+    const t = new LanTransport({ selfAgentId: 'self', selfDisplayName: 'Self' });
+    await expect(
+      // hint is required for the joiner auto-discover path.
+      t.connect({ agentId: 'peer', displayName: 'Peer' }),
+    ).rejects.toThrow(/pairing code/i);
+  });
+
+  it('connect() in host mode is a no-op', async () => {
+    const t = new LanTransport({ selfAgentId: 'self', selfDisplayName: 'Self' });
+    await t.startHost('ABC123');
+    // After startHost, the transport is in 'host' mode. connect()
+    // must NOT throw and must NOT re-bind.
+    await t.connect({ agentId: 'peer', displayName: 'Peer', hint: 'ABC123' });
+    expect(t.isConnected()).toBe(false); // still no peer arrived
+    await t.disconnect();
+  });
+
+  it('connect() in join mode is a no-op (already connected)', async () => {
+    const t = new LanTransport({ selfAgentId: 'self', selfDisplayName: 'Self' });
+    state.discoverResults = [
+      { ip: '192.168.1.10', port: 52420, agent_id: 'peer', display_name: 'Peer', code: 'ABC123' },
+    ];
+    await t.startJoin(state.discoverResults[0]!);
+    // startJoin moves to 'join' mode and connects. A second connect()
+    // must NOT re-discover or throw.
+    await t.connect({ agentId: 'peer', displayName: 'Peer', hint: 'ABC123' });
+    expect(t.isConnected()).toBe(true);
+    await t.disconnect();
+  });
 });
 
 // Suppress the afterEach's "unhandled rejection" by giving it a body.

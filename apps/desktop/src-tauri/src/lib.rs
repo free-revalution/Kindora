@@ -11,7 +11,12 @@
 mod lan;
 mod secrets;
 
-use lan::{HostInfo, LanError, LanState, PeerInfo};
+// Re-export the LAN transport surface for the in-tree integration test
+// (`tests/lan_e2e.rs`) and for any future external integration tests
+// that want to drive the production LanState without going through
+// the Tauri command layer.
+#[doc(hidden)]
+pub use lan::{HostInfo, LanError, LanState, PeerInfo};
 use secrets::SecretError;
 
 pub struct AppState {

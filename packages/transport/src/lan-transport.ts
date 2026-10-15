@@ -99,6 +99,8 @@ export class LanTransport implements Transport {
   /** Cached peer info once connected (host: when joiner connects; join: after connect). */
   private peer: PeerInfo | null = null;
   private pollTimer: ReturnType<typeof setInterval> | null = null;
+  /** Discovery timeout (ms) used by `connect(peer)` for the joiner path. */
+  private readonly discoverTimeoutMs: number;
 
   constructor(opts: LanTransportOptions) {
     this.opts = opts;
@@ -109,6 +111,7 @@ export class LanTransport implements Transport {
       );
     }
     this.tauri = t;
+    this.discoverTimeoutMs = 2500;
   }
 
   /**
@@ -187,14 +190,49 @@ export class LanTransport implements Transport {
 
   // ---------- Transport interface ----------
 
-  async connect(_peer: PeerInfo): Promise<void> {
-    // The LanTransport is self-managing: call startHost / startJoin instead.
-    // We keep this method to satisfy the Transport interface but it
-    // should be a no-op when already started.
+  /**
+   * Transport.connect — satisfies the `Transport` interface.
+   *
+   *   - host mode:  no-op. The host already bound via `startHost(code)`
+   *                 and is listening for the joiner; `connect()` here
+   *                 just records the self-peer info on our side. The
+   *                 session's `startHost(transport)` calls this and
+   *                 then transitions to 'hosting' state.
+   *   - join mode:  no-op. The joiner dialed via `startJoin(peer)` and
+   *                 `connect()` is a confirmation. The session's
+   *                 `startJoin(transport, code)` calls this and
+   *                 transitions to 'joining'/'connected'.
+   *   - idle mode:  joiner path. The pairing code lives in `peer.hint`
+   *                 (per the Transport contract). We do UDP discovery
+   *                 filtered by code, then dial the first matching peer.
+   *                 Throws if the discovery times out.
+   *
+   * Note: when called from a PairingSession that was *already*
+   * configured via the dedicated `startHost`/`startJoin` methods on
+   * this transport, `connect()` is a no-op — the dedicated methods
+   * already started the actual network setup. This mirrors the
+   * loopback path where `connect(peerInfo)` is the single entry point
+   * and the LAN path where the dedicated methods pre-stage.
+   */
+  async connect(peer: PeerInfo): Promise<void> {
+    if (this.mode === 'host' || this.mode === 'join') {
+      // Already started via the dedicated methods. No-op.
+      return;
+    }
     if (this.mode === 'idle') {
-      throw new Error(
-        'LanTransport.connect: use startHost(code) or startJoin(peer) — the Transport.connect interface is not the right entry point for LAN.',
-      );
+      const code = peer.hint;
+      if (!code) {
+        throw new Error(
+          'LanTransport.connect: a joiner needs peer.hint set to the pairing code. Call startJoin(peer) directly with a discovered peer instead.',
+        );
+      }
+      const peers = await this.discover(code, this.discoverTimeoutMs);
+      if (peers.length === 0) {
+        throw new Error(
+          `LanTransport.connect: no peer on the LAN responded to code "${code}" within ${this.discoverTimeoutMs}ms.`,
+        );
+      }
+      await this.startJoin(peers[0]!);
     }
   }
 
