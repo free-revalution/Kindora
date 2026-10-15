@@ -36,6 +36,15 @@ async function makePair(): Promise<Pair> {
   const code = sessionA.startHost(ta);
   await sessionB.startJoin(tb, code);
   if (ta.isConnected()) sessionA.notifyPeerConnected();
+  // Phase 15: simulate the orchestrator having validated each side's
+  // `hello` envelope so the sessions reach 'connected'. The chat
+  // orchestrator is downstream of the match handshake.
+  if (sessionA.current().state === 'tcp-connected') {
+    sessionA.notifyHelloReceived(ID_B);
+  }
+  if (sessionB.current().state === 'tcp-connected') {
+    sessionB.notifyHelloReceived(ID_A);
+  }
   return { sessionA, sessionB };
 }
 

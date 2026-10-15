@@ -182,12 +182,15 @@ function HostPanel({
     };
   }, [llmReady, transport]);
 
-  // When the handle transitions to 'connected', call onConnected.
+  // When the handle transitions to 'tcp-connected' or 'connected',
+  // call onConnected. The orchestrator accepts either state — it
+  // will perform the `hello` exchange itself from 'tcp-connected' and
+  // proceed straight to the rest of the flow from 'connected'.
   useEffect(() => {
     if (transport === 'lan' && lanHandle) {
       // LAN handle exposes a PairingSession; use the same listener.
       const off = lanHandle.session.onStateChange((snap) => {
-        if (snap.state === 'connected') {
+        if (snap.state === 'tcp-connected' || snap.state === 'connected') {
           // Bridge the LanConnectHandle into a ConnectHandle by reusing
           // the in-process ConnectHandle shape. The downstream views
           // only need session + selfAgentId + orchestrator + disconnect.
@@ -199,7 +202,7 @@ function HostPanel({
             get orchestrator() {
               return lanHandle.getOrchestrator();
             },
-            state: 'connected',
+            state: snap.state,
             async disconnect(reason: string = 'user-requested') {
               await lanHandle.disconnect(reason);
             },
@@ -213,7 +216,7 @@ function HostPanel({
     }
     if (transport === 'loopback' && handle) {
       const off = handle.session.onStateChange((snap) => {
-        if (snap.state === 'connected') {
+        if (snap.state === 'tcp-connected' || snap.state === 'connected') {
           onConnected(handle);
         }
       });
@@ -297,8 +300,10 @@ function JoinPanel({
       } else {
         const input = await toConnectInput();
         const handle = startJoin({ ...input, code: code.trim() });
-        // Wait for the next tick — startJoin transitions to 'connected'
-        // on the next microtask.
+        // Wait for the next tick — startJoin transitions the session
+        // to 'tcp-connected' (Phase 15: NOT 'connected') on the next
+        // microtask. The orchestrator will drive the `hello` exchange
+        // and lift it to 'connected' once it runs.
         await new Promise((r) => setTimeout(r, 50));
         onConnected(handle);
       }

@@ -20,8 +20,8 @@
  * Session lifecycle
  * -----------------
  * We drive a real `PairingSession` over a `LanTransport`. The session
- * owns the FSM (idle → hosting/joining → connected → closed). The
- * transport owns the network I/O. We bridge between them via the
+ * owns the FSM (idle → hosting/joining → tcp-connected → connected → closed).
+ * The transport owns the network I/O. We bridge between them via the
  * public PairingSession API:
  *
  *   host:
@@ -30,17 +30,23 @@
  *     2. transport.startHost(sessionCode)  — bind TCP+UDP, ready to
  *        answer UDP discovery filtered by sessionCode.
  *     3. Poll transport.isConnected() — when true, call
- *        session.notifyPeerConnected() so FSM moves to 'connected'.
- *     4. The orchestrator can now exchange hello / profile / match
- *        envelopes.
+ *        session.notifyTransportConnected() so FSM moves to
+ *        'tcp-connected' (the wire is up; the peer is not yet
+ *        authenticated).
+ *     4. The orchestrator drives the `hello` exchange. Once the
+ *        peer's `hello` is received and validated, the orchestrator
+ *        calls session.notifyHelloReceived(peerAgentId) so the FSM
+ *        moves to 'connected'.
  *
  *   joiner:
  *     1. transport.discover(code)   — UDP broadcast filtered by code.
  *     2. transport.startJoin(peer)  — TCP dial.
  *     3. session.startJoin(transport, code) — state: 'joining' then
- *        'connected'. The session's `transport.connect()` is a no-op
- *        for LanTransport in 'join' mode.
- *     4. The orchestrator can now exchange envelopes.
+ *        'tcp-connected' (the session's `transport.connect()` is a
+ *        no-op for LanTransport in 'join' mode).
+ *     4. The orchestrator drives the `hello` exchange, transitioning
+ *        the session to 'connected' once both sides have validated
+ *        each other's `hello` envelope.
  *
  * V0.1 limitation: the LAN path is unavailable in browser dev
  * (no Tauri runtime). The loopback path remains the default for
@@ -161,8 +167,9 @@ export async function startLanHost(input: LanStartInput): Promise<LanHostHandle>
   await transport.startHost(code);
 
   // Step 3: poll for the peer connecting. When transport.isConnected()
-  // flips true, transition the session to 'connected' so the
-  // orchestrator can run.
+  // flips true, transition the session to 'tcp-connected' so the
+  // orchestrator can drive the `hello` exchange and lift it to
+  // 'connected'.
   let resolved = false;
   const poll = setInterval(() => {
     if (resolved) return;
@@ -176,9 +183,11 @@ export async function startLanHost(input: LanStartInput): Promise<LanHostHandle>
     if (transport.isConnected()) {
       resolved = true;
       clearInterval(poll);
-      // notifyPeerConnected transitions hosting → connected. The
-      // peer agent id is locked in by the orchestrator when it
-      // receives the peer's hello envelope.
+      // notifyPeerConnected is now an alias for notifyTransportConnected —
+      // it transitions hosting → tcp-connected (NOT 'connected'). The
+      // peer agent id is locked in later, by the orchestrator, when it
+      // calls session.notifyHelloReceived(peerAgentId) after the
+      // peer's `hello` envelope has been received and validated.
       session.notifyPeerConnected();
     }
   }, 200);
@@ -206,8 +215,12 @@ export async function startLanHost(input: LanStartInput): Promise<LanHostHandle>
  *
  *  1. Discover peers on the LAN filtered by the typed code.
  *  2. Pick the first peer and dial via transport.startJoin(peer).
- *  3. session.startJoin(transport, code) — FSM: idle → joining → connected.
- *  4. The orchestrator can now exchange envelopes.
+ *  3. session.startJoin(transport, code) — FSM: idle → joining →
+ *     tcp-connected (the session's `transport.connect()` is a no-op
+ *     for LanTransport in 'join' mode).
+ *  4. The orchestrator drives the `hello` exchange and lifts the
+ *     session to 'connected' once both sides have validated each
+ *     other's `hello` envelope.
  */
 export async function startLanJoin(
   input: LanStartInput,
@@ -235,9 +248,12 @@ export async function startLanJoin(
     agentId: input.agentId,
     displayName: input.displayName,
   });
-  // PairingSession.startJoin transitions: idle → joining → connected.
-  // It calls transport.connect({hint: code}) which is a no-op for
-  // LanTransport in 'join' mode (already connected via startJoin).
+  // PairingSession.startJoin transitions: idle → joining →
+  // tcp-connected. It calls transport.connect({hint: code}) which is
+  // a no-op for LanTransport in 'join' mode (already connected via
+  // startJoin). The orchestrator then drives the `hello` exchange and
+  // calls session.notifyHelloReceived(peerAgentId) to move the FSM
+  // to 'connected'.
   await session.startJoin(transport, code);
   return {
     role: 'join',
@@ -293,9 +309,13 @@ export async function toLanInput(): Promise<LanStartInput> {
 
 /** Run the match orchestrator on a LAN handle. */
 export async function runLanMatch(handle: LanConnectHandle): Promise<MatchOutcome> {
-  if (handle.session.current().state !== 'connected') {
+  // The orchestrator accepts both 'tcp-connected' (it will drive the
+  // `hello` exchange itself) and 'connected' (the `hello` exchange
+  // was already validated by a previous step).
+  const state = handle.session.current().state;
+  if (state !== 'connected' && state !== 'tcp-connected') {
     throw new Error(
-      `runLanMatch: session is not connected (state=${handle.session.current().state}). Wait for the peer to join first.`,
+      `runLanMatch: session is not connected (state=${state}). Wait for the peer to join first.`,
     );
   }
   return handle.getOrchestrator().start(handle.session);

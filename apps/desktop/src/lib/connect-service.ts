@@ -62,12 +62,17 @@ export interface ConnectHandle {
    */
   readonly orchestrator: MatchOrchestrator;
   /**
-   * Whether the session is in the "hosting" / "joining" state vs
-   * "connected". The view uses this to render the right intermediate
-   * state. The host transitions to 'connected' as soon as the peer
-   * joins; the joiner is 'connected' after `startJoin()` returns.
+   * Whether the session is in the "hosting" / "joining" state, the
+   * "tcp-connected" intermediate (wire is up, peer's `hello` not yet
+   * validated), or the fully "connected" state (peer `hello` validated
+   * and the orchestrator has been driven). The view uses this to
+   * render the right intermediate state. The host transitions to
+   * 'tcp-connected' as soon as the peer joins; the joiner is
+   * 'tcp-connected' after `startJoin()` returns. The orchestrator
+   * promotes either side to 'connected' once the peer's `hello` has
+   * been received and validated.
    */
-  state: 'hosting' | 'joining' | 'connected';
+  state: 'hosting' | 'joining' | 'tcp-connected' | 'connected';
   /** Tear down the session. Idempotent. */
   disconnect(reason?: string): Promise<void>;
 }
@@ -135,10 +140,22 @@ export function startHost(input: StartInput): ConnectHandle {
     },
   };
 
-  // Mirror state changes onto the handle.
+  // Mirror state changes onto the handle. Phase 15 surfaces
+  // 'tcp-connected' (wire up, peer `hello` not yet validated) as a
+  // distinct intermediate so the UI can show the new state honestly
+  // before the orchestrator drives the handshake to 'connected'.
   session.onStateChange((snap) => {
-    if (snap.state === 'connected' || snap.state === 'closed') {
-      handle.state = snap.state === 'closed' ? 'joining' : 'connected';
+    if (snap.state === 'hosting' || snap.state === 'joining') {
+      handle.state = snap.state;
+    } else if (snap.state === 'tcp-connected') {
+      handle.state = 'tcp-connected';
+    } else if (snap.state === 'connected') {
+      handle.state = 'connected';
+    } else if (snap.state === 'closed') {
+      // Closed has no dedicated handle state — the view treats the
+      // session as disconnected. Keep the last non-terminal state for
+      // the UI to render an error message.
+      handle.state = 'joining';
     }
   });
 
@@ -160,10 +177,17 @@ export function startJoin(input: StartInput & { code: string }): ConnectHandle {
   // agent id from the host's `hello` envelope at run time.
   let orchestrator: MatchOrchestrator | null = null;
 
-  // Fire-and-forget: startJoin resolves to 'connected' on the next
-  // microtask. We mirror the new state onto the handle.
+  // Fire-and-forget: startJoin resolves to 'tcp-connected' on the next
+  // microtask (Phase 15: the session does NOT auto-promote to
+  // 'connected' — the orchestrator drives the `hello` exchange and
+  // lifts it to 'connected'). We mirror the new state onto the
+  // handle, mapping the full PairingState to the handle's narrower
+  // shape (the handle never reports 'idle' / 'closed' as live states).
   const joinPromise = session.startJoin(transport, input.code).then(() => {
-    handle.state = 'connected';
+    const snap = session.current();
+    if (snap.state === 'tcp-connected' || snap.state === 'connected') {
+      handle.state = snap.state;
+    }
   });
 
   const handle: ConnectHandle = {
@@ -190,9 +214,15 @@ export function startJoin(input: StartInput & { code: string }): ConnectHandle {
 
 /** Run the match orchestrator and return the outcome. */
 export async function runMatch(handle: ConnectHandle): Promise<MatchOutcome> {
-  if (handle.state !== 'connected' && handle.session.current().state !== 'connected') {
+  // The orchestrator can drive the full flow from either
+  // 'tcp-connected' (it will perform the `hello` exchange itself) or
+  // 'connected' (the exchange was already validated). We check the
+  // session directly because `handle.state` is a snapshot that can
+  // lag behind the source-of-truth session.
+  const state = handle.session.current().state;
+  if (state !== 'connected' && state !== 'tcp-connected') {
     throw new Error(
-      `connect-service.runMatch: session is not connected (state=${handle.session.current().state}). Wait for the peer to join first.`,
+      `connect-service.runMatch: session is not connected (state=${state}). Wait for the peer to join first.`,
     );
   }
   return handle.orchestrator.start(handle.session);

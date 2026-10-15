@@ -1,23 +1,40 @@
 /**
  * PairingSession — finite state machine over a `Transport`.
  *
- *   idle ──startHost()──► hosting ──peer connected──► connected ──disconnect()──► closed
- *   idle ──startJoin()──► joining ──pair succeeded──► connected ──disconnect()──► closed
+ *   idle ──startHost()──► hosting ──notifyTransportConnected()──► tcp-connected ──notifyHelloReceived()──► connected ──disconnect()──► closed
+ *   idle ──startJoin()──► joining ──notifyTransportConnected()──► tcp-connected ──notifyHelloReceived()──► connected ──disconnect()──► closed
+ *                                       │
+ *                                       └──failHandshake()──► closed
  *
  * The session is purely an orchestrator — it does not implement any
  * network I/O itself. The actual peer discovery, SDP exchange, and
  * message delivery live in the injected Transport.
+ *
+ * Phase 15 (V0.1): the FSM now distinguishes three wire-up milestones
+ *   (a) transport link is up  →  'tcp-connected'
+ *   (b) peer's `hello` validated →  'connected'
+ *   (c) session closed        →  'closed'
+ * `startJoin()` no longer auto-promotes to `'connected'` after
+ * `transport.connect()` resolves — that promotion is reserved for
+ * `notifyHelloReceived()`, which the orchestrator (or a higher layer)
+ * calls only after the peer's `hello` envelope has been received and
+ * validated. The previous `notifyPeerConnected(peerAgentId?)` method
+ * is kept as a thin alias for `notifyTransportConnected()` and no
+ * longer accepts a peer id.
  *
  * Lifecycle:
  *
  *   const session = new PairingSession({ agentId, displayName });
  *   session.onStateChange((s) => console.log(s.state));
  *   const code = session.startHost(transport);   // returns the pairing code
- *   // ... peer arrives ...
+ *   // ... transport reports TCP link up ...
+ *   session.notifyTransportConnected();          // hosting → tcp-connected
+ *   // ... peer `hello` arrives, is validated ...
+ *   session.notifyHelloReceived(peerAgentId);    // tcp-connected → connected
  *   await session.send(envelope);
  *   await session.disconnect();
  *
- * See 开发手册.md § 17, Phase 5.
+ * See 开发手册.md § 17, Phase 5 + Phase 15.
  */
 import type { KsaMessage } from '@kindora/protocol';
 import { assertNoSensitiveFields } from '@kindora/protocol';
@@ -25,19 +42,32 @@ import type { MessageHandler, Transport } from './index';
 import { WireRateLimiter, type WireRateLimiterOptions } from './wire-rate-limiter';
 import { type PairingCodeOptions, generatePairingCode, normalisePairingCode } from './pairing-code';
 
-export type PairingState = 'idle' | 'hosting' | 'joining' | 'connected' | 'closed';
+export type PairingState =
+  | 'idle'
+  | 'hosting'
+  | 'joining'
+  | 'tcp-connected'
+  | 'connected'
+  | 'closed';
 
 export interface PairingSnapshot {
   readonly state: PairingState;
-  /** The pairing code in use — present when state is hosting / joining / connected. */
+  /** The pairing code in use — present when state is hosting / joining / tcp-connected / connected. */
   readonly code: string | null;
   /** Why we ended up here. Only set on transitions into `closed`. */
   readonly closeReason: string | null;
-  /** Agent id of the connected peer, if any. */
+  /**
+   * Agent id of the connected peer. Set ONLY when state is `connected`
+   * (the id is locked in by `notifyHelloReceived(peerAgentId)` once the
+   * peer's `hello` envelope has been validated). Before that, the
+   * transport is up but the peer has not authenticated.
+   */
   readonly peerAgentId: string | null;
 }
 
 export type StateChangeHandler = (snapshot: PairingSnapshot) => void;
+
+const UUID_LIKE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export interface PairingSessionOptions {
   /** Local agent UUID — what we tell the peer is "us". */
@@ -99,13 +129,16 @@ export class PairingSession {
 
   /**
    * Begin hosting. Generates a fresh pairing code, transitions to
-   * `hosting`, and connects the transport — which enters the pairing
-   * room. Returns the pairing code for the host to share with the
-   * peer (typed or QR).
+   * `hosting`, and asks the transport to connect (idle transports
+   * fire their discovery + room-join; host transports are no-ops at
+   * this point and only become active once `transport.startHost` /
+   * `lan_transport.startHost` is called by the caller).
    *
-   * Pairing is complete when the transport reports connected (the
-   * peer entered the room) — the caller then invokes
-   * `notifyPeerConnected()` to transition the session to `connected`.
+   * Returns the pairing code for the host to share with the peer
+   * (typed or QR). The session does NOT transition to `connected`
+   * here — the caller must call `notifyTransportConnected()` when
+   * the wire is up and `notifyHelloReceived(peerAgentId)` once the
+   * peer's `hello` envelope has been received and validated.
    */
   startHost(transport: Transport, codeOptions: PairingCodeOptions = {}): string {
     this.assertState('idle');
@@ -126,9 +159,11 @@ export class PairingSession {
   }
 
   /**
-   * Begin joining. Validates the code shape, then connects. If the
-   * transport completes the connect synchronously (e.g. Loopback with
-   * a waiting host), we transition straight to `connected`.
+   * Begin joining. Validates the code shape, then connects. Once the
+   * transport reports the wire is up the FSM transitions to
+   * `tcp-connected` — NOT `connected`. The session is not considered
+   * `connected` until `notifyHelloReceived(peerAgentId)` is called
+   * with the validated peer's id.
    */
   async startJoin(transport: Transport, code: string): Promise<void> {
     this.assertState('idle');
@@ -144,21 +179,104 @@ export class PairingSession {
       displayName: this.options.displayName,
       hint: normalised,
     });
-    this.setState({ state: 'connected', peerAgentId: null });
+    // Wire is up; the protocol session is NOT yet ready — we must
+    // wait for the peer's `hello` envelope to be received and
+    // validated before transitioning to 'connected'.
+    this.setState({ state: 'tcp-connected', peerAgentId: null });
   }
 
   /**
-   * Called by the host when a peer has paired (e.g. LoopbackTransport
-   * resolved a peer in the room). Transitions to `connected` and
-   * sets the peer agent id if known.
+   * Called by the host/joiner service once the underlying transport
+   * reports the wire link is up (host: a joiner accepted the TCP
+   * connection; joiner: the TCP dial succeeded).
+   *
+   * Transitions: `hosting` | `joining` → `tcp-connected`. The peer
+   * is NOT yet authenticated; `notifyHelloReceived(peerAgentId)`
+   * must still be called once the peer's `hello` envelope has been
+   * received and validated.
    */
-  notifyPeerConnected(peerAgentId?: string): void {
+  notifyTransportConnected(): void {
     if (this.snapshot.state !== 'hosting' && this.snapshot.state !== 'joining') {
       throw new Error(
-        `notifyPeerConnected called from state "${this.snapshot.state}", expected "hosting" or "joining".`,
+        `notifyTransportConnected called from state "${this.snapshot.state}", expected "hosting" or "joining".`,
       );
     }
-    this.setState({ state: 'connected', peerAgentId: peerAgentId ?? null });
+    this.setState({ state: 'tcp-connected', peerAgentId: null });
+  }
+
+  /**
+   * Called by the orchestrator (or any consumer) after a `hello`
+   * envelope from the peer has been received and validated. The
+   * `peerAgentId` argument is the envelope's `sender` field — it
+   * must be a non-empty UUID-shaped string.
+   *
+   * Transitions: `tcp-connected` → `connected`. The peer's id is
+   * locked in at this point; the orchestrator can now drive the
+   * `profile_exchange` / `match_request` / `match_response` flow.
+   */
+  notifyHelloReceived(peerAgentId: string): void {
+    if (this.snapshot.state !== 'tcp-connected') {
+      throw new Error(
+        `notifyHelloReceived called from state "${this.snapshot.state}", expected "tcp-connected".`,
+      );
+    }
+    if (typeof peerAgentId !== 'string' || !peerAgentId) {
+      throw new Error('notifyHelloReceived: peerAgentId must be a non-empty string.');
+    }
+    if (!UUID_LIKE.test(peerAgentId)) {
+      throw new Error(
+        `notifyHelloReceived: peerAgentId must be a UUID-shaped string (got ${JSON.stringify(peerAgentId)}).`,
+      );
+    }
+    if (peerAgentId === this.options.agentId) {
+      throw new Error('notifyHelloReceived: peerAgentId must not equal self agentId.');
+    }
+    this.setState({ state: 'connected', peerAgentId });
+  }
+
+  /**
+   * Mark the handshake as failed and tear down the transport. Used
+   * by the orchestrator when the peer's `hello` is invalid, never
+   * arrives, or the wire disconnects mid-handshake.
+   *
+   * No-op from `closed` (idempotent). From any other non-terminal
+   * state, transitions to `closed` with the given `reason`. The
+   * transport is disconnected; its `disconnect()` errors are
+   * swallowed because the wire is already gone in most failure paths.
+   */
+  async failHandshake(reason: string): Promise<void> {
+    if (this.snapshot.state === 'closed') return;
+    if (
+      this.snapshot.state !== 'tcp-connected' &&
+      this.snapshot.state !== 'hosting' &&
+      this.snapshot.state !== 'joining'
+    ) {
+      return;
+    }
+    const transport = this.transport;
+    this.transport = null;
+    if (transport) {
+      try {
+        await transport.disconnect();
+      } catch {
+        // ignore — the transport may already be gone.
+      }
+    }
+    this.setState({ state: 'closed', closeReason: reason, peerAgentId: null });
+  }
+
+  /**
+   * @deprecated Use `notifyTransportConnected()` to signal the wire
+   * is up, and `notifyHelloReceived(peerAgentId)` once the peer's
+   * `hello` envelope has been validated. This method is kept for
+   * backward compatibility; it now transitions to `'tcp-connected'`
+   * (the peer hello is NOT yet validated), matching the V0.1 wire
+   * semantics. The optional `peerAgentId` argument is ignored — the
+   * id is no longer trusted at the transport-link milestone.
+   */
+  notifyPeerConnected(peerAgentId?: string): void {
+    void peerAgentId;
+    this.notifyTransportConnected();
   }
 
   /**
@@ -182,13 +300,20 @@ export class PairingSession {
   }
 
   /**
-   * Send a KSA envelope to the peer. Throws when:
-   *   - the session isn't connected
+   * Send a KSA envelope to the peer. Allowed from `tcp-connected`
+   * and `connected`. From `tcp-connected` the session is allowed to
+   * send because the orchestrator's own `hello` must be written
+   * before the peer's `hello` can be received and validated. Throws
+   * when:
+   *   - the session isn't `tcp-connected` or `connected`
    *   - the wire rate limiter refuses the send (WireRateLimitExceeded)
    *   - the payload contains a sensitive field (SensitiveFieldError)
    */
   async send(message: KsaMessage): Promise<void> {
-    if (this.snapshot.state !== 'connected') {
+    if (
+      this.snapshot.state !== 'connected' &&
+      this.snapshot.state !== 'tcp-connected'
+    ) {
       throw new Error(`Cannot send in state "${this.snapshot.state}".`);
     }
     if (!this.transport) {

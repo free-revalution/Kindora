@@ -128,6 +128,16 @@ async function pairUp(opts: Partial<PairingSessionOptions> = {}): Promise<TwoAge
   const code = sessionA.startHost(ta);
   await sessionB.startJoin(tb, code);
   if (ta.isConnected()) sessionA.notifyPeerConnected();
+  // Phase 15: simulate the match-orchestrator handshake having
+  // validated each side's `hello`. The integration tests run the
+  // match + consent + chat + chat-assist flow end-to-end and assume
+  // the handshake has completed.
+  if (sessionA.current().state === 'tcp-connected') {
+    sessionA.notifyHelloReceived(identityB.agentId);
+  }
+  if (sessionB.current().state === 'tcp-connected') {
+    sessionB.notifyHelloReceived(identityA.agentId);
+  }
 
   return {
     identityA,

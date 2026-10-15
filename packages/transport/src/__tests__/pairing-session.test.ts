@@ -28,6 +28,7 @@ async function pairThem(
   sessionB: PairingSession,
   ta: LoopbackTransport,
   tb: LoopbackTransport,
+  opts: { handshake?: boolean } = {},
 ) {
   const code = sessionA.current().code;
   if (!code) throw new Error('pairThem: no pairing code in session state');
@@ -38,6 +39,18 @@ async function pairThem(
   // LoopbackTransport has now paired both sides; surface that to A's
   // session so it transitions out of "hosting".
   if (ta.isConnected()) sessionA.notifyPeerConnected();
+  // Optional Phase 15 helper: simulate the orchestrator having
+  // validated each side's `hello` envelope so the sessions reach
+  // 'connected'. Tests that need to drive the handshake themselves
+  // pass `{ handshake: false }`.
+  if (opts.handshake !== false) {
+    if (sessionA.current().state === 'tcp-connected') {
+      sessionA.notifyHelloReceived(B);
+    }
+    if (sessionB.current().state === 'tcp-connected') {
+      sessionB.notifyHelloReceived(A);
+    }
+  }
 }
 
 describe('@kindora/transport — PairingSession', () => {
@@ -213,6 +226,119 @@ describe('@kindora/transport — PairingSession', () => {
         await sessionA.send(createDisconnect(A, { reason: `r${i}` }));
       }
       expect(received).toHaveLength(5);
+    });
+  });
+
+  describe('Phase 15 — TCP-connected vs protocol-handshake-complete', () => {
+    it('startJoin transitions to tcp-connected (not connected) on transport.connect()', async () => {
+      const { sessionB, tb } = makeFixture();
+      await sessionB.startJoin(tb, 'ABCDEF');
+      // Per Phase 15: TCP link is up but the peer's `hello` has not
+      // been received / validated yet, so the session is in
+      // 'tcp-connected', not 'connected'. This is the V0.1 wire
+      // semantics: wire up ≠ handshake complete.
+      expect(sessionB.current().state).toBe('tcp-connected');
+      expect(sessionB.current().peerAgentId).toBeNull();
+    });
+
+    it('startHost waits in hosting until notifyTransportConnected, then tcp-connected', async () => {
+      const { sessionA, ta } = makeFixture();
+      sessionA.startHost(ta);
+      expect(sessionA.current().state).toBe('hosting');
+      sessionA.notifyTransportConnected();
+      expect(sessionA.current().state).toBe('tcp-connected');
+      expect(sessionA.current().peerAgentId).toBeNull();
+    });
+
+    it('notifyHelloReceived transitions tcp-connected → connected and locks in the peer id', async () => {
+      const { sessionB, tb } = makeFixture();
+      await sessionB.startJoin(tb, 'ABCDEF');
+      sessionB.notifyHelloReceived(A);
+      const snap = sessionB.current();
+      expect(snap.state).toBe('connected');
+      expect(snap.peerAgentId).toBe(A);
+    });
+
+    it('notifyHelloReceived throws when the peerAgentId is empty or not a UUID', async () => {
+      const { sessionB, tb } = makeFixture();
+      await sessionB.startJoin(tb, 'ABCDEF');
+      expect(() => sessionB.notifyHelloReceived('')).toThrow(/non-empty/);
+      expect(() => sessionB.notifyHelloReceived('not-a-uuid')).toThrow(/UUID/);
+    });
+
+    it('notifyHelloReceived refuses the self agentId', async () => {
+      const { sessionB, tb } = makeFixture();
+      await sessionB.startJoin(tb, 'ABCDEF');
+      expect(() => sessionB.notifyHelloReceived(B)).toThrow(/self/);
+    });
+
+    it('notifyHelloReceived is only valid from tcp-connected', async () => {
+      const { sessionA, sessionB, ta, tb } = makeFixture();
+      sessionA.startHost(ta);
+      await pairThem(sessionA, sessionB, ta, tb);
+      // pairThem default is to also notify hello → state is 'connected'.
+      expect(sessionA.current().state).toBe('connected');
+      expect(() => sessionA.notifyHelloReceived('11111111-2222-4333-8444-cccccccccccc')).toThrow(
+        /tcp-connected/,
+      );
+    });
+
+    it('failHandshake from tcp-connected transitions to closed and tears down the transport', async () => {
+      const { sessionB, tb } = makeFixture();
+      const disconnectSpy = vi.spyOn(tb, 'disconnect');
+      await sessionB.startJoin(tb, 'ABCDEF');
+      expect(sessionB.current().state).toBe('tcp-connected');
+      await sessionB.failHandshake('hello-timeout');
+      const snap = sessionB.current();
+      expect(snap.state).toBe('closed');
+      expect(snap.closeReason).toBe('hello-timeout');
+      expect(disconnectSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it('failHandshake is a no-op from closed (idempotent)', async () => {
+      const { sessionA, sessionB, ta, tb } = makeFixture();
+      sessionA.startHost(ta);
+      await pairThem(sessionA, sessionB, ta, tb);
+      await sessionA.disconnect('first');
+      // After disconnect the state is 'closed'. A second failHandshake
+      // must not throw and must not overwrite closeReason.
+      await sessionA.failHandshake('second');
+      expect(sessionA.current().state).toBe('closed');
+      expect(sessionA.current().closeReason).toBe('first');
+    });
+
+    it('send works in tcp-connected (orchestrator can send its own hello before the peer replies)', async () => {
+      const { sessionA, sessionB, ta, tb } = makeFixture();
+      sessionA.startHost(ta);
+      // Pair without the simulated handshake — sessions are in
+      // 'tcp-connected' on both sides.
+      await pairThem(sessionA, sessionB, ta, tb, { handshake: false });
+      const received: KsaMessage[] = [];
+      sessionB.onMessage((m) => received.push(m));
+      await sessionA.send(createDisconnect(A, { reason: 'tcp-connected-send' }));
+      expect(received).toHaveLength(1);
+      expect(received[0]?.type).toBe('disconnect');
+    });
+
+    it('rejects send in idle / hosting / joining / closed', async () => {
+      const { sessionA, sessionB, ta, tb } = makeFixture();
+      sessionA.startHost(ta);
+      await expect(sessionA.send(createDisconnect(A))).rejects.toThrow(
+        /Cannot send in state "hosting"/,
+      );
+      await pairThem(sessionA, sessionB, ta, tb);
+      await sessionA.disconnect('done');
+      await expect(sessionA.send(createDisconnect(A))).rejects.toThrow(
+        /Cannot send in state "closed"/,
+      );
+    });
+
+    it('legacy notifyPeerConnected is an alias for notifyTransportConnected (tcp-connected, not connected)', async () => {
+      const { sessionA, ta } = makeFixture();
+      sessionA.startHost(ta);
+      sessionA.notifyPeerConnected(); // legacy: peerAgentId arg is ignored
+      expect(sessionA.current().state).toBe('tcp-connected');
+      expect(sessionA.current().peerAgentId).toBeNull();
     });
   });
 });

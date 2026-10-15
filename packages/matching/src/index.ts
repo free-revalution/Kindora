@@ -43,6 +43,10 @@ export {
   MatchOrchestrator,
   DEFAULT_PEER_ANALYSIS_TIMEOUT_MS,
   DEFAULT_EARLY_WAIT_TIMEOUT_MS,
+  DEFAULT_HELLO_TIMEOUT_MS,
+  HandshakeTimeoutError,
+  HandshakeValidationError,
+  HandshakeClosedError,
   type MatchOrchestratorSelf,
   type MatchOutcome,
 } from './orchestrator';

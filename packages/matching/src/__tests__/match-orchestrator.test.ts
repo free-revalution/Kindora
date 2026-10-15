@@ -4,12 +4,20 @@ import {
   DEFAULT_SOCIAL_BOUNDARIES,
   PROTOCOL_VERSION,
   type CompatibilitySignal,
+  type KsaMessage,
   type MatchAnalysis,
   type SocialProfile,
 } from '@kindora/protocol';
 import { LoopbackHub, LoopbackTransport, PairingSession } from '@kindora/transport';
 import { buildCapabilities, createAgentIdentity, type AgentIdentity } from '@kindora/agent';
-import { MatchOrchestrator, DEFAULT_PEER_ANALYSIS_TIMEOUT_MS, type MatchOrchestratorSelf } from '../orchestrator';
+import {
+  MatchOrchestrator,
+  DEFAULT_PEER_ANALYSIS_TIMEOUT_MS,
+  HandshakeClosedError,
+  HandshakeTimeoutError,
+  HandshakeValidationError,
+  type MatchOrchestratorSelf,
+} from '../orchestrator';
 
 const ID_A = '11111111-2222-4333-8444-aaaaaaaaaaaa';
 const ID_B = '22222222-3333-4444-8555-bbbbbbbbbbbb';
@@ -66,7 +74,7 @@ interface Pair {
   sessionB: PairingSession;
 }
 
-async function makePair(): Promise<Pair> {
+async function makePair(opts: { handshake?: boolean } = {}): Promise<Pair> {
   const hub = new LoopbackHub();
   const sessionA = new PairingSession({ agentId: ID_A, displayName: 'Alice' });
   const sessionB = new PairingSession({ agentId: ID_B, displayName: 'Bob' });
@@ -75,6 +83,17 @@ async function makePair(): Promise<Pair> {
   const code = sessionA.startHost(ta);
   await sessionB.startJoin(tb, code);
   if (ta.isConnected()) sessionA.notifyPeerConnected();
+  // Phase 15: by default, simulate the orchestrator having validated
+  // each side's `hello` envelope. Tests that need to drive the
+  // handshake themselves pass `{ handshake: false }`.
+  if (opts.handshake !== false) {
+    if (sessionA.current().state === 'tcp-connected') {
+      sessionA.notifyHelloReceived(ID_B);
+    }
+    if (sessionB.current().state === 'tcp-connected') {
+      sessionB.notifyHelloReceived(ID_A);
+    }
+  }
   return { sessionA, sessionB };
 }
 
@@ -270,5 +289,336 @@ describe('@kindora/matching — MatchOrchestrator', () => {
 
   it('exposes the default peer-analysis timeout constant', () => {
     expect(DEFAULT_PEER_ANALYSIS_TIMEOUT_MS).toBeGreaterThan(0);
+  });
+
+  describe('Phase 15 — Agent handshake (TCP-connected ≠ handshake complete)', () => {
+    // Helpers used in this block. `makeTcpConnectedPair` is like
+    // `makePair({ handshake: false })` — both sessions are in
+    // 'tcp-connected' state, no hello has been validated yet. Each
+    // test then drives the orchestrator and asserts the handshake
+    // semantics in isolation.
+    async function makeTcpConnectedPair(): Promise<Pair> {
+      return makePair({ handshake: false });
+    }
+
+    // Test-only transport pair that delivers messages WITHOUT going
+    // through `decodeEnvelope`. Used to exercise the orchestrator's
+    // own `validatePeerHello` defense-in-depth (the production wire
+    // already rejects malformed envelopes; we want to verify the
+    // orchestrator catches them too if a custom transport ever
+    // delivered one).
+    class RawPair {
+      readonly handlers: Set<(m: KsaMessage) => void> = new Set();
+      private peer: RawPair | null = null;
+
+      static pair(a: RawPair, b: RawPair): void {
+        a.peer = b;
+        b.peer = a;
+      }
+
+      async connect(_peer: { agentId: string; displayName: string; hint?: string }): Promise<void> {}
+      async send(message: KsaMessage): Promise<void> {
+        if (this.peer) {
+          for (const h of this.peer.handlers) h(message);
+        }
+      }
+      onMessage(handler: (m: KsaMessage) => void): () => void {
+        this.handlers.add(handler);
+        return () => {
+          this.handlers.delete(handler);
+        };
+      }
+      async disconnect(): Promise<void> {
+        if (this.peer) {
+          this.peer.peer = null;
+          this.peer = null;
+        }
+      }
+      /** Test-only: simulate an inbound message from the peer. */
+      injectFromPeer(message: KsaMessage): void {
+        for (const h of this.handlers) h(message);
+      }
+    }
+
+    function makeHello(
+      sender: string,
+      displayName = 'Peer',
+    ): KsaMessage {
+      // Build via the protocol builder so the wire shape is exact.
+      return {
+        protocol: 'KSA',
+        version: '0.1',
+        messageId: 'f47ac10b-58cc-4372-a567-0e02b2c3d479',
+        timestamp: new Date().toISOString(),
+        type: 'hello',
+        sender,
+        payload: {
+          displayName,
+          capabilities: {
+            protocolVersion: '0.1',
+            supportsMatchAnalysis: true,
+            supportsIcebreaker: true,
+            supportsChatAssist: true,
+            supportsEncryption: false,
+          },
+        },
+      } as KsaMessage;
+    }
+
+    async function makeRawPairWithTcpConnectedSessions(): Promise<{
+      sessionA: PairingSession;
+      sessionB: PairingSession;
+      transportA: RawPair;
+      transportB: RawPair;
+    }> {
+      const sessionA = new PairingSession({ agentId: ID_A, displayName: 'Alice' });
+      const sessionB = new PairingSession({ agentId: ID_B, displayName: 'Bob' });
+      const transportA = new RawPair();
+      const transportB = new RawPair();
+      RawPair.pair(transportA, transportB);
+      const code = sessionA.startHost(transportA);
+      await sessionB.startJoin(transportB, code);
+      // Both sessions need an explicit notifyTransportConnected
+      // (RawPair's `connect` is a no-op).
+      sessionA.notifyTransportConnected();
+      sessionB.notifyTransportConnected();
+      return { sessionA, sessionB, transportA, transportB };
+    }
+
+    // Suppress the unused-helper warning while keeping the helper
+    // available for future tests that need a full two-sided
+    // orchestrator pair against the mock transport.
+    void makeRawPairWithTcpConnectedSessions;
+
+    it('does NOT run analysis when the peer never sends a hello (handshake timeout)', async () => {
+      const { sessionA } = await makeTcpConnectedPair();
+      const llmA: LLMProvider = {
+        async chat() {
+          throw new Error('LLM must NOT be called — handshake should fail first');
+        },
+      };
+      const selfA = await makeSelf(ID_A, 'Alice', llmA);
+      const orch = new MatchOrchestrator(selfToDeps(selfA), '', {
+        peerAnalysisTimeoutMs: 50,
+        earlyWaitTimeoutMs: 50,
+        helloTimeoutMs: 80,
+      });
+
+      await expect(orch.start(sessionA)).rejects.toBeInstanceOf(HandshakeTimeoutError);
+      // Session was failed by the orchestrator — no LLM call, no
+      // analysis. The session is now in 'closed' with the timeout
+      // reason.
+      expect(sessionA.current().state).toBe('closed');
+      expect(sessionA.current().closeReason).toMatch(/hello-timeout|session-closed/);
+    });
+
+    it('completes the handshake when both sides exchange valid hellos', async () => {
+      const { sessionA, sessionB } = await makeTcpConnectedPair();
+      const llmA: LLMProvider = {
+        async chat() {
+          return { content: JSON.stringify(cannedAnalysis('strong')), model: 'stub' };
+        },
+      };
+      const llmB: LLMProvider = {
+        async chat() {
+          return { content: JSON.stringify(cannedAnalysis('moderate')), model: 'stub' };
+        },
+      };
+      const selfA = await makeSelf(ID_A, 'Alice', llmA);
+      const selfB = await makeSelf(ID_B, 'Bob', llmB);
+
+      const orchA = new MatchOrchestrator(selfToDeps(selfA), ID_B, {
+        peerAnalysisTimeoutMs: 200,
+        earlyWaitTimeoutMs: 100,
+        helloTimeoutMs: 1000,
+      });
+      const orchB = new MatchOrchestrator(selfToDeps(selfB), ID_A, {
+        peerAnalysisTimeoutMs: 200,
+        earlyWaitTimeoutMs: 100,
+        helloTimeoutMs: 1000,
+      });
+
+      const [outA, outB] = await Promise.all([
+        orchA.start(sessionA),
+        orchB.start(sessionB),
+      ]);
+      // Both sides should reach 'connected' (handshake complete).
+      expect(sessionA.current().state).toBe('connected');
+      expect(sessionB.current().state).toBe('connected');
+      expect(sessionA.current().peerAgentId).toBe(ID_B);
+      expect(sessionB.current().peerAgentId).toBe(ID_A);
+      // And the analysis ran.
+      expect(outA.localAnalysis.compatibilitySignal).toBe('strong');
+      expect(outB.localAnalysis.compatibilitySignal).toBe('moderate');
+    });
+
+    it('rejects a hello envelope whose sender equals self (handshake does not complete)', async () => {
+      // The orchestrator's isFromPeer filter is the first line of
+      // defence — a self-addressed hello never reaches the
+      // validatePeerHello check. The handshake still must NOT
+      // complete: the orchestrator times out, throws, closes the
+      // session, and does not call the LLM.
+      const { sessionA } = await makeTcpConnectedPair();
+      const selfHello = makeHello(ID_A);
+      const llmA: LLMProvider = {
+        async chat() {
+          throw new Error('LLM must NOT be called');
+        },
+      };
+      const selfA = await makeSelf(ID_A, 'Alice', llmA);
+      const orch = new MatchOrchestrator(selfToDeps(selfA), ID_B, {
+        helloTimeoutMs: 50,
+      });
+      // Push the self-hello through the wire. The Loopback delivers
+      // it to the other side, which has no orchestrator installed, so
+      // the message is dropped. If it ever looped back to A's queue,
+      // the isFromPeer filter would also reject it.
+      await sessionA.send(selfHello);
+      await expect(orch.start(sessionA)).rejects.toBeInstanceOf(HandshakeTimeoutError);
+      expect(sessionA.current().state).toBe('closed');
+    });
+
+    it('rejects a hello envelope whose sender is not a UUID (orchestrator-level validation)', async () => {
+      // Uses a mock transport to bypass the wire's `validateEnvelope`,
+      // which would normally reject a non-UUID sender. We want to
+      // verify the orchestrator's own `validatePeerHello` catches
+      // this even if a custom transport let it through.
+      const sessionA = new PairingSession({ agentId: ID_A, displayName: 'Alice' });
+      const transportA = new RawPair();
+      sessionA.startHost(transportA);
+      sessionA.notifyTransportConnected();
+      const badHello = makeHello('not-a-uuid');
+      const llmA: LLMProvider = {
+        async chat() {
+          throw new Error('LLM must NOT be called');
+        },
+      };
+      const selfA = await makeSelf(ID_A, 'Alice', llmA);
+      const orch = new MatchOrchestrator(selfToDeps(selfA), '', {
+        helloTimeoutMs: 500,
+      });
+      // Start the orchestrator (registers its queue on the
+      // transport), then inject the bad hello directly. The
+      // orchestrator's queue sees the bad message, the
+      // validatePeerHello check rejects it.
+      const startPromise = orch.start(sessionA);
+      transportA.injectFromPeer(badHello);
+      await expect(startPromise).rejects.toBeInstanceOf(HandshakeValidationError);
+      expect(sessionA.current().state).toBe('closed');
+    });
+
+    it('rejects a malformed hello payload (missing displayName) (orchestrator-level validation)', async () => {
+      // Mock transport: the wire's `validateEnvelope` would normally
+      // reject this. We bypass to test the orchestrator's own
+      // defense-in-depth.
+      const sessionA = new PairingSession({ agentId: ID_A, displayName: 'Alice' });
+      const transportA = new RawPair();
+      sessionA.startHost(transportA);
+      sessionA.notifyTransportConnected();
+      const badHello: KsaMessage = {
+        protocol: 'KSA',
+        version: '0.1',
+        messageId: 'f47ac10b-58cc-4372-a567-0e02b2c3d481',
+        timestamp: new Date().toISOString(),
+        type: 'hello',
+        sender: ID_B,
+        payload: {
+          // displayName intentionally missing.
+          capabilities: {
+            protocolVersion: '0.1',
+            supportsMatchAnalysis: true,
+            supportsIcebreaker: true,
+            supportsChatAssist: true,
+            supportsEncryption: false,
+          },
+        },
+      } as unknown as KsaMessage;
+      const llmA: LLMProvider = {
+        async chat() {
+          throw new Error('LLM must NOT be called');
+        },
+      };
+      const selfA = await makeSelf(ID_A, 'Alice', llmA);
+      const orch = new MatchOrchestrator(selfToDeps(selfA), ID_B, {
+        helloTimeoutMs: 500,
+      });
+      const startPromise = orch.start(sessionA);
+      transportA.injectFromPeer(badHello);
+      await expect(startPromise).rejects.toBeInstanceOf(HandshakeValidationError);
+      expect(sessionA.current().state).toBe('closed');
+    });
+
+    it('does not run analysis if the session is closed before hello arrives', async () => {
+      const { sessionA } = await makeTcpConnectedPair();
+      const llmA: LLMProvider = {
+        async chat() {
+          throw new Error('LLM must NOT be called');
+        },
+      };
+      const selfA = await makeSelf(ID_A, 'Alice', llmA);
+      const orch = new MatchOrchestrator(selfToDeps(selfA), ID_B, {
+        helloTimeoutMs: 1000,
+      });
+
+      // Start the orchestrator, then close the session mid-wait.
+      const startPromise = orch.start(sessionA);
+      // Give the orchestrator a moment to enter the hello wait.
+      await new Promise((r) => setTimeout(r, 20));
+      await sessionA.disconnect('peer-disconnected');
+
+      await expect(startPromise).rejects.toBeInstanceOf(HandshakeClosedError);
+      expect(sessionA.current().state).toBe('closed');
+    });
+
+    it('host and joiner see symmetric handshake semantics (both must send and receive a valid hello)', async () => {
+      const { sessionA, sessionB } = await makeTcpConnectedPair();
+      const llmStub = () => stubProvider(cannedAnalysis('moderate'));
+      const aStub = llmStub();
+      const bStub = llmStub();
+      const selfA = await makeSelf(ID_A, 'Alice', aStub.provider);
+      const selfB = await makeSelf(ID_B, 'Bob', bStub.provider);
+      const orchA = new MatchOrchestrator(selfToDeps(selfA), ID_B, {
+        peerAnalysisTimeoutMs: 200,
+        earlyWaitTimeoutMs: 100,
+        helloTimeoutMs: 500,
+      });
+      const orchB = new MatchOrchestrator(selfToDeps(selfB), ID_A, {
+        peerAnalysisTimeoutMs: 200,
+        earlyWaitTimeoutMs: 100,
+        helloTimeoutMs: 500,
+      });
+      const [outA, outB] = await Promise.all([orchA.start(sessionA), orchB.start(sessionB)]);
+      // Both ends reach 'connected' with the correct peer id.
+      expect(sessionA.current().state).toBe('connected');
+      expect(sessionB.current().state).toBe('connected');
+      expect(sessionA.current().peerAgentId).toBe(ID_B);
+      expect(sessionB.current().peerAgentId).toBe(ID_A);
+      // Both LLM stubs were called.
+      expect(aStub.calls).toHaveLength(1);
+      expect(bStub.calls).toHaveLength(1);
+      // The peer's analysis is the other side's LLM reply.
+      expect(outA.peerAnalysis?.compatibilitySignal).toBe('moderate');
+      expect(outB.peerAnalysis?.compatibilitySignal).toBe('moderate');
+    });
+
+    it('MatchOrchestrator does NOT run analyzeMatch if the handshake fails', async () => {
+      const { sessionA } = await makeTcpConnectedPair();
+      let llmCalled = false;
+      const llmA: LLMProvider = {
+        async chat() {
+          llmCalled = true;
+          return { content: JSON.stringify(cannedAnalysis()), model: 'stub' };
+        },
+      };
+      const selfA = await makeSelf(ID_A, 'Alice', llmA);
+      const orch = new MatchOrchestrator(selfToDeps(selfA), ID_B, {
+        helloTimeoutMs: 50,
+        peerAnalysisTimeoutMs: 50,
+        earlyWaitTimeoutMs: 50,
+      });
+      await expect(orch.start(sessionA)).rejects.toBeInstanceOf(HandshakeTimeoutError);
+      expect(llmCalled).toBe(false);
+      expect(sessionA.current().state).toBe('closed');
+    });
   });
 });

@@ -1,18 +1,38 @@
 /**
- * MatchOrchestrator — drives the Phase 6 wire flow on top of an
- * already-connected `PairingSession`.
+ * MatchOrchestrator — drives the Phase 6 wire flow on top of a
+ * `PairingSession` whose transport is up.
  *
- * Flow (per 开发手册.md § 22–23, § 44):
+ * Phase 15 tightening: the orchestrator no longer accepts a "degrade
+ * gracefully on missed hello" fallback. The peer's `hello` envelope
+ * is a HARD GATE: if it doesn't arrive within `helloTimeoutMs`, is
+ * malformed, or its `sender` is the local agent id, the orchestrator
+ *   (1) calls `session.failHandshake(reason)` to close the session,
+ *   (2) throws a typed error (HandshakeTimeoutError /
+ *       HandshakeValidationError / HandshakeClosedError), and
+ *   (3) does NOT run the LLM, the `match_request`, or the
+ *       `match_response` flow.
  *
- *   1. send `hello`                          → handshake
- *   2. send `profile_exchange`               → share identity
- *   3. await peer's `profile_exchange`       → learn peer's identity
- *   4. send `match_request`                  → request analysis
- *   5. concurrently:
+ * Only after a valid `hello` is received and validated does the
+ * orchestrator call `session.notifyHelloReceived(peerAgentId)` and
+ * proceed with the `profile_exchange` / `match_request` /
+ * `match_response` flow. The `earlyWaitTimeoutMs` still applies to
+ * the `profile_exchange` wait — that envelope is informational, not
+ * a handshake gate — and the `peerAnalysisTimeoutMs` still bounds
+ * the `match_response` wait.
+ *
+ * Flow (per 开发手册.md § 22–23, § 44, Phase 15):
+ *
+ *   1. send `hello`                          → handshake (HARD GATE)
+ *   2. await peer's `hello` (helloTimeoutMs) → validate sender / type / payload
+ *   3. session.notifyHelloReceived(peerAgentId) — tcp-connected → connected
+ *   4. send `profile_exchange`               → share identity (soft wait)
+ *   5. await peer's `profile_exchange`       → learn peer's identity
+ *   6. send `match_request`                  → request analysis
+ *   7. concurrently:
  *        a) run local `analyzeMatch` (LLM)
  *        b) await peer's `match_response`
- *   6. send `match_response`                 → share our analysis
- *   7. resolve with the final outcome
+ *   8. send `match_response`                 → share our analysis
+ *   9. resolve with the final outcome
  *
  * The orchestrator is **stateless** between `start()` calls. It does
  * not own timers — the caller controls the lifecycle. Incoming
@@ -26,7 +46,7 @@
  * a filter. This keeps ordering stable even if the peer sends
  * faster than we await.
  *
- * See 开发手册.md Phase 6.
+ * See 开发手册.md Phase 6 + Phase 15.
  */
 import type { LLMProvider } from '@kindora/llm';
 import {
@@ -50,8 +70,33 @@ import {
   createMatchRequest,
   createMatchResponse,
   createProfileExchange,
+  type HelloPayload,
 } from '@kindora/protocol';
 import type { MessageHandler, PairingSession } from '@kindora/transport';
+
+/** Throw when the peer does not send a `hello` envelope in time. */
+export class HandshakeTimeoutError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'HandshakeTimeoutError';
+  }
+}
+
+/** Throw when the peer's `hello` envelope is malformed (type, sender, payload). */
+export class HandshakeValidationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'HandshakeValidationError';
+  }
+}
+
+/** Throw when the session is closed (by us or the peer) before the handshake completes. */
+export class HandshakeClosedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'HandshakeClosedError';
+  }
+}
 
 export interface MatchOrchestratorSelf {
   /** Local agent UUID — placed in `sender` on every outgoing envelope. */
@@ -109,12 +154,25 @@ export interface MatchOutcome {
 export const DEFAULT_PEER_ANALYSIS_TIMEOUT_MS = 30_000;
 
 /**
- * How long to wait for the peer's `hello` and `profile_exchange`
- * envelopes before falling back to a minimal peer profile and
- * continuing with the local analysis. Short by design — a silent
- * peer is treated as "no profile", not as a hang.
+ * How long to wait for the peer's `profile_exchange` envelope before
+ * falling back to a minimal peer profile and continuing with the
+ * local analysis. The `profile_exchange` is informational, NOT a
+ * handshake gate — a silent peer is treated as "no profile", not as
+ * a hang.
+ *
+ * Note: this is NOT the hello timeout. The hello wait is a hard
+ * gate governed by `DEFAULT_HELLO_TIMEOUT_MS` — see Phase 15.
  */
 export const DEFAULT_EARLY_WAIT_TIMEOUT_MS = 2_000;
+
+/**
+ * How long to wait for the peer's `hello` envelope before failing the
+ * handshake. This is a HARD gate: if the peer never sends a valid
+ * `hello` within this window, the orchestrator closes the session
+ * via `session.failHandshake()` and throws `HandshakeTimeoutError`.
+ * The match analysis is NOT run.
+ */
+export const DEFAULT_HELLO_TIMEOUT_MS = 5_000;
 
 interface Waiter {
   readonly predicate: (m: KsaMessage) => boolean;
@@ -132,6 +190,47 @@ interface Waiter {
 function isFromPeer(msg: KsaMessage, peerAgentId: string, selfAgentId: string): boolean {
   if (peerAgentId) return msg.sender === peerAgentId;
   return msg.sender !== selfAgentId;
+}
+
+/**
+ * Strict validation of a peer's `hello` envelope. Returns `{ ok: true }`
+ * if the envelope is well-formed and not from the local agent; otherwise
+ * `{ ok: false, error }` with a human-readable failure reason. The
+ * orchestrator uses this to gate the rest of the flow on a genuine,
+ * authenticated peer hello.
+ */
+function validatePeerHello(
+  env: KsaMessage,
+  selfAgentId: string,
+): { ok: true } | { ok: false; error: string } {
+  if (env.type !== 'hello') {
+    return { ok: false, error: `expected message type "hello", got "${env.type}"` };
+  }
+  if (typeof env.sender !== 'string' || !env.sender) {
+    return { ok: false, error: 'hello envelope has no sender field' };
+  }
+  if (env.sender === selfAgentId) {
+    return { ok: false, error: 'hello sender equals self agentId (loopback / spoofed)' };
+  }
+  // Reject non-UUID senders — agent ids are UUIDs in KSA 0.1.
+  const UUID_LIKE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  if (!UUID_LIKE.test(env.sender)) {
+    return { ok: false, error: `hello sender is not a UUID-shaped string (got ${JSON.stringify(env.sender)})` };
+  }
+  const payload = env.payload as Partial<HelloPayload> | undefined;
+  if (!payload || typeof payload !== 'object') {
+    return { ok: false, error: 'hello payload is missing or not an object' };
+  }
+  if (typeof payload.displayName !== 'string' || !payload.displayName) {
+    return { ok: false, error: 'hello payload.displayName is missing or empty' };
+  }
+  if (!payload.capabilities || typeof payload.capabilities !== 'object') {
+    return { ok: false, error: 'hello payload.capabilities is missing or not an object' };
+  }
+  if (typeof payload.capabilities.protocolVersion !== 'string' || !payload.capabilities.protocolVersion) {
+    return { ok: false, error: 'hello payload.capabilities.protocolVersion is missing or empty' };
+  }
+  return { ok: true };
 }
 
 /**
@@ -200,6 +299,12 @@ class SessionQueue {
         return Promise.resolve(msg);
       }
     }
+    // Non-blocking drain: with timeoutMs === 0 (or negative), do not
+    // register a waiter — the call site only wanted to drain the
+    // currently-buffered messages.
+    if (timeoutMs === null || timeoutMs <= 0) {
+      return Promise.resolve(null);
+    }
     return new Promise<KsaMessage | null>((resolve) => {
       const waiter: Waiter = {
         predicate: isMatch,
@@ -207,15 +312,13 @@ class SessionQueue {
         timer: null,
         done: false,
       };
-      if (timeoutMs !== null && timeoutMs > 0) {
-        waiter.timer = setTimeout(() => {
-          if (waiter.done) return;
-          waiter.done = true;
-          const idx = this.waiters.indexOf(waiter);
-          if (idx >= 0) this.waiters.splice(idx, 1);
-          resolve(null);
-        }, timeoutMs);
-      }
+      waiter.timer = setTimeout(() => {
+        if (waiter.done) return;
+        waiter.done = true;
+        const idx = this.waiters.indexOf(waiter);
+        if (idx >= 0) this.waiters.splice(idx, 1);
+        resolve(null);
+      }, timeoutMs);
       this.waiters.push(waiter);
     });
   }
@@ -226,34 +329,53 @@ export class MatchOrchestrator {
   /**
    * The peer's agent id. May be empty initially — the orchestrator
    * accepts any non-local sender and locks in the id from the first
-   * received message.
+   * received `hello` envelope. Once the id is known it is also locked
+   * into the session via `session.notifyHelloReceived(peerAgentId)`.
    */
   private peerAgentId: string;
   private readonly peerAnalysisTimeoutMs: number;
   private readonly earlyWaitTimeoutMs: number;
+  private readonly helloTimeoutMs: number;
 
   constructor(
     self: MatchOrchestratorSelf,
     peerAgentId: string,
-    options: { peerAnalysisTimeoutMs?: number; earlyWaitTimeoutMs?: number } = {},
+    options: {
+      peerAnalysisTimeoutMs?: number;
+      earlyWaitTimeoutMs?: number;
+      helloTimeoutMs?: number;
+    } = {},
   ) {
     this.self = self;
     this.peerAgentId = peerAgentId;
     this.peerAnalysisTimeoutMs =
       options.peerAnalysisTimeoutMs ?? DEFAULT_PEER_ANALYSIS_TIMEOUT_MS;
     this.earlyWaitTimeoutMs = options.earlyWaitTimeoutMs ?? DEFAULT_EARLY_WAIT_TIMEOUT_MS;
+    this.helloTimeoutMs = options.helloTimeoutMs ?? DEFAULT_HELLO_TIMEOUT_MS;
   }
 
   /**
-   * Drive the match flow against a connected `PairingSession`. Resolves
-   * with the local + peer analysis once both are available, or with
-   * `peerAnalysis === null` and `peerAnalysisTimedOut === true` if the
-   * peer doesn't respond in time.
+   * Drive the match flow against a `PairingSession` whose wire is up.
+   * Accepts either `tcp-connected` (the orchestrator will send the
+   * local `hello` and wait for the peer's `hello`) or `connected`
+   * (the peer's `hello` was already validated by a previous step;
+   * the orchestrator proceeds straight to `profile_exchange`).
+   *
+   * Throws:
+   *   - `HandshakeTimeoutError`     if the peer's `hello` doesn't arrive in `helloTimeoutMs`
+   *   - `HandshakeValidationError`  if the peer's `hello` is malformed
+   *   - `HandshakeClosedError`      if the session is closed before handshake completes
+   *
+   * On any of those failures, the orchestrator calls
+   * `session.failHandshake(reason)` and does NOT run `analyzeMatch`,
+   * the `match_request` / `match_response` flow, or `createMatchResponse`.
+   * The `MatchOutcome` is the success shape; handshake failure throws.
    */
   async start(session: PairingSession): Promise<MatchOutcome> {
-    if (session.current().state !== 'connected') {
+    const initialState = session.current().state;
+    if (initialState !== 'connected' && initialState !== 'tcp-connected') {
       throw new Error(
-        `MatchOrchestrator.start requires a connected PairingSession (got "${session.current().state}").`,
+        `MatchOrchestrator.start requires a tcp-connected or connected PairingSession (got "${initialState}").`,
       );
     }
 
@@ -270,7 +392,9 @@ export class MatchOrchestrator {
     await Promise.resolve();
     await Promise.resolve();
 
-    // 1) Send hello.
+    // 1) Send our own hello. This is allowed from `tcp-connected` —
+    // the session is honest about the fact that the wire is up but
+    // the peer's hello has not yet been validated.
     await session.send(
       createHello(this.self.agentId, {
         displayName: this.self.displayName,
@@ -278,7 +402,67 @@ export class MatchOrchestrator {
       }),
     );
 
-    // 2) Send profile exchange.
+    // 2) HARD GATE: wait for the peer's `hello`. If the session is
+    //    already `connected` (a prior consumer validated the hello),
+    //    we can drain any buffered hello from the queue without a
+    //    wait. Otherwise we wait up to `helloTimeoutMs` and FAIL on
+    //    timeout, invalid hello, or session close.
+    let peerHello: KsaHello | null = null;
+    if (initialState === 'connected') {
+      // Session says hello was already validated. Drain a buffered
+      // hello if it's there; otherwise the peer must have called
+      // `session.notifyHelloReceived` from the outside, which means
+      // they already received ours. We proceed.
+      peerHello = await queue.next<KsaHello>(
+        (m): m is KsaHello =>
+          m.type === 'hello' && isFromPeer(m, this.peerAgentId, this.self.agentId),
+        0, // non-blocking drain
+      );
+    } else {
+      // Hard gate.
+      const candidate = await queue.next<KsaHello>(
+        (m): m is KsaHello =>
+          m.type === 'hello' && isFromPeer(m, this.peerAgentId, this.self.agentId),
+        this.helloTimeoutMs,
+      );
+      if (!candidate) {
+        // Either timeout or session closed. Distinguish BEFORE we
+        // call failHandshake — once failHandshake runs, the session
+        // is in 'closed' and we can no longer tell which case it
+        // was.
+        const wasClosedMidWait = session.current().state === 'closed';
+        if (!wasClosedMidWait) {
+          await session.failHandshake('hello-timeout').catch(() => undefined);
+        }
+        if (wasClosedMidWait) {
+          throw new HandshakeClosedError(
+            `PairingSession closed before hello was received: ${session.current().closeReason ?? 'unknown'}`,
+          );
+        }
+        throw new HandshakeTimeoutError(
+          `Peer did not send a hello envelope within ${this.helloTimeoutMs}ms.`,
+        );
+      }
+      const validation = validatePeerHello(candidate, this.self.agentId);
+      if (!validation.ok) {
+        await session.failHandshake(`hello-invalid: ${validation.error}`).catch(() => undefined);
+        throw new HandshakeValidationError(`Peer's hello failed validation: ${validation.error}`);
+      }
+      peerHello = candidate;
+    }
+
+    // 3) Lock in the peer's id and transition the session to
+    //    `connected` (if it wasn't already). This is the explicit
+    //    handshake-complete signal that the rest of the flow keys on.
+    if (peerHello) {
+      this.peerAgentId = peerHello.sender;
+      if (session.current().state === 'tcp-connected') {
+        session.notifyHelloReceived(peerHello.sender);
+      }
+    }
+
+    // 4) Send profile exchange. Allowed now because the session is
+    //    `connected` (or was already so before this call).
     await session.send(
       createProfileExchange(this.self.agentId, {
         profile: this.self.profile,
@@ -286,29 +470,14 @@ export class MatchOrchestrator {
       }),
     );
 
-    // 3) Wait for peer's hello + profile_exchange. Both waits have a
-    //    short timeout: a peer that doesn't speak at all is treated
-    //    as "no profile", and the orchestrator proceeds with a
-    //    minimal fallback so the human can still see the local
-    //    analysis and decide to disconnect (§ 7).
-    const peerHello = await queue.next<KsaHello>(
-      (m): m is KsaHello =>
-        m.type === 'hello' && isFromPeer(m, this.peerAgentId, this.self.agentId),
-      this.earlyWaitTimeoutMs,
-    );
+    // 5) Wait for the peer's `profile_exchange` (soft wait — this is
+    //    NOT a handshake gate). A silent peer is treated as "no
+    //    profile" and we proceed with a minimal fallback.
     const peerProfileExchange = await queue.next<KsaProfileExchange>(
       (m): m is KsaProfileExchange =>
         m.type === 'profile_exchange' && isFromPeer(m, this.peerAgentId, this.self.agentId),
       this.earlyWaitTimeoutMs,
     );
-
-    // Lock in the peer's id from the first received message so the
-    // rest of the flow has a consistent identity to use.
-    const discoveredPeerId =
-      peerHello?.sender ?? peerProfileExchange?.sender ?? this.peerAgentId;
-    if (!this.peerAgentId && discoveredPeerId) {
-      this.peerAgentId = discoveredPeerId;
-    }
 
     // Peer guard — runs once we know who they are. The caller uses
     // this to refuse a blocked peer; the orchestrator captures the
@@ -332,12 +501,12 @@ export class MatchOrchestrator {
       peerProfile?.nickname ??
       this.peerAgentId.slice(0, 8);
 
-    // 4) Send match_request.
+    // 6) Send match_request.
     await session.send(
       createMatchRequest(this.self.agentId, { selfProfile: this.self.profile }),
     );
 
-    // 5) Run local analysis + wait for the peer's match_response
+    // 7) Run local analysis + wait for the peer's match_response
     //    concurrently. Per § 23, each side runs its OWN analysis; the
     //    peer's `match_response` is purely informational.
     //
@@ -400,7 +569,7 @@ export class MatchOrchestrator {
       );
     }
 
-    // 6) Ship our analysis immediately so the peer can stop waiting.
+    // 8) Ship our analysis immediately so the peer can stop waiting.
     await session.send(
       createMatchResponse(this.self.agentId, {
         analysis: localResult.analysis,
@@ -408,7 +577,7 @@ export class MatchOrchestrator {
       }),
     );
 
-    // 7) Now wait for the peer (bounded). If they never respond we
+    // 9) Now wait for the peer (bounded). If they never respond we
     //    still return our local result — the user can decide to
     //    accept/reject/block on local signal alone.
     await peerWaitPromise;
