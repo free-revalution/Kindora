@@ -192,6 +192,9 @@ export async function startLanHost(input: LanStartInput): Promise<LanHostHandle>
     }
   }, 200);
 
+  // Idempotency guard for the disconnect path. See `disconnect` below.
+  let disconnected = false;
+
   return {
     role: 'host',
     pairingCode: code,
@@ -202,6 +205,14 @@ export async function startLanHost(input: LanStartInput): Promise<LanHostHandle>
       return new MatchOrchestrator(toOrchestratorSelf(input), '');
     },
     async disconnect(reason: string = 'user-requested') {
+      // Idempotent: a second caller (e.g. unmount cleanup racing
+      // with a user-triggered disconnect) must not double-tear-down.
+      // The transport and session disconnect are already no-ops
+      // after the first call, but the `clearInterval` would warn in
+      // strict mode and the duplicate `await transport.disconnect()`
+      // is wasted IPC. Guard with the closed flag.
+      if (disconnected) return;
+      disconnected = true;
       clearInterval(poll);
       resolved = true;
       await transport.disconnect();
@@ -255,6 +266,8 @@ export async function startLanJoin(
   // calls session.notifyHelloReceived(peerAgentId) to move the FSM
   // to 'connected'.
   await session.startJoin(transport, code);
+  // Idempotency guard for the disconnect path. See `disconnect` below.
+  let disconnected = false;
   return {
     role: 'join',
     pairingCode: code,
@@ -266,6 +279,14 @@ export async function startLanJoin(
       return new MatchOrchestrator(toOrchestratorSelf(input), peer.agent_id || '');
     },
     async disconnect(reason: string = 'user-requested') {
+      // Idempotent: see the matching comment in `startLanHost`. The
+      // joiner side has no `setInterval` to clean up, but two
+      // concurrent callers (e.g. the JoinPanel unmount cleanup and
+      // a user-initiated cancel that arrives late) would each fire
+      // `lan_join_disconnect` IPC; the second is a cheap no-op but
+      // the guard keeps the call strictly one-shot.
+      if (disconnected) return;
+      disconnected = true;
       await transport.disconnect();
       await session.disconnect(reason);
     },

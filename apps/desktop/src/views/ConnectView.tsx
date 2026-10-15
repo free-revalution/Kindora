@@ -17,7 +17,7 @@
  * 开发手册.md § 18, § 44, Phase 6 + Phase 13.
  */
 
-import { useEffect, useState, type FormEvent } from 'react';
+import { useEffect, useRef, useState, type FormEvent } from 'react';
 import type { MatchOrchestrator } from '@kindora/matching';
 import { startHost, startJoin, toConnectInput, type ConnectHandle } from '../lib/connect-service';
 import {
@@ -152,6 +152,39 @@ function HostPanel({
   const [lanHandle, setLanHandle] = useState<LanConnectHandle | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  // Refs to the in-flight handles. Used by the unmount cleanup so
+  // we always release the LAN transport + session, even when the
+  // user clicks Cancel (or the parent view tears down) AFTER the
+  // handle has already been created and stored in state. The state
+  // variables above are for rendering only; the refs are the
+  // authoritative handle ownership for the cleanup path.
+  //
+  // This is the fix for the § 5.2 leak documented in
+  // docs/phase16/manual-lan-e2e.md: without this, the host's UDP
+  // responder, TCP listener, and 200ms poll loop keep running until
+  // the host side of the connection times out.
+  const handleRef = useRef<ConnectHandle | null>(null);
+  const lanHandleRef = useRef<LanConnectHandle | null>(null);
+
+  // Unmount cleanup: release any in-flight handle. The disconnect
+  // function is idempotent (see `lan-connect-service.ts`) so a
+  // duplicate call (e.g. the user already triggered disconnect via
+  // a different path) is safe.
+  useEffect(() => {
+    return () => {
+      const h = handleRef.current;
+      const lh = lanHandleRef.current;
+      handleRef.current = null;
+      lanHandleRef.current = null;
+      if (h) {
+        void h.disconnect('cancelled');
+      }
+      if (lh) {
+        void lh.disconnect('cancelled');
+      }
+    };
+  }, []);
+
   useEffect(() => {
     if (!llmReady) return;
     let cancelled = false;
@@ -164,6 +197,10 @@ function HostPanel({
             await h.disconnect('cancelled');
             return;
           }
+          // Stash in ref BEFORE setLanHandle so a same-tick unmount
+          // can still find it. If unmount has already happened,
+          // `cancelled` is true and we already returned above.
+          lanHandleRef.current = h;
           setLanHandle(h);
         } else {
           const input = await toConnectInput();
@@ -172,6 +209,7 @@ function HostPanel({
             await h.disconnect('cancelled');
             return;
           }
+          handleRef.current = h;
           setHandle(h);
         }
       } catch (e: unknown) {
@@ -293,6 +331,21 @@ function JoinPanel({
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
+  // Tracks whether the panel is still mounted. The async submit
+  // path (which awaits `startLanJoin` over real UDP) can race with
+  // the user clicking Cancel — when that happens, the panel
+  // unmounts before the awaited call resolves. We must not call
+  // `onConnected(bridged)` (which would force-navigate the user to
+  // the MatchView) and we must `disconnect` the in-flight LAN
+  // handle so the Rust-side resources are released.
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
   async function handleSubmit(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
     if (!llmReady) return;
@@ -301,7 +354,18 @@ function JoinPanel({
     try {
       if (transport === 'lan') {
         const input = await toLanInput();
+        // If the user already cancelled while `toLanInput()` was
+        // awaiting, drop the result without trying to connect.
+        if (!mountedRef.current) return;
         const h = await startLanJoin(input, code.trim());
+        // If the user cancelled during `startLanJoin` (UDP discover
+        // window), the joiner may have already bound a UDP socket
+        // and even established a TCP dial. Tear it down before the
+        // user is force-navigated to MatchView.
+        if (!mountedRef.current) {
+          await h.disconnect('cancelled');
+          return;
+        }
         // Cache the orchestrator so repeated reads of
         // `bridged.orchestrator` return the SAME instance — calling
         // `h.getOrchestrator()` twice would create two
@@ -325,18 +389,29 @@ function JoinPanel({
         onConnected(bridged);
       } else {
         const input = await toConnectInput();
+        // Loopback path doesn't touch the network but we still
+        // guard the unmount race.
+        if (!mountedRef.current) return;
         const handle = startJoin({ ...input, code: code.trim() });
         // Wait for the next tick — startJoin transitions the session
         // to 'tcp-connected' (Phase 15: NOT 'connected') on the next
         // microtask. The orchestrator will drive the `hello` exchange
         // and lift it to 'connected' once it runs.
         await new Promise((r) => setTimeout(r, 50));
+        if (!mountedRef.current) {
+          await handle.disconnect('cancelled');
+          return;
+        }
         onConnected(handle);
       }
     } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : String(e));
+      if (mountedRef.current) {
+        setError(e instanceof Error ? e.message : String(e));
+      }
     } finally {
-      setBusy(false);
+      if (mountedRef.current) {
+        setBusy(false);
+      }
     }
   }
 

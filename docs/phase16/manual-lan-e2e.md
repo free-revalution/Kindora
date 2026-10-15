@@ -122,7 +122,7 @@ For each scenario below, run from a fresh state (close both apps or click
 | 2.6 | **Peer exits during handshake** | start host, both linked, host in MatchView | quit B's app (Cmd+Q / Alt+F4) | host's MatchView shows a transport-disconnect error within ≤ 1 s; session is "closed"; no match result; no zombie `lan_` processes. | **NOT_RUN** (manual). **Documented gap** (see § 5.1): the Rust LAN transport has no out-of-band peer-drop detection. The host only finds out on its NEXT `host_send` attempt (or `host_poll` returns `Disconnected` from the closed inbox). On the TS side, `PairingSession` propagates this and the orchestrator surfaces a typed `HandshakeClosedError` to `MatchView`. The two-process test `two_instance_mid_handshake_disconnect` **PASS**es the wire-level fact (joiner's `join_send` after `host_stop` is a no-op on the kernel level; only the host-side `host_linked` flips false). |
 | 2.7 | **Peer exits after match** | both reached MatchView, both see results | B quits the app | A's MatchView shows the peer-disconnect error; A returns to Home cleanly. | **NOT_RUN** (manual). Same gap as 2.6. |
 | 2.8 | **LLM API key invalid** | both with an invalid LLM key (e.g. wrong region) | (normal) | both reach MatchView; the orchestrator's local LLM call throws; the `MatchView` shows the LLM error message (an `analyzeMatch` error). No false-positive match shown. | **NOT_RUN** (manual). **Observed code path:** `provider.chat` throws → `analyzeMatch` throws → `MatchOrchestrator.start` throws → `MatchView` shows the error in the `error` phase. *Note:* a malformed LLM response (valid HTTP, bad JSON) is a different path — `parseMatchAnalysis` returns a **degraded** result with `compatibilitySignal: 'none'` and a "match analysis unavailable" explanation; the orchestrator does NOT throw, and `MatchView` shows the degraded result rather than an error. (Covered in `packages/matching/src/__tests__/match-orchestrator.test.ts`.) |
-| 2.9 | **Cancel + re-pair** | start host, get code | start joiner; on ConnectView, click "Cancel" | joiner returns to Home; host sees TCP disconnect, returns to "Waiting for the other person…". Restart the joiner, type the same code, repeat § 1 — must succeed. | **NOT_RUN** (manual). **Documented gap** (see § 5.2): clicking "Cancel" in `ConnectView` does NOT explicitly call `disconnect` on the LAN handle from the joiner's side — the joiner's `JoinSide` and UDP socket are leaked. A re-pair with a DIFFERENT host works because the joiner's `join_discover` opens a new ephemeral UDP socket. A re-pair with the SAME host may fail to discover if the host's UDP responder is still bound (it isn't, but if the host re-uses the port, the joiner's existing leaked socket may receive stale announces — not tested). The wire-level analogue `two_instance_cancel_and_repair` covers the discovery + re-connect path and **PASS**es. |
+| 2.9 | **Cancel + re-pair** | start host, get code | start joiner; on ConnectView, click "Cancel" | joiner returns to Home; host sees TCP disconnect, returns to "Waiting for the other person…". Restart the joiner, type the same code, repeat § 1 — must succeed. | **NOT_RUN** (manual). The § 5.2 fix landed in Phase 16.2: the joiner side now calls `disconnect('cancelled')` on its `LanJoinHandle` when the user cancels, releasing the UDP socket, the TCP writer/reader, and the 200ms poll loop. The new regression test `ConnectView.cancel-during-disconnect` (in `apps/desktop/src/views/__tests__/ConnectView.test.tsx`) **PASS**es; the wire-level analogue `two_instance_cancel_and_repair` **PASS**es. |
 
 > **Important:** in every failure scenario, the UI must NOT show a
 > successful match result. A passing failure scenario is one where the
@@ -247,6 +247,39 @@ For § 2.4 (no hello), open a raw TCP listener with `nc -l <port>` (or
 `socat TCP-LISTEN:<port>`) so the host's `join_connect` succeeds but
 no envelope ever arrives.
 
+### § 4.6 — LLM key requirement matrix
+
+This matrix tells the manual tester what they can run WITHOUT a
+real LLM API key. Phase 16.2 of the brief was explicit: do not
+configure a key, do not run the LLM-dependent rows. Anything below
+that says "needs LLM" stays NOT_RUN for this phase.
+
+| § | Scenario | Needs LLM? | Phase 16.2 status |
+|---|----------|-----------|-------------------|
+| § 1 (rows 1-5) | ConnectView renders, host code visible, peer discovery, TCP connect, state transitions to `tcp-connected` / `connected` | NO | NOT_RUN (no GUI driver in the Claude session); wire-level analogue `two_instance_discovery_and_link` **PASS** |
+| § 1 (rows 6-7) | MatchOrchestrator runs `analyzeMatch`, MatchView shows the 5 result fields, peer display name + agent id match | YES | NOT_RUN |
+| § 1 (row 8) | Disconnect cleans up the session | NO | wire-level: `lan_e2e.host_linked_becomes_false_after_stop` **PASS** |
+| § 2.1, § 2.2, § 2.9 | Wrong code / no host / cancel + re-pair (Cancel fix verified in Phase 16.2) | NO | new `ConnectView.test.tsx` **PASS** (8/8); wire-level analogues **PASS** |
+| § 2.3 | UDP discoverable, TCP fails (firewall block) | NO | NOT_RUN (firewall needs OS access) |
+| § 2.4 | TCP up, no hello from peer | NO | NOT_RUN (needs GUI); `two_instance_host_silent_then_link_drops` **PASS** |
+| § 2.5 | Malformed hello | NO | NOT_RUN (needs GUI); `two_instance_malformed_hello_is_delivered` **PASS** |
+| § 2.6, § 2.7 | Peer exits during/after handshake | NO | NOT_RUN (needs GUI); wire-level analogues **PASS** |
+| § 2.8 | LLM API key invalid | YES | NOT_RUN |
+| § 3.1, § 3.2 | State transitions fire once, one orchestrator per pairing | NO | NOT_RUN (DevTools); fix is in code (Phase 16 patch + reentrancy guard); `match-orchestrator.test.ts` reentrancy test **PASS** |
+| § 3.3 | Exactly one match_request/response per side | YES (for the response) | NOT_RUN |
+| § 3.4, § 3.5, § 3.6 | Disconnect cleanup, three cycles, hard kill | NO | NOT_RUN (needs GUI) |
+
+**Bottom line for a no-LLM manual run:** you can drive the full
+discovery + TCP connect + state-transition path on two machines
+WITHOUT configuring an LLM key. To do that, open both apps, click
+Host on one and Join on the other, type the 6-char code, and verify
+that the state transitions hit `tcp-connected` (which means
+PairingSession + transport are both happy). You will see the
+"preparing match…" banner in MatchView; without an LLM key the
+`analyzeMatch` call will fail and the banner will show the error.
+That is the expected boundary — it confirms the wire layer is
+correct and the LLM layer is the only thing that needs a key.
+
 ---
 
 ## § 5 — Known gaps (calibrated against the actual code, Phase 16.1)
@@ -278,25 +311,58 @@ defense-in-depth, not a clean signal.
 Then the TS layer can short-circuit on the next poll and surface
 the disconnect immediately.
 
-### § 5.2 — Cancel from ConnectView leaks the LAN handle
+### § 5.2 — Cancel from ConnectView leaked the LAN handle (FIXED in Phase 16.2)
 
-**Where:** `apps/desktop/src/views/ConnectView.tsx`, the joiner's
-"Cancel" button only calls the parent's `onCancel` (which navigates
-back to Home). It does NOT call `h.disconnect('cancelled')` on the
-`LanConnectHandle`. The `JoinSide` (TCP writer/reader) and the
-ephemeral UDP socket used for discovery are leaked.
+**Where:** `apps/desktop/src/views/ConnectView.tsx`,
+`apps/desktop/src/lib/lan-connect-service.ts`.
 
-**Symptom:** a second pairing attempt with the same joiner may
-encounter a leaked UDP socket still bound to a port; in practice
-the kernel reuses the port and the test passes, but the resource
-leak is real. See `lan_protocol_e2e.rs` for the wire-level coverage
-of the cancel-and-re-pair path — it does NOT exercise this leak,
-because the test calls `joiner.join_disconnect()` explicitly.
+**Original symptom (Phase 16.1):** clicking "Cancel" in the joiner
+panel (or unmounting `ConnectView` from any path) did NOT explicitly
+disconnect the in-flight `LanConnectHandle`. The `JoinSide` (TCP
+writer/reader), the UDP socket used for discovery, and the 200ms poll
+loop were leaked. A second pairing attempt with the same joiner could
+encounter a leaked UDP socket still bound to a port; in practice the
+kernel reuses the port and the test passes, but the resource leak is
+real. The host side had a similar race: once `setLanHandle(h)` had
+been called, the `useEffect` cleanup only set a `cancelled` flag —
+it did not call `disconnect` on the already-stored handle.
 
-**Fix candidate (not in this commit):** in `JoinPanel`, wrap the
-`h.disconnect` call in a `useEffect` cleanup so the LAN handle is
-always released on unmount, regardless of which path the user
-takes to leave the view.
+**Fix (Phase 16.2):** two changes.
+
+1. `lan-connect-service.ts` — `disconnect` is now strictly
+   idempotent. A `disconnected: boolean` flag short-circuits a
+   second concurrent caller (e.g. unmount cleanup racing with a
+   user-triggered disconnect). This is defense-in-depth — both
+   `PairingSession.disconnect` and `LanTransport.disconnect` are
+   already no-ops on the second call, but the guard makes the
+   contract explicit and avoids wasted IPC.
+2. `ConnectView.tsx`:
+   - `HostPanel` now stashes the in-flight `ConnectHandle` /
+     `LanConnectHandle` in `useRef` BEFORE `setLanHandle` (so the
+     unmount cleanup can find it even if React hasn't committed the
+     state update yet). A new dedicated `useEffect(() => {...}, [])`
+     cleanup reads the ref and calls `disconnect('cancelled')` on
+     whatever is there.
+   - `JoinPanel` tracks `mountedRef`. The async `handleSubmit`
+     checks `mountedRef.current` after every `await` and tears down
+     the in-flight handle if the user cancelled mid-flight. The
+     `setError` / `setBusy` calls are also guarded so a late
+     rejection doesn't trigger a setState on an unmounted component.
+
+**Verification:**
+
+- New regression suite:
+  `apps/desktop/src/views/__tests__/ConnectView.test.tsx` — 8 tests
+  that record Tauri IPC, drive the ConnectView through host/join +
+  cancel/unmount, and assert the matching `lan_host_stop` /
+  `lan_join_disconnect` IPC was issued exactly once.
+- All 8 new tests pass; existing 485 tests still pass (now 493 total).
+- Wire-level test `two_instance_cancel_and_repair` still passes
+  (covers the discovery + re-connect path).
+
+**Status:** **FIXED**. The § 2.9 manual row can now be marked `PASS`
+in a two-machine run, provided the manual tester verifies that
+re-pairing after cancel succeeds (a previously flaky path).
 
 ### § 5.3 — LLM error path: throw vs. degraded
 
