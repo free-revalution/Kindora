@@ -120,8 +120,20 @@ export {
  * rejections from the `lan_*` commands. See `lan-error.ts` for the
  * discrimination rules and the relationship to the Rust
  * `LanError` enum.
+ *
+ * Phase 16.5: also exports the pinned `Display` string constants
+ * that the classifier matches against. These are part of the
+ * Rust ↔ TS IPC contract — a Rust unit test
+ * (`peer_closed_display_matches_ipc_contract` in
+ * `apps/desktop/src-tauri/src/lan.rs`) asserts the same strings
+ * on the other side.
  */
-export { LanError, type LanErrorKind } from './lan-error';
+export {
+  LanError,
+  LAN_ERROR_PEER_CLOSED_DISPLAY,
+  LAN_ERROR_NOT_CONNECTED_DISPLAY,
+  type LanErrorKind,
+} from './lan-error';
 
 export {
   WireRateLimiter,

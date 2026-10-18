@@ -899,3 +899,56 @@ pub async fn write_envelope_to_stream(
     writer.flush().await?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    //! Phase 16.5 § Task 3: Rust ↔ TypeScript IPC contract tests.
+    //!
+    //! The TypeScript side classifies Tauri IPC rejections into a
+    //! `LanErrorKind` by matching the rejection's `.message` against
+    //! the Rust `Display` text for each `LanError` variant. If a
+    //! variant's `#[error("…")]` attribute changes, the TS classifier
+    //! silently stops recognising it and the variant lands in
+    //! `unknown` — which for `PeerClosed` means the `onClose` hook
+    //! never fires and the peer-close event is misclassified as a
+    //! generic error.
+    //!
+    //! These tests pin the Display strings. They must be updated
+    //! together with `LAN_ERROR_PEER_CLOSED_DISPLAY` /
+    //! `LAN_ERROR_NOT_CONNECTED_DISPLAY` in
+    //! `packages/transport/src/lan-error.ts`.
+    use super::*;
+
+    #[test]
+    fn peer_closed_display_matches_ipc_contract() {
+        // The exact string the TS classifier matches against.
+        // Mirrors `LAN_ERROR_PEER_CLOSED_DISPLAY` in
+        // `packages/transport/src/lan-error.ts`.
+        assert_eq!(LanError::PeerClosed.to_string(), "peer closed");
+    }
+
+    #[test]
+    fn not_connected_display_matches_ipc_contract() {
+        // The exact string the TS classifier matches against.
+        // Mirrors `LAN_ERROR_NOT_CONNECTED_DISPLAY` in
+        // `packages/transport/src/lan-error.ts`.
+        assert_eq!(LanError::NotConnected.to_string(), "not connected");
+    }
+
+    /// Phase 16.5 § Task 3 (Task 1 follow-up): the
+    /// `serialize_str(&self.to_string())` impl on `LanError` is the
+    /// second half of the IPC contract. If anyone re-implements it
+    /// to serialise the variant tag instead of the Display string,
+    /// the TS classifier will fail to match. Pin the current
+    /// behaviour.
+    #[test]
+    fn lan_error_serialises_to_display_string() {
+        let json = serde_json::to_string(&LanError::PeerClosed)
+            .expect("LanError must serialise");
+        // The serialised form is a JSON string (because
+        // `serialize_str`), not a tagged object. The TS classifier
+        // reads it as a plain string and matches against
+        // `LAN_ERROR_PEER_CLOSED_DISPLAY`.
+        assert_eq!(json, "\"peer closed\"");
+    }
+}

@@ -44,6 +44,27 @@ interface MockState {
    */
   hostPollPeerClosed: boolean;
   joinPollPeerClosed: boolean;
+  /**
+   * Phase 16.5: optional delay (ms) before `lan_host_stop`
+   * resolves. Used to test that `startHost` waits for the
+   * in-flight cleanup before issuing `lan_host_start`.
+   */
+  hostStopDelayMs: number;
+  /** Optional delay (ms) before `lan_join_disconnect` resolves. */
+  joinDisconnectDelayMs: number;
+  /**
+   * If non-null, `lan_host_stop` rejects with this error message.
+   * Used to test the cleanup-failure path.
+   */
+  hostStopFails: string | null;
+  /** If non-null, `lan_join_disconnect` rejects with this error. */
+  joinDisconnectFails: string | null;
+  /**
+   * Phase 16.5: ordered list of every IPC command the mock has
+   * received so far. Lets tests assert call ordering (e.g.
+   * `host_stop` MUST complete before the next `host_start`).
+   */
+  callLog: string[];
 }
 
 function makeKsaHello(agentId: string, displayName: string): KsaMessage {
@@ -77,6 +98,7 @@ function installTauriMock(state: MockState) {
   };
   w.__TAURI_INTERNALS__ = {
     async invoke(cmd: string, args?: Record<string, unknown>): Promise<unknown> {
+      state.callLog.push(cmd);
       switch (cmd) {
         case 'lan_host_start':
           state.hostStarted = true;
@@ -100,10 +122,17 @@ function installTauriMock(state: MockState) {
           link.outbound.push(String(args?.message ?? ''));
           return null;
         }
-        case 'lan_host_stop':
+        case 'lan_host_stop': {
+          if (state.hostStopDelayMs > 0) {
+            await new Promise((r) => setTimeout(r, state.hostStopDelayMs));
+          }
+          if (state.hostStopFails) {
+            throw new Error(state.hostStopFails);
+          }
           state.hostStarted = false;
           state.hostLink = null;
           return null;
+        }
         case 'lan_join_discover':
           return state.discoverResults;
         case 'lan_join_connect': {
@@ -130,10 +159,17 @@ function installTauriMock(state: MockState) {
           link.outbound.push(String(args?.message ?? ''));
           return null;
         }
-        case 'lan_join_disconnect':
+        case 'lan_join_disconnect': {
+          if (state.joinDisconnectDelayMs > 0) {
+            await new Promise((r) => setTimeout(r, state.joinDisconnectDelayMs));
+          }
+          if (state.joinDisconnectFails) {
+            throw new Error(state.joinDisconnectFails);
+          }
           state.joinStarted = false;
           state.joinLink = null;
           return null;
+        }
         default:
           throw new Error(`unknown mock command: ${cmd}`);
       }
@@ -152,6 +188,11 @@ describe('LanTransport (Tauri shim)', () => {
       discoverResults: [],
       hostPollPeerClosed: false,
       joinPollPeerClosed: false,
+      hostStopDelayMs: 0,
+      joinDisconnectDelayMs: 0,
+      hostStopFails: null,
+      joinDisconnectFails: null,
+      callLog: [],
     };
     installTauriMock(state);
   });
@@ -487,6 +528,278 @@ describe('LanTransport (Tauri shim)', () => {
     await t2.startHost('DEF456');
     expect(t2.isConnected()).toBe(false);
     await t2.disconnect();
+  });
+
+  // ---- Phase 16.5 § Task 1: cleanup-promise tracking ----
+
+  it('Task 1: startHost waits for the in-flight peer-close cleanup to complete', async () => {
+    // The mock's `lan_host_stop` takes 300 ms (configured below).
+    // The first connection's peer-close triggers handlePeerClosed,
+    // which dispatches `lan_host_stop` (still pending) and sets
+    // `cleanupPromise` to that pending promise. A subsequent
+    // startHost MUST await `cleanupPromise` before issuing
+    // `lan_host_start` — otherwise the new host_start would race
+    // the old host_stop on the Rust side and either hit
+    // `AlreadyRunning` or bind a listener on top of a half-torn-
+    // down one.
+    //
+    // Synchronization strategy: we wait until the mock's callLog
+    // contains `lan_host_stop` (meaning the IPC was DISPATCHED but
+    // not yet resolved, because the mock delays resolution by
+    // 300 ms). This is not a "delay to mask the race" — it is a
+    // synchronization point on observable state. Once we see
+    // `lan_host_stop` in the log, we know the in-flight cleanup is
+    // genuinely pending, and the timing assertion below is
+    // measuring real wait time, not a slack upper bound.
+    state.hostStopDelayMs = 300;
+    const t = new LanTransport({ selfAgentId: 'self', selfDisplayName: 'Self' });
+    await t.startHost('ABC123');
+    state.hostLink = { inbound: [], outbound: [], connected: true };
+    state.hostPollPeerClosed = true;
+    t.onClose(() => undefined);
+
+    // Wait until the cleanup IPC is dispatched.
+    while (!state.callLog.includes('lan_host_stop')) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    // Sanity: the cleanup is genuinely in flight (delay 300 ms).
+    expect(state.hostStopDelayMs).toBe(300);
+    // Clear the log so the post-reset assertion only sees the
+    // new host's IPC traffic.
+    state.callLog = [];
+
+    const start = Date.now();
+    await t.startHost('DEF456');
+    const elapsed = Date.now() - start;
+    // The new startHost must have blocked for roughly the
+    // remaining host_stop time. Lower bound: 250 ms (90 % of the
+    // 300 ms delay, to stay resilient to microtask jitter).
+    expect(elapsed).toBeGreaterThanOrEqual(250);
+    // IPC ordering: only the new host_start should be in the log
+    // — no other IPC happened during the wait.
+    expect(state.callLog).toEqual(['lan_host_start']);
+
+    await t.disconnect();
+  });
+
+  it('Task 1: startHost immediately after peer-closed succeeds (no AlreadyRunning)', async () => {
+    // Even with a synchronous (no-delay) cleanup, the second
+    // startHost on the same instance MUST succeed because
+    // awaitCleanup blocks until the in-flight host_stop resolves
+    // before the host_start is issued. Without the await, the
+    // second host_start would race the first host_stop on the
+    // Rust side.
+    const t = new LanTransport({ selfAgentId: 'self', selfDisplayName: 'Self' });
+    await t.startHost('ABC123');
+    state.hostLink = { inbound: [], outbound: [], connected: true };
+    state.hostPollPeerClosed = true;
+    t.onClose(() => undefined);
+    await new Promise((r) => setTimeout(r, 500));
+
+    // The transport is in 'idle' mode (set by handlePeerClosed).
+    // A fresh startHost should succeed.
+    state.hostLink = null;
+    state.hostPollPeerClosed = false;
+    const info = await t.startHost('DEF456');
+    expect(info.code).toBe('DEF456');
+    expect(state.hostStarted).toBe(true);
+    await t.disconnect();
+  });
+
+  it('Task 1: a single peer-closed event triggers exactly one host_stop IPC', async () => {
+    // Q2: "同一连接是否可能同时触发多个清理任务？"
+    // The `closedByPeer` guard is idempotent, but verify it on the
+    // IPC level: only ONE `lan_host_stop` should be issued even
+    // though the mock keeps throwing 'peer closed' on every poll.
+    const t = new LanTransport({ selfAgentId: 'self', selfDisplayName: 'Self' });
+    await t.startHost('ABC123');
+    state.hostLink = { inbound: [], outbound: [], connected: true };
+    state.hostPollPeerClosed = true;
+    t.onClose(() => undefined);
+    // Wait long enough for many poll ticks (poll interval is
+    // 200 ms; wait 1 s = 5+ ticks).
+    await new Promise((r) => setTimeout(r, 1000));
+    const stopCount = state.callLog.filter((c) => c === 'lan_host_stop').length;
+    expect(stopCount).toBe(1);
+    await t.disconnect();
+  });
+
+  it('Task 1: cleanup failure does not block subsequent startHost', async () => {
+    // Q3: "清理失败时，transport 是否会错误地宣称已完全恢复？"
+    // The transport's `runRustCleanup` swallows the error and
+    // resolves the promise. The transport does NOT silently
+    // succeed — the next startHost will surface the real Rust
+    // state. In the mock, the host_stop rejects, but the
+    // subsequent host_start still completes (because the mock
+    // doesn't actually model the Rust lock). The contract: the
+    // transport does not throw spuriously, and the next operation
+    // either succeeds or surfaces a meaningful error.
+    state.hostStopFails = 'io error: simulated';
+    const t = new LanTransport({ selfAgentId: 'self', selfDisplayName: 'Self' });
+    await t.startHost('ABC123');
+    state.hostLink = { inbound: [], outbound: [], connected: true };
+    state.hostPollPeerClosed = true;
+    t.onClose(() => undefined);
+    await new Promise((r) => setTimeout(r, 500));
+    // The transport's `closedByPeer` flag is set; the cleanup
+    // promise resolved (with the error swallowed). The next
+    // startHost should await the (already-resolved) promise and
+    // proceed to a fresh host_start. The host_stop failure is
+    // visible only via the console.debug log, not as a thrown
+    // error to the caller.
+    state.hostLink = null;
+    state.hostPollPeerClosed = false;
+    await expect(t.startHost('DEF456')).resolves.toBeDefined();
+    await t.disconnect();
+  });
+
+  it('Task 1: disconnect after peer-closed does not issue a second host_stop', async () => {
+    // Q2: "同一连接是否可能同时触发多个清理任务？" — verifying
+    // the disconnect path is also idempotent when the peer-close
+    // cleanup is already in flight. The `disconnect()` method
+    // checks `closedByPeer` and awaits the existing promise
+    // instead of dispatching a fresh host_stop.
+    const t = new LanTransport({ selfAgentId: 'self', selfDisplayName: 'Self' });
+    await t.startHost('ABC123');
+    state.hostLink = { inbound: [], outbound: [], connected: true };
+    state.hostPollPeerClosed = true;
+    t.onClose(() => undefined);
+    await new Promise((r) => setTimeout(r, 500));
+    const stopsBefore = state.callLog.filter((c) => c === 'lan_host_stop').length;
+    expect(stopsBefore).toBe(1);
+    await t.disconnect();
+    const stopsAfter = state.callLog.filter((c) => c === 'lan_host_stop').length;
+    // No second host_stop should be issued — the existing
+    // cleanupPromise is awaited, not duplicated.
+    expect(stopsAfter).toBe(1);
+  });
+
+  // ---- Phase 16.5 § Task 2: closedByPeer lifecycle ----
+
+  it('Task 2: a fresh connection on the same instance does NOT inherit the previous connection closedByPeer', async () => {
+    // The core Task 2 scenario. Sequence on ONE transport:
+    //   1. startHost('ABC')
+    //   2. peer drops (onClose fires)
+    //   3. startHost('DEF') on the SAME instance
+    //   4. the new peer's drop fires onClose (would NOT happen if
+    //      closedByPeer were instance-scoped instead of
+    //      connection-scoped).
+    //
+    // The handler for the new connection MUST be registered
+    // AFTER startHost, because `onClose` has a late-subscriber
+    // microtask that fires the handler immediately if
+    // `closedByPeer` is already true at registration time (the
+    // transport's API contract for late subscribers to a close
+    // event that already happened). Registering before startHost
+    // would conflate the late-subscriber firing with a real new
+    // peer-close event.
+    const t = new LanTransport({ selfAgentId: 'self', selfDisplayName: 'Self' });
+
+    // First connection: peer drops, onClose fires.
+    await t.startHost('ABC123');
+    state.hostLink = { inbound: [], outbound: [], connected: true };
+    state.hostPollPeerClosed = true;
+    let firstFired = 0;
+    t.onClose(() => {
+      firstFired += 1;
+    });
+    await new Promise((r) => setTimeout(r, 500));
+    expect(firstFired).toBe(1);
+
+    // Same instance, second connection. closedByPeer must be
+    // reset so a NEW peer-close event is observable. The handler
+    // is registered AFTER startHost to avoid the late-subscriber
+    // microtask path.
+    state.hostLink = null;
+    state.hostStarted = false;
+    state.hostPollPeerClosed = false;
+    await t.startHost('DEF456');
+    let secondFired = 0;
+    t.onClose(() => {
+      secondFired += 1;
+    });
+    // Bring a peer up and let it drop.
+    state.hostLink = { inbound: [], outbound: [], connected: true };
+    state.hostPollPeerClosed = true;
+    await new Promise((r) => setTimeout(r, 500));
+    // The second close MUST fire — this is the bug Phase 16.5
+    // fixes. If `closedByPeer` were instance-scoped (the
+    // pre-Phase-16.5 behaviour), this would still be 0.
+    expect(secondFired).toBe(1);
+    // The first handler is still on the handler set, but its
+    // state was reset by startHost — verify it did NOT fire
+    // again (it was cleared by the second startHost, so the
+    // counter stays at 1 from the first connection).
+    expect(firstFired).toBe(1);
+
+    await t.disconnect();
+  });
+
+  it('Task 2: disconnect resets closedByPeer so the next startHost is clean', async () => {
+    // Disconnect is a normal teardown path. After it, the
+    // transport must be in a state equivalent to a fresh
+    // instance: closedByPeer = false, closeHandlers empty, mode
+    // = idle. The new connection's handler is registered AFTER
+    // startHost to avoid the late-subscriber microtask path.
+    const t = new LanTransport({ selfAgentId: 'self', selfDisplayName: 'Self' });
+    await t.startHost('ABC123');
+    state.hostLink = { inbound: [], outbound: [], connected: true };
+    state.hostPollPeerClosed = true;
+    t.onClose(() => undefined);
+    await new Promise((r) => setTimeout(r, 500));
+    await t.disconnect();
+
+    // Now start a new host and verify onClose can fire again.
+    state.hostLink = null;
+    state.hostStarted = false;
+    state.hostPollPeerClosed = false;
+    await t.startHost('DEF456');
+    let fired = 0;
+    t.onClose(() => {
+      fired += 1;
+    });
+    state.hostLink = { inbound: [], outbound: [], connected: true };
+    state.hostPollPeerClosed = true;
+    await new Promise((r) => setTimeout(r, 500));
+    expect(fired).toBe(1);
+    await t.disconnect();
+  });
+
+  it('Task 2: same instance joiner → peer-closed → joiner again — second close fires', async () => {
+    // Same lifecycle test on the joiner side, to prove the
+    // closedByPeer reset is symmetric across host and join.
+    // The handler is registered AFTER startJoin to avoid the
+    // late-subscriber microtask path.
+    state.discoverResults = [
+      { ip: '192.168.1.10', port: 52420, agent_id: 'peer', display_name: 'Peer', code: 'ABC123' },
+    ];
+    const t = new LanTransport({ selfAgentId: 'self', selfDisplayName: 'Self' });
+    await t.startJoin(state.discoverResults[0]!);
+    state.joinPollPeerClosed = true;
+    let firstFired = 0;
+    t.onClose(() => {
+      firstFired += 1;
+    });
+    await new Promise((r) => setTimeout(r, 500));
+    expect(firstFired).toBe(1);
+
+    // Same instance, second join.
+    state.joinStarted = false;
+    state.joinLink = null;
+    state.joinPollPeerClosed = false;
+    state.discoverResults = [
+      { ip: '192.168.1.11', port: 52421, agent_id: 'peer2', display_name: 'Peer 2', code: 'DEF456' },
+    ];
+    await t.startJoin(state.discoverResults[0]!);
+    let secondFired = 0;
+    t.onClose(() => {
+      secondFired += 1;
+    });
+    state.joinPollPeerClosed = true;
+    await new Promise((r) => setTimeout(r, 500));
+    expect(secondFired).toBe(1);
+
+    await t.disconnect();
   });
 });
 

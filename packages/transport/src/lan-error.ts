@@ -1,4 +1,26 @@
 /**
+ * Phase 16.5 § Task 3: the Rust `Display` string for
+ * `LanError::PeerClosed` (see `apps/desktop/src-tauri/src/lan.rs`).
+ * The Tauri 2 IPC layer serialises each error variant to its
+ * `Display` text, so the TypeScript classifier keys off this
+ * exact string. The string is pinned here AND in a Rust unit test
+ * (`peer_closed_display_matches_ipc_contract` in `lan.rs`) so
+ * neither side can drift without a deliberate, documented change.
+ *
+ * If you change the Rust `#[error("…")]` attribute on
+ * `LanError::PeerClosed`, you MUST change this constant in the
+ * same commit and update both the Rust and TS contract tests.
+ */
+export const LAN_ERROR_PEER_CLOSED_DISPLAY = 'peer closed';
+
+/**
+ * Phase 16.5 § Task 3: the Rust `Display` string for
+ * `LanError::NotConnected`. Same contract as
+ * `LAN_ERROR_PEER_CLOSED_DISPLAY` above.
+ */
+export const LAN_ERROR_NOT_CONNECTED_DISPLAY = 'not connected';
+
+/**
  * LanError — typed representation of the Rust `LanError` enum.
  *
  * The Rust side serialises each error variant as its `Display` string
@@ -11,6 +33,11 @@
  *   (b) distinguish `peer-closed` from `not-connected` / generic
  *       `io` errors so we can fire an `onClose` event on the
  *       transport without false-positives on local teardown.
+ *
+ * Phase 16.5: the `peer-closed` and `not-connected` mappings are
+ * pinned to the exported `LAN_ERROR_PEER_CLOSED_DISPLAY` /
+ * `LAN_ERROR_NOT_CONNECTED_DISPLAY` constants. The Rust side has a
+ * matching contract test.
  *
  * The mapping is by `Display` string prefix, matching the Rust
  * `#[error("…")]` attributes exactly. Adding a new variant on the
@@ -87,8 +114,12 @@ export class LanError extends Error {
     } else {
       message = String(err);
     }
-    if (message === 'peer closed') return new LanError('peer-closed', message);
-    if (message === 'not connected') return new LanError('not-connected', message);
+    if (message === LAN_ERROR_PEER_CLOSED_DISPLAY) {
+      return new LanError('peer-closed', message);
+    }
+    if (message === LAN_ERROR_NOT_CONNECTED_DISPLAY) {
+      return new LanError('not-connected', message);
+    }
     if (message.startsWith('io error: ')) return new LanError('io', message);
     if (message.startsWith('json error: ')) return new LanError('json', message);
     if (message.startsWith('invalid: ')) return new LanError('invalid', message);

@@ -4,9 +4,18 @@
  * Phase 16.4: this class lets the TypeScript layer classify a Tauri
  * IPC rejection into a discriminated kind. The mapping is purely on
  * `.message` string shape (see Rust `impl Serialize for LanError`).
+ *
+ * Phase 16.5: also pins the IPC contract — the exported
+ * `LAN_ERROR_*_DISPLAY` constants must equal the strings the Rust
+ * `Display` impl produces (verified by Rust unit tests in
+ * `apps/desktop/src-tauri/src/lan.rs`).
  */
 import { describe, expect, it } from 'vitest';
-import { LanError } from '../lan-error';
+import {
+  LanError,
+  LAN_ERROR_NOT_CONNECTED_DISPLAY,
+  LAN_ERROR_PEER_CLOSED_DISPLAY,
+} from '../lan-error';
 
 describe('@kindora/transport — LanError', () => {
   it('classifies "peer closed" as peer-closed', () => {
@@ -79,5 +88,28 @@ describe('@kindora/transport — LanError', () => {
     // avoid mapping runtime errors that happen to mention "io".
     const e = LanError.from(new Error('io peer-closed something'));
     expect(e.kind).toBe('unknown');
+  });
+
+  // ---- Phase 16.5 § Task 3: IPC contract pin ----
+
+  it('LAN_ERROR_PEER_CLOSED_DISPLAY is the exact string the classifier matches', () => {
+    // The classifier in `LanError.from` matches against this
+    // constant. If either side changes (Rust Display or this
+    // constant) without the other, peer-closed events will
+    // silently land in `unknown` and `onClose` will never fire.
+    expect(LAN_ERROR_PEER_CLOSED_DISPLAY).toBe('peer closed');
+    // The same constant is what `from()` actually keys off of.
+    const e = LanError.from(new Error(LAN_ERROR_PEER_CLOSED_DISPLAY));
+    expect(e.kind).toBe('peer-closed');
+    expect(e.isPeerClosed()).toBe(true);
+  });
+
+  it('LAN_ERROR_NOT_CONNECTED_DISPLAY is the exact string the classifier matches', () => {
+    // `NotConnected` is a local teardown marker, NOT a peer close.
+    // The classifier must not conflate the two.
+    expect(LAN_ERROR_NOT_CONNECTED_DISPLAY).toBe('not connected');
+    const e = LanError.from(new Error(LAN_ERROR_NOT_CONNECTED_DISPLAY));
+    expect(e.kind).toBe('not-connected');
+    expect(e.isPeerClosed()).toBe(false);
   });
 });

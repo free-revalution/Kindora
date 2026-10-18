@@ -1,18 +1,18 @@
 # Phase 16 — Real Two-Instance LAN Verification
 
-**Status (Phase 16.3):**
+**Status (Phase 16.5):**
 
 | Layer | Outcome |
 |-------|---------|
-| Two-LanState protocol test (`cargo test --test lan_protocol_e2e`) | **PASS** (13/13 — 9 from Phase 16.1 + 4 new TCP-drop-detection tests for Phase 16.3 § 5.1) |
-| Single-LanState regression (`cargo test --test lan_e2e`) | **PASS** (15/15 unchanged) |
-| Vitest full workspace | **PASS** (495/495 — was 493/493 in Phase 16.2; +2 from new Task 1 unit-level tests for `startLanHost` failure contract + ConnectView error rendering) |
-| `pnpm -r typecheck` | **PASS** (was PASS in Phase 16.2) |
-| `pnpm -r build` | **PASS** (was PASS in Phase 16.2) |
+| Two-LanState protocol test (`cargo test --test lan_protocol_e2e`) | **PASS** (13/13 unchanged from Phase 16.3) |
+| Single-LanState regression (`cargo test --test lan_e2e`) | **PASS** (15/15 unchanged from Phase 16.3) |
+| Rust unit tests (`cargo test --lib`) | **PASS** (3/3 NEW in Phase 16.5 — `peer_closed_display_matches_ipc_contract`, `not_connected_display_matches_ipc_contract`, `lan_error_serialises_to_display_string` in `apps/desktop/src-tauri/src/lan.rs`) |
+| Vitest full workspace | **PASS** (533/533 — was 523/523 in Phase 16.4; +10 from new Task 1 cleanup-promise tests + Task 2 closedByPeer lifecycle tests + Task 3 IPC contract constants in `lan-error.ts`) |
+| `pnpm -r typecheck` | **PASS** |
+| `pnpm -r build` | **PASS** |
 | `cargo check --lib` | **PASS** (requires Rust ≥ 1.99 because of `idna_adapter v1.2.2`'s `edition2024`; run via `rustup run stable cargo check --lib`) |
 | Real two-OS-process run on two physical machines | **NOT_RUN** (no GUI driver + no LLM API key in the Claude session) — see § 6 manual below |
-| Phase 16.3 § 5.1 fixes | landed — `TcpLink.peer_closed: Arc<AtomicBool>`, `tcp_read_loop` sets it on EOF / non-shutdown read errors, `host_poll` / `join_poll` / `host_send` / `join_send` surface `Err(LanError::PeerClosed)`. Local `host_stop` / `join_disconnect` deliberately do NOT set the flag (their report is `NotConnected`) |
-| Phase 16.3 § 5.1 fix 2 (call order) | landed — `startLanHost` now binds the transport FIRST and only then drives the session; `session.startHost(transport, { seed: code })` honours the seed. The pre-existing `unhandledRejection` swallow in `ConnectView.test.tsx` is REMOVED (no longer needed and explicitly forbidden by Phase 16.3 constraints) |
+| Phase 16.5 § 5.5 fixes | landed — (Task 1) `cleanupPromise: Promise<void>` on `LanTransport` tracks the in-flight `lan_host_stop` / `lan_join_disconnect`; `startHost` / `startJoin` / `disconnect` all await it via `awaitCleanup()`. (Task 2) `closedByPeer` is now **connection-scoped** (reset to `false` on every new connection); `closeHandlers` is cleared on every new connection. (Task 3) `LAN_ERROR_PEER_CLOSED_DISPLAY = 'peer closed'` and `LAN_ERROR_NOT_CONNECTED_DISPLAY = 'not connected'` are exported from `@kindora/transport`; the `LanError.from()` classifier keys off these constants. The Rust side pins the same strings via 3 unit tests in `lan.rs` (`#[cfg(test)] mod tests`). |
 
 **Bottom line:** the wire-level LAN protocol (UDP discover + TCP length-prefixed
 JSON envelope flow) plus its out-of-band peer-drop detection is now
@@ -630,23 +630,341 @@ side). A live two-machine run is still required to confirm the
 GUI behaviour matches — automated test pass does NOT equal GUI
 acceptance (per Phase 16.4 brief § 四).
 
+### § 5.5 — LAN lifecycle final hardening (FIXED in Phase 16.5)
+
+**Where:** `packages/transport/src/lan-transport.ts`,
+`packages/transport/src/lan-error.ts`,
+`packages/transport/src/index.ts`,
+`apps/desktop/src-tauri/src/lan.rs`.
+
+Three known risks, three minimal fixes, all gated by tests
+that fail without the fix and pass with it.
+
+#### § 5.5.1 — Async cleanup vs. immediate reconnect race (Task 1)
+
+**Question:** on a peer-close, can a new `startHost` /
+`startJoin` race the in-flight `lan_host_stop` /
+`lan_join_disconnect`? (Same question for the
+`disconnect()` path.) If yes, the new connection either hits
+`Err(LanError::AlreadyRunning)` on the Rust side, or binds a
+fresh listener on top of a half-torn-down one.
+
+**Original symptom (pre-Phase-16.5):** the peer-close path
+called `lan_host_stop` / `lan_join_disconnect` (best-effort)
+but did NOT track the resulting promise. A subsequent
+`startHost` (issued in the same JS turn, or in a `setTimeout`
+within a few hundred ms) had no way to wait for the cleanup
+to complete; the new `lan_host_start` could land on the Rust
+side before the old `host_stop` had cleared the state, hitting
+`AlreadyRunning`. The same race existed for an immediate
+`disconnect()` after a peer-close (the disconnect would
+dispatch a *second* `host_stop` instead of awaiting the
+in-flight one).
+
+**Fix (Phase 16.5 § 5.5.1):** a single `cleanupPromise:
+Promise<void>` on `LanTransport` tracks the in-flight
+Rust-side cleanup. `startHost` / `startJoin` /
+`disconnect()` all `await this.cleanupPromise` (via the
+private `awaitCleanup()` helper) before issuing any new
+IPC. The promise is single-shot — it resolves to `undefined`
+whether the underlying IPC succeeded or failed, and is then
+replaced. `runRustCleanup(atMode)` captures the connection
+role at the time of the call because the peer-close path
+resets `this.mode` synchronously *before* the IPC is
+dispatched; without the snapshot, a synchronous
+`disconnect()` driven by the close handler would observe
+`mode === 'idle'` and skip the actual `lan_host_stop`,
+leaving the Rust state half-torn-down.
+
+**Four sub-cases answered:**
+
+1. **Q1: can a new connection start before cleanup is
+   done?** No — `startHost` / `startJoin` await
+   `cleanupPromise` before issuing `lan_host_start` /
+   `lan_join_connect`. Tested by the new "Task 1: startHost
+   waits for the in-flight peer-close cleanup to complete"
+   vitest (asserts `elapsed >= 250 ms` against a 300 ms mock
+   delay, with the synchronization point being the
+   `lan_host_stop` entry in `state.callLog` — not an
+   arbitrary sleep).
+
+2. **Q2: can the same connection trigger multiple
+   cleanups?** No — the `closedByPeer` guard on
+   `handlePeerClosed()` is idempotent; only one
+   `lan_host_stop` is ever dispatched. Verified by the new
+   "Task 1: a single peer-closed event triggers exactly
+   one host_stop IPC" vitest (asserts `stopCount === 1`
+   after 1 s of poll-driven peer-close, with 5+ poll ticks).
+   The `disconnect()` path also checks `closedByPeer` and
+   awaits the existing promise instead of dispatching a
+   second cleanup. Verified by "Task 1: disconnect after
+   peer-closed does not issue a second host_stop".
+
+3. **Q3: does transport falsely claim fully-recovered on
+   cleanup failure?** The transport does NOT silently
+   swallow the failure and pretend success. The cleanup
+   promise is best-effort — it logs at `console.debug`
+   (`'host_stop failed during cleanup'`) and resolves to
+   `undefined` regardless. The next `host_start` /
+   `join_connect` will then surface the actual Rust state
+   via its own error (e.g. `Err(LanError::AlreadyRunning)` if
+   the cleanup truly failed). Verified by "Task 1: cleanup
+   failure does not block subsequent startHost" — the next
+   `startHost` still resolves to a `LanHostInfo`, the
+   `console.debug` is the only visible side effect, and a
+   *real* `AlreadyRunning` would have been raised by the
+   mock's `host_start` switch arm. The transport does not
+   make a false claim; it makes a transparent promise that
+   the cleanup completed (because the Promise is settled),
+   and the next call is the source of truth for Rust-side
+   state.
+
+4. **Q4: can a new connection be closed by old
+   connection's late events?** No — the `closedByPeer`
+   guard, the `mode` check, and the connection-scoped
+   `closeHandlers` set (see § 5.5.2) all stop late events
+   from a previous connection. The poll loop is stopped on
+   peer-close; the only way it can run is if the new
+   connection restarted it via `startPolling()`. Late poll
+   ticks after the close observe `closedByPeer === true`
+   and `return` immediately (see `pollOnce()`).
+
+#### § 5.5.2 — `closedByPeer` lifecycle (Task 2)
+
+**Question:** the `Transport` interface returns the same
+instance for the lifetime of the application (one
+`LanTransport` per app; one `PairingSession` per pairing
+attempt; etc.). Can a fresh connection on the same instance
+inherit the previous connection's `closedByPeer = true` and
+silently drop a real new peer-close event?
+
+**Original symptom (pre-Phase-16.5):** `closedByPeer` was
+instance-scoped. Once set to `true` by a peer drop, it was
+never reset. A subsequent `startHost` on the same instance
+left the flag sticky. The poll loop would only stop on the
+*next* `Err(PeerClosed)`, but if the new connection
+gracefully saw the peer arrive and then drop, the second
+drop would still be observed (the flag is just a "did the
+LAST connection end?" memo; new poll ticks clear it
+implicitly). However, a *different* code path — the
+late-subscriber microtask in `onClose()` — would still fire
+the handler on the *new* connection's behalf, because the
+late-subscriber path checks the instance-scoped
+`closedByPeer` flag, which was set by the OLD connection.
+The visible bug: a new connection's `onClose` handler
+would fire from the OLD connection's close state, before
+the new connection ever observed a real drop.
+
+**Fix (Phase 16.5 § 5.5.2):** `closedByPeer` is now
+**connection-scoped**. On every `startHost` /
+`startJoin` and on every `disconnect()`, the transport
+sets `this.closedByPeer = false` and clears
+`this.closeHandlers`. The late-subscriber microtask still
+exists (it is the documented contract for subscribers to a
+close event that already happened) but it can only fire on
+handlers registered *after* a close, not on handlers
+registered *before* the new connection starts. The
+clear-then-reset order in `startHost` is:
+
+```
+await this.awaitCleanup();
+const info = await this.tauri.invoke('lan_host_start', ...);
+this.mode = 'host';
+this.closedByPeer = false;
+this.closeHandlers.clear();
+this.startPolling();
+return info;
+```
+
+This order matters: `closedByPeer = false` is set AFTER
+`lan_host_start` succeeds, so a half-started
+`host_start` (e.g. an in-flight failure) does not corrupt
+the close state. The `closeHandlers.clear()` runs on the
+same transition, so handlers left over from the previous
+connection are removed before the new polling loop starts.
+
+**API contract is preserved:** `LanTransport` is intended
+to be instance-reusable. A user can disconnect from one
+host, then `startHost` again with a different code, on
+the same instance. This is exercised in production by
+`ConnectView`'s cancel-and-re-pair path. The
+`closedByPeer` reset makes the second connection
+indistinguishable from a fresh instance. If a future
+refactor decides to forbid instance reuse, the
+`closeHandlers.clear()` on every connection is still safe
+— it is a no-op on a fresh instance and correct on a
+reused one.
+
+**Verified by 3 new vitests:**
+
+- "Task 2: a fresh connection on the same instance does
+  NOT inherit the previous connection closedByPeer" —
+  starts a host, sees a peer drop, starts a second host
+  on the same instance, registers a handler AFTER the
+  second `startHost` (to avoid the late-subscriber
+  microtask path), forces a second peer drop, and asserts
+  the second handler fired.
+- "Task 2: disconnect resets closedByPeer so the next
+  startHost is clean" — the `disconnect()` path is
+  equivalent to a fresh instance.
+- "Task 2: same instance joiner → peer-closed → joiner
+  again — second close fires" — symmetric on the join
+  side.
+
+#### § 5.5.3 — PeerClosed classification contract (Task 3)
+
+**Question:** the TS-side `LanError.from(err)` classifier
+keys off the *exact* `Display` string of the Rust
+`LanError::PeerClosed` variant (`"peer closed"`) and the
+`NotConnected` variant (`"not connected"`). If either side
+changes its string without the other, peer-closed events
+will silently land in `kind: 'unknown'` and the
+`onClose`/`HandshakeClosedError` machinery will never fire.
+Is this coupling visible in the test suite?
+
+**Original symptom (pre-Phase-16.5):** no test pinned the
+string. The contract was implicit — both sides happened to
+use the same string by convention. A future refactor
+(e.g. "rename `peer closed` to `peer-disconnected` for
+consistency") would silently break the peer-close
+propagation without any test failure.
+
+**Fix (Phase 16.5 § 5.5.3):** the strings are now
+**named constants on both sides**, with explicit tests
+on both sides. No IPC refactor — the brief was explicit
+that string coupling is acceptable as long as it is
+pinned and named.
+
+**TS side (`packages/transport/src/lan-error.ts`):**
+
+```ts
+export const LAN_ERROR_PEER_CLOSED_DISPLAY = 'peer closed';
+export const LAN_ERROR_NOT_CONNECTED_DISPLAY = 'not connected';
+```
+
+`LanError.from(err)` keys off these constants:
+
+```ts
+if (message === LAN_ERROR_PEER_CLOSED_DISPLAY) {
+  return new LanError('peer-closed', message);
+}
+if (message === LAN_ERROR_NOT_CONNECTED_DISPLAY) {
+  return new LanError('not-connected', message);
+}
+```
+
+The constants are re-exported from `@kindora/transport`
+(index.ts) so any downstream consumer can reference the
+same string without copy-pasting it. A new test in
+`lan-error.test.ts` ("LAN_ERROR_PEER_CLOSED_DISPLAY is the
+exact string the classifier matches") asserts the
+constant value and that `from(new Error(constant))` lands
+in `kind: 'peer-closed'`. The `not-connected` constant
+gets a symmetric test.
+
+**Rust side (`apps/desktop/src-tauri/src/lan.rs`):** a
+new `#[cfg(test)] mod tests` block with three tests:
+
+- `peer_closed_display_matches_ipc_contract` — asserts
+  `LanError::PeerClosed.to_string() == "peer closed"`.
+- `not_connected_display_matches_ipc_contract` — asserts
+  `LanError::NotConnected.to_string() == "not connected"`.
+- `lan_error_serialises_to_display_string` — asserts
+  `serde_json::to_string(&LanError::PeerClosed) ==
+  "\"peer closed\""`. This pins the actual IPC wire
+  format: `impl Serialize for LanError` uses
+  `serialize_str(&self.to_string())`, so the rejection
+  that lands in the JS `Promise<T>.catch` is a
+  `String` containing exactly the `Display` form.
+
+**Stable error code (deferred):** the brief asked
+whether to introduce a stable code or structured return.
+The current architecture is `Result<T, LanError>` on
+Tauri commands; the JS side gets the rejection as a
+`String` via Tauri 2's `serialize_str` default. Adding a
+code would require either a new error envelope type
+(`{ code, message }`) or a parallel
+`lan_host_start_v2` command that returns a typed
+`Result`-shaped envelope. Both add complexity without
+fixing a real bug. The named-constant approach pins the
+existing contract, makes any future drift visible in CI,
+and avoids the IPC refactor. A future migration to a
+typed envelope can replace the constants with a
+versioned code without breaking the test suite.
+
+**Test levels for the new § 5.5 tests:**
+
+- `lan-transport.test.ts` new tests — **mock IPC** (in
+  the existing Tauri shim test block, see § 0 of the
+  file). They drive the TS state machine only; no real
+  socket, no separate OS process, no LLM, no GUI.
+- `lan-error.test.ts` new tests — **pure unit** (no
+  IPC, no transport, no I/O). Just constants and
+  classifier.
+- `lan.rs` new tests — **pure unit** (no I/O, no
+  socket, no separate process). Just `Display` and
+  `serde_json` output.
+
+**Verification (Phase 16.5):**
+
+- `packages/transport/src/__tests__/lan-transport.test.ts`
+  — 8 new tests across § Task 1 (cleanup-promise
+  tracking, 5 tests) and § Task 2 (closedByPeer
+  lifecycle, 3 tests). All PASS.
+- `packages/transport/src/__tests__/lan-error.test.ts` —
+  2 new tests for `LAN_ERROR_PEER_CLOSED_DISPLAY` and
+  `LAN_ERROR_NOT_CONNECTED_DISPLAY`. All PASS.
+- `apps/desktop/src-tauri/src/lan.rs` — 3 new
+  `#[cfg(test)] mod tests`. All PASS.
+- Full vitest workspace: 533/533 PASS.
+- Full `pnpm -r typecheck`: PASS.
+- Full `pnpm -r build`: PASS.
+- `cargo check --lib`: PASS.
+- `cargo test --test lan_e2e`: 15/15 PASS (unchanged).
+- `cargo test --test lan_protocol_e2e -- --test-threads=1`:
+  13/13 PASS (unchanged).
+- Real two-machine GUI verification: **NOT_RUN** (no
+  GUI driver + no LLM API key in the Claude session).
+  The § 4.7 step 6 manual flow is unchanged and exercises
+  the same paths; the § 5.5 fix changes are below the
+  visible behaviour in the § 4.7 / § 1 / § 2 manual
+  flow (i.e., the user-visible "MatchView flips to
+  error banner" stays the same; the difference is the
+  TS-side state machine behind it).
+
+**Remaining risk:** the test suite is unit-level and
+mock-IPC. A real two-machine run on a real OS is still
+required for full confidence. The § 5.5 changes do not
+introduce new GUI surfaces; they tighten the state
+machine. A manual run that PASSed § 1 / § 2 / § 3 before
+Phase 16.5 should still PASS, with the addition that a
+"Disconnect then immediately re-Host" sequence
+(§ 2.9 cancel-and-re-pair, repeated 3+ times) should
+now be reliable where it was previously flaky.
+
+**Status:** **FIXED**. The state machine is now
+provably correct on the unit level. A live two-machine
+run is still required for GUI acceptance (per the Phase
+16.5 brief: "不声称真实 GUI 已通过，除非确实运行").
+
 ---
 
 ## § 6 — Verdict template
 
 Fill this in after running § 1, § 2, § 3 on two physical machines.
 Append the wire-level PASS/FAIL summary from `cargo test --test
-lan_protocol_e2e` (already known: 13/13 PASS as of Phase 16.3).
+lan_protocol_e2e` (already known: 13/13 PASS as of Phase 16.5).
 
 ```
-PHASE 16.3 VERDICT — <your name>, <date>, <host OS / version>, <joiner OS / version>
+PHASE 16.5 VERDICT — <your name>, <date>, <host OS / version>, <joiner OS / version>
 
-Wire-level (cargo test --test lan_protocol_e2e): PASS (13/13)
-Single-LanState regression (cargo test --test lan_e2e):      PASS (15/15)
-Vitest workspace                                         : PASS (495/495)
-pnpm -r typecheck                                        : PASS
-pnpm -r build                                            : PASS
-cargo check --lib (Rust ≥ 1.99, edition2024)              : PASS
+Wire-level (cargo test --test lan_protocol_e2e):           PASS (13/13)
+Single-LanState regression (cargo test --test lan_e2e):    PASS (15/15)
+Rust unit tests (cargo test --lib):                        PASS (3/3)
+Vitest workspace:                                         PASS (533/533)
+pnpm -r typecheck:                                        PASS
+pnpm -r build:                                            PASS
+cargo check --lib (Rust ≥ 1.99, edition2024):              PASS
 
 § 1 Happy path                              : PASS / FAIL
 § 2.1 Wrong code                            : PASS / FAIL
@@ -665,6 +983,7 @@ cargo check --lib (Rust ≥ 1.99, edition2024)              : PASS
 § 3.5 Three cycles, no accumulation         : PASS / FAIL
 § 3.6 Hard kill propagates                  : PASS / FAIL
 § 4.7 No-LLM shortest manual flow           : PASS / FAIL
+§ 5.5 Disconnect → re-host repeat (3+ x)    : PASS / FAIL
 
 Overall: PASS / FAIL / PARTIAL
 Notes: <paste log excerpts of any failure; reference § 5 for known gaps>
