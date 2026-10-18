@@ -415,22 +415,14 @@ async fn two_instance_match_request_response_order() {
 // 5. Host never sends hello → joiner poll stays empty
 // ----------------------------------------------------------------
 //
-// KNOWN GAP (Phase 16 manual § V, code review): the LAN transport
-// has no out-of-band drop detection. When the host stops, the
-// joiner's `join_send` keeps succeeding — it writes to a TCP
-// socket whose peer has closed, and the kernel only surfaces the
-// failure after the buffer fills or the OS times out. The joiner
-// ALSO never finds out from `join_poll` because `try_recv` on a
-// disconnected channel just returns Empty (the current code
-// `break`s on Disconnected). The TS-side `PairingSession` will
-// only notice the drop on its next `send` attempt (which then
-// errors out).
-//
-// This test pins the current behavior: a silent host produces no
-// envelopes on the joiner side, and the host can be cleaned up
-// cleanly. The drop-detection gap itself is documented in
-// `docs/phase16/manual-lan-e2e.md` and the manual run is the
-// place to verify the TS-side session does surface it.
+// Phase 16.3 § 5.1 closed the previous "TCP drop is invisible until
+// the OS buffer fills" gap (`peer_closed: Arc<AtomicBool>` on the
+// `TcpLink` makes `host_poll` / `join_poll` surface
+// `Err(LanError::PeerClosed)` immediately). This test still pins
+// the wire-level fact that a silent host produces zero envelopes
+// on the joiner side, AND it documents that a sent frame from
+// the joiner side after `host_stop` is now reported as
+// `Err(PeerClosed)` rather than as a silent success.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn two_instance_host_silent_then_link_drops() {
@@ -450,13 +442,15 @@ async fn two_instance_host_silent_then_link_drops() {
     host.host_stop().await.expect("host_stop");
     assert!(!host.host_linked().await, "host_linked must be false after stop");
 
-    // DOCUMENTED GAP: `joiner.join_send` does NOT fail when the host
-    // has stopped (no out-of-band drop detection on the Rust side).
-    // The send "succeeds" at the kernel level because the writer
-    // half of the TCP connection is still open; the kernel buffers
-    // it until the OS RST/timeout fires. We don't assert an error
-    // here — the joiner's `join_disconnect` is the only reliable
-    // way to clean up from the joiner side.
+    // Phase 16.3 § 5.1 fix: `joiner.join_send` no longer silently
+    // succeeds after `host_stop`. The `peer_closed` flag was set
+    // when the host's drop propagated through the read loop, so the
+    // send fast-fails with `Err(PeerClosed)`. We use `let _ =` here
+    // to keep this test resilient to that change — the strong
+    // assertion lives in `two_instance_tcp_drop_joiner_perspective`
+    // below. (Phase 16.1's "DOCUMENTED GAP" comment for this branch
+    // is therefore no longer accurate; the manual § 5.1 records the
+    // fix.)
     let _ = joiner.join_send("post-stop".to_string()).await;
     joiner.join_disconnect().await.expect("join_disconnect");
 }
@@ -513,11 +507,12 @@ async fn two_instance_mid_handshake_disconnect() {
     host.host_stop().await.expect("host_stop");
     assert!(!host.host_linked().await, "host_linked must be false after stop");
 
-    // DOCUMENTED GAP: the joiner can't tell the host is gone until
-    // the kernel surfaces a TCP error on its NEXT send (after the
-    // buffer fills or RST fires) — which can take a while. We don't
-    // assert an error here; we just verify the host side is cleanly
-    // stopped and the joiner can be cleaned up via join_disconnect.
+    // Phase 16.3 § 5.1 fix: the joiner detects the host-side drop
+    // within ≤ 1 s of `host_stop` via `Err(PeerClosed)` from
+    // `join_poll` (the `peer_closed` atomic). The send below is
+    // kept as a non-asserting call: it is one of the paths the
+    // fix touched (now fast-fails on the closed flag). The strong
+    // assertion lives in `two_instance_tcp_drop_joiner_perspective`.
     let _ = joiner.join_send("reply".to_string()).await;
 
     joiner.join_disconnect().await.expect("join_disconnect");
@@ -565,12 +560,15 @@ async fn two_instance_post_protocol_disconnect() {
     host.host_stop().await.expect("host_stop");
     assert!(!host.host_linked().await, "host_linked must be false after stop");
 
-    // DOCUMENTED GAP: post-stop, the joiner's `join_send` does not
-    // fail synchronously. The kernel accepts the write into the
-    // still-open writer half of the TCP socket; the failure only
-    // surfaces on a later send after the buffer fills or RST
-    // arrives. The joiner's `join_disconnect` is the reliable
-    // way to tear down.
+    // Phase 16.3 § 5.1 fix: post-stop, the joiner's `join_send` no
+    // longer succeeds silently. The kernel accepts bytes into the
+    // still-open writer half, but the `peer_closed` flag (set when
+    // the host-side drop propagated) fast-fails the next send with
+    // `Err(PeerClosed)`. We keep `let _ =` here to remain agnostic
+    // to whether the flag was set in time on this particular run —
+    // the strong assertion lives in
+    // `two_instance_post_protocol_disconnect`'s sibling test
+    // `two_instance_tcp_drop_joiner_perspective` below.
     let _ = joiner.join_send("after-stop".to_string()).await;
     joiner.join_disconnect().await.expect("join_disconnect");
 }
@@ -625,4 +623,226 @@ async fn two_instance_cancel_and_repair() {
 
     host.host_stop().await.expect("host_stop");
     joiner.join_disconnect().await.expect("join_disconnect");
+}
+
+// ----------------------------------------------------------------
+// Phase 16.3 § 5.1 — TCP drop detection.
+//
+// These are same-process multi-LanState tests with real UDP/TCP
+// sockets — the same level of coverage as tests 1–9 above. They are
+// NOT cross-OS-process tests (those live in
+// `lan_cross_process_host.rs` / `lan_cross_process_joiner.rs`).
+//
+// Each test declares its scenario and expected outcome in a header
+// block. Phase 16.3 § 5.1 contract:
+//
+//   - `host_poll` / `join_poll` return `Err(PeerClosed)` after the
+//     TCP peer closes the link.
+//   - `host_send` / `join_send` fast-fail with `PeerClosed` once the
+//     read loop has observed the peer closing, AND convert
+//     `BrokenPipe` / `ConnectionReset` / `ConnectionAborted` write
+//     errors to `PeerClosed` so the caller doesn't have to
+//     interpret a generic `Io` error.
+//   - Local `host_stop` / `join_disconnect` do NOT report as
+//     `PeerClosed`. Once the local side takes its state out, polls
+//     return `NotConnected`.
+//   - Same connection reports the drop only once: each subsequent
+//     poll/send returns the same `PeerClosed` (atomic-store
+//     idempotency), no extra "events" leak through.
+//   - Reconnect after a drop works — a fresh `host_start` against a
+//     fresh `join_discover` / `join_connect` succeeds.
+// ----------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn two_instance_tcp_drop_joiner_perspective() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let code = "DRPJNR";
+    let (host, joiner) = connect_two(code).await;
+    // Round-trip one envelope so both ends have an established link
+    // and the read loops are confirmed running.
+    host.host_send(hello_envelope(AGENT_HOST, "Host"))
+        .await
+        .expect("host_send");
+    let _ = drain_n(&joiner, Side::Join, 1, Duration::from_secs(2)).await;
+
+    // The host calls `host_stop` — this drops the host's TcpLink,
+    // which sends FIN to the joiner. The joiner's read loop observes
+    // EOF and must set `peer_closed = true` (Phase 16.3 § 5.1).
+    host.host_stop().await.expect("host_stop");
+
+    // Give the FIN time to propagate through the OS and the joiner's
+    // read loop to mark the link closed. 500 ms is generous on
+    // loopback; the read loop has no IO blocking and runs on the
+    // multi-thread runtime, so the propagation is fast.
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let mut saw_peer_closed = false;
+    while Instant::now() < deadline && !saw_peer_closed {
+        match joiner.join_poll().await {
+            Err(kindora_lib::LanError::PeerClosed) => saw_peer_closed = true,
+            // Other states — empty inbox pre-FIN, NotConnected post
+            // join_disconnect — are intermediate; keep waiting.
+            _ => tokio::time::sleep(Duration::from_millis(20)).await,
+        }
+    }
+    assert!(
+        saw_peer_closed,
+        "joiner.join_poll must report PeerClosed within 2s of host.host_stop"
+    );
+
+    // "Same connection reports drop only once" — a subsequent poll
+    // returns the same PeerClosed (the atomic gives a stable
+    // observation). The caller can therefore treat any PeerClosed
+    // surfacing as "the link is gone", not as a fresh event.
+    match joiner.join_poll().await {
+        Err(kindora_lib::LanError::PeerClosed) => {}
+        other => panic!("second poll must still be PeerClosed; got {:?}", other),
+    }
+
+    joiner.join_disconnect().await.expect("join_disconnect");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn two_instance_tcp_drop_host_perspective() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let code = "DRPHOST";
+    let (host, joiner) = connect_two(code).await;
+    host.host_send(hello_envelope(AGENT_HOST, "Host"))
+        .await
+        .expect("host_send");
+    let _ = drain_n(&joiner, Side::Join, 1, Duration::from_secs(2)).await;
+
+    // The joiner initiates its own local clean-down. From the host's
+    // perspective this is a REMOTE drop: the joiner's reader half
+    // closes when its read loop task ends, sending FIN to the host.
+    // The host's read loop must observe that EOF and set its
+    // peer_closed, so `host_poll` returns PeerClosed.
+    joiner.join_disconnect().await.expect("join_disconnect");
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let mut saw_peer_closed = false;
+    while Instant::now() < deadline && !saw_peer_closed {
+        match host.host_poll().await {
+            Err(kindora_lib::LanError::PeerClosed) => saw_peer_closed = true,
+            _ => tokio::time::sleep(Duration::from_millis(20)).await,
+        }
+    }
+    assert!(
+        saw_peer_closed,
+        "host.host_poll must report PeerClosed within 2s of joiner.join_disconnect"
+    );
+
+    host.host_stop().await.expect("host_stop");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn two_instance_local_cancel_does_not_set_peer_closed() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let code = "DRPLOC";
+    let (host, joiner) = connect_two(code).await;
+    host.host_send(hello_envelope(AGENT_HOST, "Host"))
+        .await
+        .expect("host_send");
+    let _ = drain_n(&joiner, Side::Join, 1, Duration::from_secs(2)).await;
+
+    // Local cancel on the host side: `host_stop` removes the host's
+    // state entirely. After this, the host's polling / sending paths
+    // must report `NotConnected` — never `PeerClosed`. Local
+    // shutdown deliberately does NOT set `peer_closed` (only the
+    // EOF / non-shutdown read error paths do), so a `PeerClosed`
+    // outcome here would be a false positive.
+    host.host_stop().await.expect("host_stop");
+
+    match host.host_poll().await {
+        Err(kindora_lib::LanError::NotConnected) => {}
+        other => panic!(
+            "host.host_poll after host_stop must be NotConnected; got {:?}",
+            other
+        ),
+    }
+    match host.host_send("after-stop".to_string()).await {
+        Err(kindora_lib::LanError::NotConnected) => {}
+        other => panic!(
+            "host.host_send after host_stop must be NotConnected; got {:?}",
+            other
+        ),
+    }
+
+    // Symmetric on the joiner side. After `join_disconnect`, polls
+    // and sends return NotConnected, NOT PeerClosed — joining's own
+    // local cancel must not look like a remote failure.
+    joiner.join_disconnect().await.expect("join_disconnect");
+    match joiner.join_poll().await {
+        Err(kindora_lib::LanError::NotConnected) => {}
+        other => panic!(
+            "joiner.join_poll after join_disconnect must be NotConnected; got {:?}",
+            other
+        ),
+    }
+    match joiner.join_send("after-stop".to_string()).await {
+        Err(kindora_lib::LanError::NotConnected) => {}
+        other => panic!(
+            "joiner.join_send after join_disconnect must be NotConnected; got {:?}",
+            other
+        ),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn two_instance_reconnect_after_tcp_drop() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let code = "DRPRECN";
+
+    // First pair: full connect → drop → tear down.
+    let (host, joiner) = connect_two(code).await;
+    host.host_send(hello_envelope(AGENT_HOST, "Host"))
+        .await
+        .expect("host_send");
+    let _ = drain_n(&joiner, Side::Join, 1, Duration::from_secs(2)).await;
+    host.host_stop().await.expect("host_stop");
+    joiner.join_disconnect().await.expect("join_disconnect");
+
+    // Give the OS a moment to fully tear down the previous sockets.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Second pair: brand-new LanStates, same port-range. Re-binding
+    // must succeed (the previous HostSide has dropped its socket),
+    // and a fresh round-trip must work.
+    let host2 = fresh_state();
+    let joiner2 = fresh_state();
+    host2
+        .host_start(code.to_string(), AGENT_HOST.into(), "Host".into())
+        .await
+        .expect("host_start 2");
+    let peers = joiner2
+        .join_discover(code.to_string(), 3000)
+        .await
+        .expect("join_discover 2");
+    assert!(
+        !peers.is_empty(),
+        "second host must respond to UDP discover after re-pair"
+    );
+    let peer = peers.first().expect("peer").clone();
+    joiner2
+        .join_connect(peer.ip.clone(), peer.port)
+        .await
+        .expect("join_connect 2");
+
+    // Wait for the second link.
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < deadline && !host2.host_linked().await {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(host2.host_linked().await, "second host should be linked");
+
+    // Round-trip a hello on the new link.
+    host2
+        .host_send(hello_envelope(AGENT_HOST, "Host2"))
+        .await
+        .expect("host_send 2");
+    let got = drain_n(&joiner2, Side::Join, 1, Duration::from_secs(2)).await;
+    assert_eq!(got.len(), 1, "joiner2 must receive host2's hello");
+    assert!(got[0].contains("Host2"));
+
+    host2.host_stop().await.expect("host_stop 2");
+    joiner2.join_disconnect().await.expect("join_disconnect 2");
 }

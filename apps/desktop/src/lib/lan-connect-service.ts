@@ -124,20 +124,26 @@ export function isLanAvailable(): boolean {
 /**
  * Start a LAN host pairing flow.
  *
- *  1. Create a PairingSession, transition it to 'hosting' via
- *     session.startHost(transport). The session generates the
- *     6-character code.
- *  2. Bind the LanTransport with the same code via
- *     transport.startHost(sessionCode). The Rust side now answers
- *     UDP discovery filtered by this code and listens for a TCP
- *     join.
- *  3. Poll transport.isConnected() (set by the Rust side when a
- *     joiner connects). When true, call session.notifyPeerConnected()
- *     so the FSM moves to 'connected'.
- *  4. The orchestrator can now exchange hello / profile / match
- *     envelopes — see MatchOrchestrator.start(session).
+ *  1. Generate the 6-character pairing code (single source of truth
+ *     that the session and the Rust transport share).
+ *  2. Bind the LanTransport with that code via `transport.startHost(code)`.
+ *     The Rust side now answers UDP discovery filtered by this code
+ *     and listens for a TCP join. If this step throws, the session is
+ *     NOT attached and stays in 'idle' — no half-state to clean up.
+ *  3. Drive the session to 'hosting' via `session.startHost(transport,
+ *     { seed: code })`. The session uses the same code we already
+ *     handed to the transport, and its internal `transport.connect
+ *     ({hint: code})` is now a no-op (transport.mode is 'host').
+ *  4. Poll `transport.isConnected()`. When true, call
+ *     `session.notifyPeerConnected()` so the FSM moves to
+ *     'tcp-connected' (the wire is up; the peer is not yet
+ *     authenticated).
+ *  5. The orchestrator can now exchange hello / profile / match
+ *     envelopes — see `MatchOrchestrator.start(session)`.
  *
- * Throws if the Tauri runtime is unavailable.
+ * Throws if the Tauri runtime is unavailable or if
+ * `transport.startHost` fails. On any throw before step 3, nothing
+ * has been wired up; the caller can safely retry.
  */
 export async function startLanHost(input: LanStartInput): Promise<LanHostHandle> {
   if (!isLanAvailable()) {
@@ -153,20 +159,36 @@ export async function startLanHost(input: LanStartInput): Promise<LanHostHandle>
     displayName: input.displayName,
   });
 
-  // Step 1: drive the session to 'hosting'. PairingSession.startHost
-  // calls transport.connect() which is a no-op for LanTransport in
-  // idle mode (we haven't bound the transport yet).
-  session.startHost(transport);
-  const code = session.current().code;
-  if (!code) {
-    throw new Error('startLanHost: PairingSession did not generate a pairing code.');
-  }
+  // Step 1: mint the code up-front. The session and the Rust
+  // transport share this single value; we never run two RNGs.
+  const code = generatePairingCode();
 
-  // Step 2: bind the transport with the same code so UDP discovery
-  // and the host's pairing-code display agree.
+  // Step 2: bind the transport FIRST. If this throws (port in use,
+  // Rust runtime failed, etc.) we have not touched the session, so
+  // the FSM stays in 'idle'. The error propagates to the caller.
   await transport.startHost(code);
 
-  // Step 3: poll for the peer connecting. When transport.isConnected()
+  // Step 3: drive the session. By construction the transport is in
+  // 'host' mode, so the implicit `transport.connect({hint: code})`
+  // inside `PairingSession.startHost` is a no-op — it just records
+  // the self-info on the transport side. This is the Phase 16.3 fix
+  // for the call-order bug: previously, this call happened BEFORE
+  // `transport.startHost`, which left the transport in 'idle' mode
+  // and caused a fire-and-forget joiner-style UDP discover (and in
+  // the worst case, a self-dial into 'join' mode, leaving the
+  // session in 'hosting' over a transport stuck in 'join').
+  session.startHost(transport, { seed: code });
+  if (session.current().state !== 'hosting' || session.current().code !== code) {
+    // Defensive: should never happen because `seed` is validated,
+    // but if a future refactor breaks one half of the contract, we
+    // want to know loudly rather than over a confused session.
+    await transport.disconnect().catch(() => undefined);
+    throw new Error(
+      'startLanHost: session.startHost did not produce the expected (hosting, code) state.',
+    );
+  }
+
+  // Step 4: poll for the peer connecting. When transport.isConnected()
   // flips true, transition the session to 'tcp-connected' so the
   // orchestrator can drive the `hello` exchange and lift it to
   // 'connected'.

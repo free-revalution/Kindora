@@ -128,11 +128,22 @@ export class PairingSession {
   }
 
   /**
-   * Begin hosting. Generates a fresh pairing code, transitions to
-   * `hosting`, and asks the transport to connect (idle transports
-   * fire their discovery + room-join; host transports are no-ops at
-   * this point and only become active once `transport.startHost` /
-   * `lan_transport.startHost` is called by the caller).
+   * Begin hosting. Generates a fresh pairing code (or uses a
+   * caller-provided one via `codeOptions.seed`), transitions to
+   * `hosting`, and asks the transport to connect.
+   *
+   * The caller MAY pass `codeOptions.seed` to use a pre-minted code
+   * — this is the LAN path: the Rust transport needs the code before
+   * `PairingSession` can wire up, so the service generates it
+   * independently and threads the same value into both the transport
+   * bind and the session. For idle transports, `transport.connect`
+   * inside this method runs the joiner's UDP discover and may
+   * prematurely flip the transport into `'join'` mode. The caller
+   * MUST pre-bind the transport (so its `mode` is already `'host'`
+   * or `'join'`) before invoking this method, otherwise `connect` is
+   * a real network call rather than a confirmation no-op. This is
+   * the root cause of the Phase 16.3 § 5.1 follow-up: pre-bind the
+   * transport, then call `startHost(transport, { seed: code })`.
    *
    * Returns the pairing code for the host to share with the peer
    * (typed or QR). The session does NOT transition to `connected`
@@ -140,16 +151,25 @@ export class PairingSession {
    * the wire is up and `notifyHelloReceived(peerAgentId)` once the
    * peer's `hello` envelope has been received and validated.
    */
-  startHost(transport: Transport, codeOptions: PairingCodeOptions = {}): string {
+  startHost(transport: Transport, codeOptions: PairingCodeOptions & { seed?: string } = {}): string {
     this.assertState('idle');
-    const code = generatePairingCode({
-      length: this.options.codeLength ?? codeOptions.length ?? 6,
-    });
+    const code =
+      typeof codeOptions === 'object' && codeOptions.seed !== undefined
+        ? generatePairingCode(codeOptions) // honour the seed (validates shape)
+        : generatePairingCode({
+            length: this.options.codeLength ?? codeOptions.length ?? 6,
+          });
     this.transport = transport;
     this.setState({ state: 'hosting', code, closeReason: null, peerAgentId: null });
     this.wireTransport(transport);
     // Enter the room synchronously. If a peer is already there this
     // completes the pair immediately; otherwise the host waits.
+    //
+    // Invariant: the caller MUST have pre-bound the transport (e.g.
+    // `await lanTransport.startHost(code)`) so the implicit
+    // `transport.connect({hint: code})` below is a no-op. With the
+    // transport in 'idle' mode this call would instead run the
+    // joiner's UDP discover + dial — see Phase 16.3 note above.
     void transport.connect({
       agentId: this.options.agentId,
       displayName: this.options.displayName,

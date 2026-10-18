@@ -1,5 +1,5 @@
 /**
- * Phase 16.2 — ConnectView cancel / unmount cleanup regression.
+ * Phase 16.3 — ConnectView cancel / unmount cleanup regression.
  *
  * These tests pin the § 5.2 fix in
  * `docs/phase16/manual-lan-e2e.md`. Before the fix, clicking Cancel
@@ -14,6 +14,16 @@
  *      in-flight handle in a ref + check a `mountedRef` before
  *      calling `onConnected`, and the host cleanup useEffect
  *      always disconnects whatever is in the ref.
+ *
+ * Phase 16.3 added:
+ *   3. `lan-connect-service.ts` — `startLanHost` now binds the
+ *      transport FIRST and only then drives the session, so the
+ *      implicit `transport.connect({hint: code})` inside
+ *      `PairingSession.startHost` lands on a transport that is
+ *      already in 'host' mode (where `connect` is a no-op). The
+ *      previous order caused an unhandled rejection from a
+ *      joiner-style UDP discover; tests no longer need to swallow
+ *      that rejection — they assert clean behavior directly.
  *
  * These tests verify the cleanup by:
  *   - mocking the Tauri runtime to record IPC calls
@@ -47,6 +57,7 @@ function installTauriRecorder(record: RecordedIpc[]): {
   setHostLinked: (linked: boolean) => void;
   setDiscoverResults: (peers: readonly { ip: string; port: number }[]) => void;
   setDiscoverDelayMs: (ms: number) => void;
+  setHostStartFails: (message: string | null) => void;
 } {
   const w = window as Window & {
     __TAURI_INTERNALS__?: {
@@ -56,11 +67,15 @@ function installTauriRecorder(record: RecordedIpc[]): {
   let hostLinked = false;
   let discoverResults: readonly { ip: string; port: number }[] = [];
   let discoverDelayMs = 0;
+  let hostStartFails: string | null = null;
   w.__TAURI_INTERNALS__ = {
     async invoke(cmd: string, args?: Record<string, unknown>): Promise<unknown> {
       record.push({ cmd, ...(args !== undefined ? { args } : {}) });
       switch (cmd) {
         case 'lan_host_start':
+          if (hostStartFails) {
+            throw new Error(hostStartFails);
+          }
           return { tcp_port: 52420, agent_id: 'self', display_name: 'self', code: 'TESTCD' };
         case 'lan_host_status':
           return { tcp_port: 52420, agent_id: 'self', display_name: 'self', code: 'TESTCD' };
@@ -101,6 +116,9 @@ function installTauriRecorder(record: RecordedIpc[]): {
     setDiscoverDelayMs: (ms) => {
       discoverDelayMs = ms;
     },
+    setHostStartFails: (msg) => {
+      hostStartFails = msg;
+    },
   };
 }
 
@@ -137,47 +155,24 @@ async function seedAgentAndLlm(): Promise<void> {
 /* Tests                                                                */
 /* ------------------------------------------------------------------ */
 
-describe('ConnectView cancel / unmount cleanup (Phase 16.2 § 5.2 fix)', () => {
-  // Suppress a pre-existing unhandled rejection from
-  // `startLanHost` (the order is `session.startHost(transport)`,
-  // which calls `transport.connect({hint: code})` while the
-  // transport is still in 'idle' mode — that triggers a
-  // joiner-style UDP discover in `LanTransport.connect`). The
-  // rejection is harmless for the cancel-cleanup contract we're
-  // testing here; fixing the order is out of scope for Phase 16.2.
-  // We scope the handler to this describe so it doesn't leak.
-  let swallowUnrelatedRejection: (reason: unknown) => boolean = () => false;
+describe('ConnectView cancel / unmount cleanup (Phase 16.2 § 5.2 + Phase 16.3 § 5.1 fixes)', () => {
+  // Phase 16.3: removed the `process.on('unhandledRejection')`
+  // swallow from Phase 16.2. With the `startLanHost` call-order fix,
+  // the previous joiner-style UDP discover (which fired while the
+  // transport was still in 'idle' mode) no longer happens, and any
+  // genuine future unhandled rejection MUST be visible to the test
+  // runner. Production code must not depend on test-side swallows.
+
   beforeEach(() => {
     localStorage.clear();
     cleanup();
     vi.restoreAllMocks();
     clearTauriRecorder();
-    swallowUnrelatedRejection = (reason: unknown): boolean => {
-      const msg = reason instanceof Error ? reason.message : String(reason);
-      return (
-        msg.includes('no peer on the LAN') ||
-        msg.includes("already in mode 'host'") ||
-        msg.includes("already in mode 'join'")
-      );
-    };
-    process.on('unhandledRejection', (reason) => {
-      if (swallowUnrelatedRejection(reason)) return;
-      // Re-throw so the test still fails on other unhandled rejections.
-      throw reason;
-    });
-  });
-  afterEach(() => {
-    process.removeAllListeners('unhandledRejection');
   });
 
   it('host: clicking Cancel after the LAN handle is created invokes lan_host_stop exactly once', async () => {
     const record: RecordedIpc[] = [];
-    // Pre-populate discoverResults so the host's `startHost →
-    // session.startHost → transport.connect({hint})` idle-mode
-    // discover (a pre-existing pattern, not our concern here)
-    // doesn't pollute the test with an unhandled rejection.
-    const ctrl = installTauriRecorder(record);
-    ctrl.setDiscoverResults([{ ip: '127.0.0.1', port: 52420 }]);
+    installTauriRecorder(record);
     await seedAgentAndLlm();
 
     const onConnected = vi.fn();
@@ -227,8 +222,7 @@ describe('ConnectView cancel / unmount cleanup (Phase 16.2 § 5.2 fix)', () => {
 
   it('host: unmounting ConnectView while the host is waiting invokes lan_host_stop', async () => {
     const record: RecordedIpc[] = [];
-    const ctrl = installTauriRecorder(record);
-    ctrl.setDiscoverResults([{ ip: '127.0.0.1', port: 52420 }]);
+    installTauriRecorder(record);
     await seedAgentAndLlm();
 
     const onConnected = vi.fn();
@@ -253,8 +247,7 @@ describe('ConnectView cancel / unmount cleanup (Phase 16.2 § 5.2 fix)', () => {
 
   it('host: rapid cancel-then-unmount does not double-issue lan_host_stop (idempotency)', async () => {
     const record: RecordedIpc[] = [];
-    const ctrl = installTauriRecorder(record);
-    ctrl.setDiscoverResults([{ ip: '127.0.0.1', port: 52420 }]);
+    installTauriRecorder(record);
     await seedAgentAndLlm();
 
     const onConnected = vi.fn();
@@ -538,5 +531,107 @@ describe('ConnectView cancel / unmount cleanup (Phase 16.2 § 5.2 fix)', () => {
     await Promise.all([h.disconnect('a'), h.disconnect('b'), h.disconnect('c')]);
     const disconnects = record.filter((r) => r.cmd === 'lan_join_disconnect');
     expect(disconnects.length).toBe(1);
+  });
+
+  /* -------------------------------------------------------------- */
+  /* Phase 16.3 — § 5.1 call-order fix regression.                  */
+  /* These two tests are unit-level: jsdom with a mocked Tauri IPC. */
+  /* They do NOT exercise real UDP/TCP sockets (that is what        */
+  /* `cargo test --test lan_protocol_e2e` covers, with both halves  */
+  /* running as separate OS processes via separate LanStates).      */
+  /* -------------------------------------------------------------- */
+
+  it('lan-connect-service: when lan_host_start throws, startLanHost throws and the session is NOT attached (Phase 16.3 § 5.1)', async () => {
+    const record: RecordedIpc[] = [];
+    const ctrl = installTauriRecorder(record);
+    ctrl.setHostStartFails('bind: address already in use');
+    await seedAgentAndLlm();
+
+    const { startLanHost } = await import('../../lib/lan-connect-service');
+    const profile: SocialProfile = {
+      nickname: 'Alice',
+      bio: 'hi',
+      interests: ['typescript'],
+      currentActivities: [],
+      socialIntent: ['similar_interests'],
+      conversationStyle: ['casual'],
+      boundaries: {
+        allowAgentConversation: true,
+        allowContactExchange: false,
+        allowOfflineMeeting: false,
+        allowProjectDetails: false,
+        allowCurrentActivity: true,
+      },
+    };
+
+    await expect(
+      startLanHost({
+        agentId: '11111111-1111-4111-8111-111111111111',
+        displayName: 'Alice',
+        profile,
+        agent: {
+          agentId: '11111111-1111-4111-8111-111111111111',
+          protocolVersion: '0.1',
+          displayName: 'Alice',
+          publicKey: 'fake',
+          profile,
+          capabilities: {
+            protocolVersion: '0.1',
+            supportsMatchAnalysis: true,
+            supportsIcebreaker: true,
+            supportsChatAssist: true,
+            supportsEncryption: false,
+          },
+        },
+        llm: { chat: vi.fn() } as never,
+      }),
+    ).rejects.toThrow(/bind: address already in use/);
+
+    // § 5.1 contract: the session is never touched when transport
+    // bind fails. Confirm by checking that no follow-up host IPC
+    // happened and that the pre-fix bug (joiner-style discover
+    // running on an idle transport) is gone.
+    expect(record.filter((r) => r.cmd === 'lan_host_start').length).toBe(1);
+    expect(record.some((r) => r.cmd === 'lan_host_poll')).toBe(false);
+    expect(record.some((r) => r.cmd === 'lan_host_send')).toBe(false);
+    expect(record.some((r) => r.cmd === 'lan_host_stop')).toBe(false);
+    // Pre-fix bug symptom: a joiner-style UDP discover would have
+    // fired `lan_join_discover`. Asserting it is absent pins the
+    // contract — Phase 16.3 must never emit this from the host flow.
+    expect(record.some((r) => r.cmd === 'lan_join_discover')).toBe(false);
+    expect(record.some((r) => r.cmd === 'lan_join_connect')).toBe(false);
+  });
+
+  it('host: when lan_host_start throws, the view surfaces the error and no peer connection is offered (Phase 16.3 § 5.1)', async () => {
+    const record: RecordedIpc[] = [];
+    const ctrl = installTauriRecorder(record);
+    ctrl.setHostStartFails('lan not allowed on this machine');
+    await seedAgentAndLlm();
+
+    const onConnected = vi.fn();
+    const onCancel = vi.fn();
+    const { unmount } = render(
+      <ConnectView llmReady onConnected={onConnected} onCancel={onCancel} />,
+    );
+
+    // The host panel renders an error banner with the transport's
+    // error message verbatim. This is the user-visible contract.
+    await waitFor(() => {
+      expect(screen.getByText(/lan not allowed on this machine/i)).toBeInTheDocument();
+    });
+    // Cancel is offered so the user can dismiss the failure and
+    // navigate home. Pre-condition: the user can still cancel.
+    expect(onCancel).not.toHaveBeenCalled();
+    // We must NEVER have called onConnected — the user is staring at
+    // an error screen, not a match screen.
+    expect(onConnected).not.toHaveBeenCalled();
+    // Same no-joiner-discover contract as the service-level test
+    // above. The pre-fix bug would have fired `lan_join_discover`
+    // before throwing — Phase 16.3 must not.
+    expect(record.some((r) => r.cmd === 'lan_join_discover')).toBe(false);
+
+    await act(async () => {
+      unmount();
+    });
   });
 });

@@ -49,11 +49,44 @@ function toAlphabet(value: number): string {
 export interface PairingCodeOptions {
   /** Code length in characters. Defaults to DEFAULT_PAIRING_CODE_LENGTH. */
   readonly length?: number;
+  /**
+   * Pre-generated code to return verbatim. When set, the caller has
+   * already minted the code (typically because a network resource
+   * needs the code before `PairingSession.startHost` can safely bind
+   * to it). MUST be a valid code shape (length in
+   * [MIN_PAIRING_CODE_LENGTH..MAX_PAIRING_CODE_LENGTH], alphabet
+   * characters only); the function validates and throws on shape
+   * mismatch so callers cannot inject out-of-band alphabets.
+   */
+  readonly seed?: string;
 }
 
+/**
+ * Generate (or return a seeded) pairing code.
+ *
+ * - Without `seed`: uses crypto-grade randomness.
+ * - With `seed`: validates the supplied code's shape and returns it
+ *   unchanged. The caller is responsible for uniqueness across the
+ *   pairing window; this function does NOT check.
+ *
+ * `length` is ignored when `seed` is provided — the seed's own length
+ * is used.
+ */
 export function generatePairingCode(options: PairingCodeOptions | number = {}): string {
   const length =
     typeof options === 'number' ? options : (options.length ?? DEFAULT_PAIRING_CODE_LENGTH);
+  if (typeof options !== 'number' && options.seed !== undefined) {
+    // When seeded, we still validate the shape against the alphabet
+    // so a malformed seed cannot leak into the pairing protocol. The
+    // caller's length is irrelevant — the seed decides.
+    const normalised = normalisePairingCode(options.seed);
+    if (!normalised) {
+      throw new Error(
+        `Pairing code seed has invalid shape: ${JSON.stringify(options.seed)}. Use ${MIN_PAIRING_CODE_LENGTH}-${MAX_PAIRING_CODE_LENGTH} alphabet characters.`,
+      );
+    }
+    return normalised;
+  }
   if (length < MIN_PAIRING_CODE_LENGTH || length > MAX_PAIRING_CODE_LENGTH) {
     throw new Error(
       `Pairing code length must be between ${MIN_PAIRING_CODE_LENGTH} and ${MAX_PAIRING_CODE_LENGTH} (got ${length}).`,

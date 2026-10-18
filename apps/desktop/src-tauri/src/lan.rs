@@ -25,6 +25,7 @@
 // ---------------------------------------------------------------------------
 
 use std::net::SocketAddr;
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
@@ -50,6 +51,20 @@ pub enum LanError {
     NotConnected,
     #[error("already running in mode {0}")]
     AlreadyRunning(String),
+    /// The TCP peer closed the link or otherwise disconnected
+    /// mid-stream. Distinct from `NotConnected` (which means local
+    /// never started or already fully tore down) so a single
+    /// `PeerClosed` event represents exactly one remote-side drop.
+    ///
+    /// Phase 16.3 § 5.1: previously, peer-side closes (RST, half-close
+    /// EOF, read errors) were silently swallowed by `tcp_read_loop` —
+    /// `host_poll`/`join_poll` would just return an empty inbox, and
+    /// `host_send`/`join_send` would not fail until the OS buffer
+    /// was full. The `peer_closed` atomic on `TcpLink` now lets the
+    /// polling and sending paths surface this error immediately
+    /// without depending on the OS to notice first.
+    #[error("peer closed")]
+    PeerClosed,
 }
 
 impl serde::Serialize for LanError {
@@ -98,11 +113,20 @@ pub struct HostInfo {
 /// TcpLink = the live TCP connection. Cloning `writer` is cheap (Arc);
 /// the inbox is an mpsc receiver; shutdown_tx signals the read loop to
 /// stop and close the underlying socket.
-#[allow(dead_code)]
+///
+/// Phase 16.3 § 5.1: `peer_closed` is an `Arc<AtomicBool>` shared
+/// between the `tcp_read_loop` task and the polling/sending paths.
+/// The read loop sets it on EOF / non-shutdown read errors; the poll
+/// and send paths read it to surface `Err(LanError::PeerClosed)` even
+/// before the OS buffer has noticed the disconnect. Local shutdown
+/// (the watch channel) deliberately does NOT set this flag — the
+/// poll path's "Inbox Disconnected + peer_closed=false" branch
+/// therefore means "clean local teardown", not "remote failure".
 struct TcpLink {
     writer: Arc<Mutex<tokio::net::tcp::OwnedWriteHalf>>,
     inbox: mpsc::UnboundedReceiver<String>,
     shutdown_tx: tokio::sync::watch::Sender<bool>,
+    peer_closed: Arc<AtomicBool>,
 }
 
 impl TcpLink {
@@ -114,6 +138,25 @@ impl TcpLink {
 
     fn shutdown(&self) {
         let _ = self.shutdown_tx.send(true);
+    }
+
+    /// True once the read loop has flagged that the TCP peer closed
+    /// the stream. Polling and sending paths consult this to surface
+    /// `Err(LanError::PeerClosed)` even before the OS buffer is full.
+    /// Idempotent — once set, every subsequent poll/send returns
+    /// `PeerClosed` until the link is fully torn down.
+    fn was_peer_closed(&self) -> bool {
+        self.peer_closed.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Mark the link as closed by a remote-side disconnect. Multiple
+    /// call sites use this (read loop on EOF/Err, send path on
+    /// `BrokenPipe`/`ConnectionReset`); the underlying atomic store
+    /// collapses them to a single observable state, satisfying the
+    /// "same connection reports drop only once" requirement.
+    #[allow(dead_code)]
+    fn mark_closed(&self) {
+        self.peer_closed.store(true, std::sync::atomic::Ordering::Release);
     }
 }
 
@@ -352,11 +395,26 @@ impl LanState {
         // Drain whatever's already in the inbox without awaiting —
         // poll semantics must not block. If the read loop has more in
         // flight, the next poll cycle picks it up.
+        //
+        // Phase 16.3 § 5.1: in addition to draining the inbox, we
+        // surface `Err(PeerClosed)` when the read loop has flagged a
+        // remote-side drop. Without this, the JS layer would never
+        // learn about a peer-side disconnect until the next send
+        // happened to fill the OS buffer (or never at all on idle).
         loop {
             match link.inbox.try_recv() {
                 Ok(s) => out.push(s),
                 Err(mpsc::error::TryRecvError::Empty) => break,
-                Err(mpsc::error::TryRecvError::Disconnected) => break,
+                Err(mpsc::error::TryRecvError::Disconnected) => {
+                    if link.was_peer_closed() {
+                        return Err(LanError::PeerClosed);
+                    }
+                    // In production this branch is unreachable after
+                    // `host_stop`, because `host_stop` removes the
+                    // host side before any further `host_poll` runs.
+                    // The guard is here to keep the contract clean.
+                    break;
+                }
             }
         }
         Ok(out)
@@ -381,8 +439,33 @@ impl LanState {
         let g = self.inner.lock().await;
         let h = g.host.as_ref().ok_or(LanError::NotConnected)?;
         let link = h.link.as_ref().ok_or(LanError::NotConnected)?;
+        // Phase 16.3 § 5.1: fast-fail when the read loop has
+        // already observed the peer closing the link. Otherwise, the
+        // OS may keep accepting bytes into a half-closed buffer and
+        // silently swallow them.
+        if link.was_peer_closed() {
+            return Err(LanError::PeerClosed);
+        }
         let mut w = link.writer.lock().await;
-        write_envelope(&mut *w, &msg).await?;
+        if let Err(e) = write_envelope(&mut *w, &msg).await {
+            // A write error here typically means the OS already
+            // knows the link is gone (BrokenPipe / Reset / Aborted).
+            // Record the closed state so the next poll/send also
+            // returns PeerClosed, and surface it now so the caller
+            // doesn't have to interpret a generic Io error.
+            if let LanError::Io(io) = &e {
+                if matches!(
+                    io.kind(),
+                    std::io::ErrorKind::BrokenPipe
+                        | std::io::ErrorKind::ConnectionReset
+                        | std::io::ErrorKind::ConnectionAborted
+                ) {
+                    link.mark_closed();
+                    return Err(LanError::PeerClosed);
+                }
+            }
+            return Err(e);
+        }
         Ok(())
     }
 
@@ -498,15 +581,25 @@ impl LanState {
         let (inbox_tx, inbox_rx) = mpsc::unbounded_channel::<String>();
         let (sh_tx, sh_rx) = tokio::sync::watch::channel(false);
         let writer_for_loop = writer.clone();
+        // Phase 16.3 § 5.1: TCP drop detection. One Arc is shared
+        // between the read loop (which sets it on EOF / read error)
+        // and the TcpLink itself (which the poll/send paths read).
+        let peer_closed = Arc::new(AtomicBool::new(false));
+        let peer_closed_for_loop = peer_closed.clone();
         tokio::spawn(async move {
-            let res = tcp_read_loop(reader, inbox_tx, sh_rx).await;
+            let res = tcp_read_loop(reader, inbox_tx, sh_rx, peer_closed_for_loop).await;
             if let Err(e) = res {
                 log::debug!("[lan] join read loop ended: {e}");
             }
         });
         let peer_agent_id = format!("peer@{peer_ip}:{peer_port}");
         let peer_display_name = String::new();
-        let link = TcpLink { writer: writer_for_loop, inbox: inbox_rx, shutdown_tx: sh_tx };
+        let link = TcpLink {
+            writer: writer_for_loop,
+            inbox: inbox_rx,
+            shutdown_tx: sh_tx,
+            peer_closed,
+        };
         let info = PeerInfo {
             ip: peer_ip.clone(),
             port: peer_port,
@@ -539,7 +632,19 @@ impl LanState {
             match link.inbox.try_recv() {
                 Ok(s) => out.push(s),
                 Err(mpsc::error::TryRecvError::Empty) => break,
-                Err(mpsc::error::TryRecvError::Disconnected) => break,
+                Err(mpsc::error::TryRecvError::Disconnected) => {
+                    // Phase 16.3 § 5.1: surface PeerClosed when the
+                    // read loop has flagged a remote-side drop. Same
+                    // reasoning as `host_poll` above. In production
+                    // the "Disconnected + !peer_closed" branch is
+                    // unreachable after `join_disconnect` because
+                    // that command removes the join side before any
+                    // further poll runs.
+                    if link.was_peer_closed() {
+                        return Err(LanError::PeerClosed);
+                    }
+                    break;
+                }
             }
         }
         Ok(out)
@@ -549,8 +654,25 @@ impl LanState {
         let g = self.inner.lock().await;
         let j = g.join.as_ref().ok_or(LanError::NotConnected)?;
         let link = j.link.as_ref().ok_or(LanError::NotConnected)?;
+        // Phase 16.3 § 5.1: see `host_send` above for the rationale.
+        if link.was_peer_closed() {
+            return Err(LanError::PeerClosed);
+        }
         let mut w = link.writer.lock().await;
-        write_envelope(&mut *w, &msg).await?;
+        if let Err(e) = write_envelope(&mut *w, &msg).await {
+            if let LanError::Io(io) = &e {
+                if matches!(
+                    io.kind(),
+                    std::io::ErrorKind::BrokenPipe
+                        | std::io::ErrorKind::ConnectionReset
+                        | std::io::ErrorKind::ConnectionAborted
+                ) {
+                    link.mark_closed();
+                    return Err(LanError::PeerClosed);
+                }
+            }
+            return Err(e);
+        }
         Ok(())
     }
 
@@ -604,8 +726,13 @@ async fn accept_loop(
                 let (inbox_tx, inbox_rx) = mpsc::unbounded_channel::<String>();
                 let (sh_tx, sh_rx) = tokio::sync::watch::channel(false);
                 let writer_for_loop = writer.clone();
+                // Phase 16.3 § 5.1: TCP drop detection. Same shape
+                // as `join_connect` — one Arc shared between the
+                // read loop and the TcpLink the host side holds.
+                let peer_closed = Arc::new(AtomicBool::new(false));
+                let peer_closed_for_loop = peer_closed.clone();
                 tokio::spawn(async move {
-                    let res = tcp_read_loop(reader, inbox_tx, sh_rx).await;
+                    let res = tcp_read_loop(reader, inbox_tx, sh_rx, peer_closed_for_loop).await;
                     if let Err(e) = res {
                         log::debug!("[lan] host read loop ended: {e}");
                     }
@@ -614,6 +741,7 @@ async fn accept_loop(
                     writer: writer_for_loop,
                     inbox: inbox_rx,
                     shutdown_tx: sh_tx,
+                    peer_closed,
                 };
                 // Hand the link off to the host side. This is the V0.1
                 // bug fix: previously the link went to a local mpsc
@@ -690,10 +818,17 @@ async fn tcp_read_loop(
     mut reader: tokio::net::tcp::OwnedReadHalf,
     tx: mpsc::UnboundedSender<String>,
     mut shutdown: tokio::sync::watch::Receiver<bool>,
+    peer_closed: Arc<AtomicBool>,
 ) -> Result<(), LanError> {
     let mut len_buf = [0u8; 4];
     loop {
         if *shutdown.borrow() {
+            // Phase 16.3 § 5.1: clean local shutdown — `peer_closed`
+            // is NOT set. The inbox sender `tx` is implicitly dropped
+            // at function return, which signals `Disconnected` to
+            // pollers, but they will see `was_peer_closed() == false`
+            // and treat it as a local teardown rather than a remote
+            // failure.
             break;
         }
         let read_len = match tokio::select! {
@@ -704,8 +839,19 @@ async fn tcp_read_loop(
             }
         } {
             Ok(n) => n,
-            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
-            Err(e) => return Err(LanError::Io(e)),
+            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                // Peer sent FIN — no more frames are coming.
+                // Mark the link as remotely closed so the poll/send
+                // paths can surface PeerClosed on their next call.
+                peer_closed.store(true, std::sync::atomic::Ordering::Release);
+                break;
+            }
+            Err(e) => {
+                // Read error (RST, network down, mid-body EOF as
+                // error, …) — same treatment as a graceful close.
+                peer_closed.store(true, std::sync::atomic::Ordering::Release);
+                return Err(LanError::Io(e));
+            }
         };
         let _ = read_len;
         let len = u32::from_be_bytes(len_buf) as usize;
@@ -714,10 +860,14 @@ async fn tcp_read_loop(
         }
         let mut body = vec![0u8; len];
         if let Err(e) = reader.read_exact(&mut body).await {
+            // Mid-body read failure — same flag, no half-state.
+            peer_closed.store(true, std::sync::atomic::Ordering::Release);
             return Err(LanError::Io(e));
         }
         let s = String::from_utf8(body).map_err(|e| LanError::Invalid(format!("{e}")))?;
         if tx.send(s).is_err() {
+            // The inbox was closed by the consumer (e.g. link torn
+            // down locally). This is not a peer-side failure.
             break;
         }
     }
