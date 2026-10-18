@@ -130,8 +130,29 @@ export class LanTransport implements Transport {
    *
    * Initial value is `Promise.resolve()` so the first connection
    * does not block on a non-existent cleanup.
+   *
+   * Phase 16.6: `cleanupPromise` is now a **chain** of cleanups,
+   * not a single slot. `chainCleanup(atMode)` appends a new
+   * cleanup onto the chain via `.then()`, so concurrent
+   * `disconnect()` calls (or `disconnect()` racing
+   * `handlePeerClosed`) are serialized: the second's `host_stop`
+   * never lands on the Rust side before the first has resolved.
    */
   private cleanupPromise: Promise<void> = Promise.resolve();
+  /**
+   * Phase 16.6: monotonic connection generation. Incremented on
+   * every peer-close AND on every new connection's reservation.
+   * The `onClose` late-subscriber microtask captures the
+   * generation at the time it is scheduled; if a new connection
+   * arrives before the microtask runs, the captured generation is
+   * stale and the microtask is a no-op. Without this, a handler
+   * registered AFTER a peer-close but BEFORE the next
+   * `startHost` could fire spuriously during the `await
+   * awaitCleanup()` window (the flag `closedByPeer` is still
+   * `true` because the new `startHost` hasn't reached its reset
+   * yet).
+   */
+  private generation = 0;
 
   constructor(opts: LanTransportOptions) {
     this.opts = opts;
@@ -155,25 +176,61 @@ export class LanTransport implements Transport {
    * side and either hit `AlreadyRunning` (if the old host is
    * still in the state) or bind a fresh listener on top of a
    * half-torn-down one.
+   *
+   * Phase 16.6: reserves `mode = 'host'` SYNCHRONOUSLY at the
+   * top of the function so a concurrent `startHost` / `startJoin`
+   * (called in the same tick) sees `mode !== 'idle'` and throws
+   * immediately. Pre-Phase-16.6, both concurrent calls passed the
+   * `if (this.mode !== 'idle')` check because neither had yet
+   * awaited through to set `mode = 'host'`, and the loser of the
+   * Rust-side `host_start` race still mutated the JS state. On
+   * IPC failure, the reservation is rolled back to `'idle'`.
    */
   async startHost(code: string): Promise<LanHostInfo> {
     if (this.mode !== 'idle') {
       throw new Error(`LanTransport already in mode '${this.mode}'`);
     }
-    await this.awaitCleanup();
-    const info = await this.tauri.invoke<LanHostInfo>('lan_host_start', {
-      code,
-      agentId: this.opts.selfAgentId,
-      displayName: this.opts.selfDisplayName,
-    });
+    // Phase 16.6: reserve the mode slot synchronously.
     this.mode = 'host';
-    // Phase 16.5: reset the peer-closed flag and handler set on
-    // every fresh connection. See Task 2 — a previous connection's
-    // `closedByPeer = true` must not silence onClose for this one.
-    this.closedByPeer = false;
-    this.closeHandlers.clear();
-    this.startPolling();
-    return info;
+    // Invalidate any late-subscriber microtask from the previous
+    // connection. (See `onClose` late-subscriber path and the
+    // `generation` field.)
+    this.generation += 1;
+    try {
+      await this.awaitCleanup();
+      const info = await this.tauri.invoke<LanHostInfo>('lan_host_start', {
+        code,
+        agentId: this.opts.selfAgentId,
+        displayName: this.opts.selfDisplayName,
+      });
+      // Phase 16.6: if a concurrent `disconnect()` (or
+      // `handlePeerClosed`) reset `mode` to `'idle'` while we
+      // were awaiting, the host we just bound is no longer
+      // wanted. Tear it down on the Rust side and throw so the
+      // caller does not see a successful `startHost` against a
+      // transport that has already been told to disconnect.
+      if (this.mode !== 'host') {
+        try {
+          await this.tauri.invoke('lan_host_stop');
+        } catch {
+          // best-effort — the Rust side will surface any
+          // genuine error on the next operation
+        }
+        throw new Error('LanTransport disconnected during startHost');
+      }
+      // Phase 16.5: reset the peer-closed flag and handler set on
+      // every fresh connection. See Task 2 — a previous connection's
+      // `closedByPeer = true` must not silence onClose for this one.
+      this.closedByPeer = false;
+      this.closeHandlers.clear();
+      this.startPolling();
+      return info;
+    } catch (e) {
+      // Phase 16.6: roll back the reservation on failure so a
+      // subsequent `startHost` can proceed.
+      this.mode = 'idle';
+      throw e;
+    }
   }
 
   /**
@@ -191,27 +248,50 @@ export class LanTransport implements Transport {
    * Start in joiner mode by connecting to a discovered peer.
    *
    * Phase 16.5: same cleanup-promise guarantee as `startHost`.
+   *
+   * Phase 16.6: same synchronous mode-reservation + generation
+   * bump + IPC-failure-rollback contract as `startHost`.
    */
   async startJoin(peer: LanJoinPeer): Promise<void> {
     if (this.mode !== 'idle') {
       throw new Error(`LanTransport already in mode '${this.mode}'`);
     }
-    await this.awaitCleanup();
-    const info = await this.tauri.invoke<LanJoinPeer>('lan_join_connect', {
-      peerIp: peer.ip,
-      peerPort: peer.port,
-    });
-    this.peer = {
-      agentId: info.agent_id || peer.agent_id,
-      displayName: info.display_name || peer.display_name,
-      hint: `${peer.ip}:${peer.port}`,
-    };
+    // Phase 16.6: reserve the mode slot synchronously.
     this.mode = 'join';
-    // Phase 16.5: reset the peer-closed flag and handler set on
-    // every fresh connection.
-    this.closedByPeer = false;
-    this.closeHandlers.clear();
-    this.startPolling();
+    this.generation += 1;
+    try {
+      await this.awaitCleanup();
+      const info = await this.tauri.invoke<LanJoinPeer>('lan_join_connect', {
+        peerIp: peer.ip,
+        peerPort: peer.port,
+      });
+      // Phase 16.6: same post-IPC rollback as `startHost` — if
+      // a concurrent `disconnect()` reset the mode, tear down
+      // the connection we just made.
+      if (this.mode !== 'join') {
+        try {
+          await this.tauri.invoke('lan_join_disconnect');
+        } catch {
+          // best-effort
+        }
+        throw new Error('LanTransport disconnected during startJoin');
+      }
+      this.peer = {
+        agentId: info.agent_id || peer.agent_id,
+        displayName: info.display_name || peer.display_name,
+        hint: `${peer.ip}:${peer.port}`,
+      };
+      // Phase 16.5: reset the peer-closed flag and handler set on
+      // every fresh connection.
+      this.closedByPeer = false;
+      this.closeHandlers.clear();
+      this.startPolling();
+    } catch (e) {
+      // Phase 16.6: roll back the reservation on failure.
+      this.mode = 'idle';
+      this.peer = null;
+      throw e;
+    }
   }
 
   /** True once a peer is connected (host: a joiner arrived; join: connect succeeded). */
@@ -326,9 +406,19 @@ export class LanTransport implements Transport {
     // safer than calling it synchronously inside `onClose` because
     // the caller's `onClose` call may not have set up its own state
     // yet.
+    //
+    // Phase 16.6: capture the current `generation` so the
+    // microtask is invalidated if a new connection arrives
+    // (startHost / startJoin / disconnect → startHost) before the
+    // microtask runs. Without this, a handler registered in the
+    // narrow window between `handlePeerClosed` and the next
+    // `startHost`'s `closedByPeer = false` reset would fire from
+    // the OLD connection's close state, masquerading as a real
+    // event on the new connection.
     if (this.closedByPeer) {
+      const myGen = this.generation;
       queueMicrotask(() => {
-        if (this.closedByPeer) {
+        if (this.closedByPeer && this.generation === myGen) {
           try {
             handler();
           } catch (e) {
@@ -354,13 +444,21 @@ export class LanTransport implements Transport {
       // re-introduces the race we are trying to eliminate).
       await this.cleanupPromise;
     } else {
-      // Phase 16.5: capture the mode at the time of the call
-      // because `runRustCleanup` reads it synchronously, but
-      // `this.mode` may be reset later in this method.
+      // Phase 16.6: chain the cleanup onto the existing
+      // `cleanupPromise` rather than overwriting it. If a second
+      // `disconnect()` (or a `disconnect()` racing
+      // `handlePeerClosed`) is in flight, its `host_stop` will
+      // wait for ours to resolve, instead of issuing a parallel
+      // one that races the first on the Rust side.
       const cleanupMode = this.mode;
-      this.cleanupPromise = this.runRustCleanup(cleanupMode);
+      this.cleanupPromise = this.chainCleanup(cleanupMode);
       await this.cleanupPromise;
     }
+    // Phase 16.6: stop polling again in case a concurrent
+    // `startHost` set up a poll timer during the await above
+    // (startHost's `startPolling` runs after the IPC succeeds,
+    // and the IPC can land after our initial `stopPolling`).
+    this.stopPolling();
     this.mode = 'idle';
     this.peer = null;
     // Phase 16.5: reset the peer-closed flag and handler set on
@@ -421,6 +519,31 @@ export class LanTransport implements Transport {
   }
 
   /**
+   * Phase 16.6: chain a cleanup onto the existing
+   * `cleanupPromise` instead of overwriting it. Returns a new
+   * promise that resolves once the previous cleanup has resolved
+   * AND this cleanup has resolved. Because `runRustCleanup`
+   * returns a never-rejecting promise, the chain is itself
+   * never-rejecting (any `host_stop` failure is swallowed and
+   * surfaced via the next `host_start` / `join_connect` if the
+   * Rust state is actually broken).
+   *
+   * This serializes concurrent `disconnect()` calls and
+   * `disconnect()` racing `handlePeerClosed`: the second cleanup
+   * waits for the first to resolve on the Rust side before its
+   * own `host_stop` / `join_disconnect` is issued. Without this,
+   * the second cleanup's `host_stop` could land on the Rust side
+   * while the first is still mid-flight, and a subsequent
+   * `startHost` would race the first `host_stop` even though
+   * `cleanupPromise` had already resolved.
+   */
+  private chainCleanup(atMode: Mode): Promise<void> {
+    const next = this.cleanupPromise.then(() => this.runRustCleanup(atMode));
+    this.cleanupPromise = next;
+    return next;
+  }
+
+  /**
    * Phase 16.5: wait for any in-flight Rust-side cleanup to
    * complete. Called by `startHost` / `startJoin` so a re-bind
    * never races the in-flight `host_stop` / `join_disconnect`
@@ -451,6 +574,16 @@ export class LanTransport implements Transport {
   private handlePeerClosed(): void {
     if (this.closedByPeer) return;
     this.closedByPeer = true;
+    // Phase 16.6: bump the generation BEFORE firing handlers.
+    // Any late-subscriber microtask scheduled by `onClose`
+    // (because `closedByPeer` is now true) will capture this
+    // generation; if `startHost` / `startJoin` / `disconnect`
+    // bump it again before the microtask runs, the microtask
+    // becomes a no-op. This prevents a handler registered in
+    // the narrow window between this peer-close and the next
+    // connection's `closedByPeer = false` reset from firing
+    // spuriously on the new connection.
+    this.generation += 1;
     this.stopPolling();
     // Snapshot the handler set so a handler that registers a new
     // handler doesn't get a recursive call.
@@ -479,7 +612,14 @@ export class LanTransport implements Transport {
     // `join_connect` will surface the actual Rust state via its
     // own error if the cleanup truly left the Rust side in a
     // bad place (e.g. `AlreadyRunning`).
-    this.cleanupPromise = this.runRustCleanup(cleanupMode);
+    //
+    // Phase 16.6: use `chainCleanup` instead of
+    // `runRustCleanup` directly, so a concurrent `disconnect()`
+    // serializes after this one. The previous behaviour
+    // overwrote `cleanupPromise` and could let a parallel
+    // `disconnect()` dispatch a second `host_stop` while the
+    // first was still in flight.
+    this.cleanupPromise = this.chainCleanup(cleanupMode);
   }
 
   private async pollOnce(): Promise<void> {

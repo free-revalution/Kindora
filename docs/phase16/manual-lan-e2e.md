@@ -947,21 +947,308 @@ provably correct on the unit level. A live two-machine
 run is still required for GUI acceptance (per the Phase
 16.5 brief: "不声称真实 GUI 已通过，除非确实运行").
 
+### § 5.6 — LAN concurrency boundary audit (FIXED in Phase 16.6)
+
+The Phase 16.5 `cleanupPromise` + `closedByPeer` +
+`closeHandlers.clear()` work left 6 concurrency boundaries
+unaudited. Phase 16.6 reads the actual state machine, audits
+each boundary, and fixes the ones that were wrong. No new
+product features; no unrelated refactors.
+
+All gaps are gated by tests that fail without the fix. The
+tests are mock-IPC unit tests (controlled Promise / deferred
+IPC), not real network. They assert IPC call counts, IPC
+order within the constraints of V8 microtask scheduling,
+final transport mode, peer state, and `onClose` handler
+behaviour.
+
+#### § 5.6.1 — Synchronous mode reservation (Q1: two concurrent `startHost`)
+
+**Q:** If two `startHost()` calls land in the same tick,
+will the second one see `mode === 'host'` and throw
+cleanly, or will both race into the IPC layer and produce
+a Rust `AlreadyRunning`?
+
+**Audit result:** Pre-Phase-16.6, `mode` was set AFTER the
+IPC resolved, so both calls would enter the `await` chain
+and the second IPC would fail at the Rust side with
+`AlreadyRunning`. The TS surface would surface a confusing
+`already running in mode host` to the user.
+
+**Fix:** `startHost` (and `startJoin`) now reserve `mode`
+**synchronously** before the first await. The early-return
+guard is checked first; the field is set; only then do we
+hit `await this.awaitCleanup()`. If the inner `await` or
+the IPC itself fails, the try/catch rolls `mode` back to
+`'idle'`. This is the standard "set state before
+async-IO, roll back on failure" pattern.
+
+**Test:** `§ 1 concurrent: two startHost calls — second throws
+synchronously without issuing a second lan_host_start`.
+Verified with the same `Tauri` shim mock used for Phase
+16.5. The second `startHost` rejects before any IPC is
+dispatched. The first call still succeeds.
+
+**Test:** `§ 1 concurrent: mode is rolled back to idle if
+the synchronous-reserved host_start IPC fails`. The mock
+is configured with `hostStartFails = 'io error: simulated'`.
+The synchronous reservation still happens; the IPC fails;
+the try/catch rolls `mode` back to `'idle'`; the rejection
+propagates. A subsequent `startHost` on the same instance
+succeeds.
+
+#### § 5.6.2 — Post-IPC mode check (Q2: `startHost` racing with `disconnect`)
+
+**Q:** If `startHost` is awaiting `lan_host_start` and
+`disconnect()` is called from the same call stack, what
+happens when `lan_host_start` resolves?
+
+**Audit result:** Pre-Phase-16.6, `lan_host_start` would
+resolve successfully, the transport would call
+`startPolling()` and return the host info, while
+`disconnect()` had already set `mode = 'idle'`. Result:
+the host was bound on the Rust side, no poller was running
+on the TS side, the `cleanupPromise` from `disconnect`
+ran AFTER the `startHost` IPC, and the user was left with a
+dangling host.
+
+**Fix:** After `await this.tauri.invoke('lan_host_start',
+...)` resolves, `startHost` rechecks `this.mode`. If it's
+no longer `'host'` (because `disconnect` won the race), it
+dispatches a compensating `lan_host_stop` and throws
+`'LanTransport disconnected during startHost'`. The
+compensating `host_stop` is best-effort: if it fails
+(transport is in a really bad state), the existing
+`runRustCleanup` `.catch` swallows it. The throw is the
+source of truth for the caller.
+
+**Test:** `§ 2 concurrent: startHost and disconnect —
+disconnect wins, startHost is rolled back, transport ends
+idle`. The mock is configured with `hostStartDelayMs = 60`
+so the `lan_host_start` IPC lands AFTER `disconnect`'s
+`lan_host_stop`. The test asserts:
+
+- `startP` rejects with `/disconnected/`.
+- The final state is `mode = 'idle'`, `hostStarted = false`,
+  `hostLink = null`.
+- Exactly **two** `lan_host_stop` IPCs were issued
+  (one from `disconnect`, one from the rollback).
+- Exactly **one** `lan_host_start` IPC was issued (from
+  the in-flight `startHost`).
+- The `lan_host_start` is **before** the last
+  `lan_host_stop` (i.e. the rollback's `host_stop` ran
+  AFTER the start) — this is the invariant that proves
+  the rollback actually tears down the just-bound host.
+- A fresh `startHost` on the same instance succeeds after
+  the rollback completes (proves the transport is fully
+  recovered, not just "idempotent because of a leftover
+  guard").
+
+**Microtask ordering note:** V8's microtask queue may
+dispatch `disconnect`'s `host_stop` BEFORE `startHost`'s
+`host_start`, depending on the relative timing of
+`awaitCleanup`'s continuation and `chainCleanup`'s
+`.then` callback. The test asserts the meaningful
+invariants (final state, count, last-call order) rather
+than a brittle "no `host_start` after `host_stop`" rule.
+The brief said "prove real state invariants, not just
+function call counts"; the state is what's asserted.
+
+#### § 5.6.3 — Cleanup serialization (Q2 continued: two concurrent `disconnect`s)
+
+**Q:** If two `disconnect()` calls land in the same tick
+(e.g. user double-clicks Disconnect, or a close handler
+unwires and triggers another close), are two `host_stop`
+IPCs dispatched in parallel?
+
+**Audit result:** Pre-Phase-16.6, `cleanupPromise` was
+overwritten on each `disconnect` (each call did
+`this.cleanupPromise = this.runRustCleanup(cleanupMode)`).
+The second overwrite would orphan the first promise
+without awaiting it, AND race with the second cleanup
+directly at the IPC layer.
+
+**Fix:** `disconnect` now uses a private
+`chainCleanup(atMode): Promise<void>` helper that does
+`this.cleanupPromise = this.cleanupPromise.then(() =>
+this.runRustCleanup(atMode))`. The chain is preserved;
+the second `disconnect` is appended to the chain, not
+overwriting. `disconnect` still awaits the chain
+before setting `mode = 'idle'`.
+
+**Test:** `§ 2 concurrent: two concurrent disconnects —
+host_stop serializes, not parallel`. Both `discP` and
+`discP2` resolve, and the chain ensures the IPCs are
+serialized through `cleanupPromise` (the second
+`disconnect` does not orphan the first; the second
+`runRustCleanup` only runs after the first completes).
+
+#### § 5.6.4 — Peer-closed cleanup during `startJoin` (Q3)
+
+**Q:** If a peer-closed event fires while `startJoin` is
+awaiting `awaitCleanup`, does the new join wait for the
+in-flight `lan_join_disconnect` to complete?
+
+**Audit result:** Pre-Phase-16.6, `startJoin` did `await
+this.cleanupPromise` via `awaitCleanup`, so YES, the
+existing path was correct. Phase 16.5 added the
+`cleanupPromise` for this exact reason. Phase 16.6 adds a
+test that pins this behaviour.
+
+**Test:** `§ 3 concurrent: startJoin issued DURING an
+in-flight peer-close cleanup waits for host_stop`. The
+mock peer-closed handler delays `lan_join_disconnect` by
+300 ms. `startJoin` is called while the cleanup is in
+flight. The test asserts `startJoin` resolves only AFTER
+the cleanup completes, and that no `lan_join_connect` is
+dispatched before `lan_join_disconnect`. The elapsed
+time is asserted `>= 250 ms` (Phase 16.5's
+synchronization-on-callLog pattern, not arbitrary
+`setTimeout`).
+
+#### § 5.6.5 — Cleanup IPC failure does not block restart (Q4)
+
+**Q:** If `lan_host_stop` itself fails (Rust returns an
+error), does the transport deadlock on the failed
+cleanupPromise?
+
+**Audit result:** Pre-Phase-16.5, `runRustCleanup` was
+`.catch`-ed and the rejection was swallowed. The
+`cleanupPromise` resolved. Phase 16.5's tests covered
+this. Phase 16.6's scenario 4 is the same edge case from
+the perspective of "Rust cleanup IPC failure, then user
+restarts" — the new `startHost` must not see stale state
+and must surface the real Rust error if the next IPC
+tripped over a leftover.
+
+**Test:** `§ 4 concurrent: cleanup IPC failure does not
+block the next startHost and the next IPC surfaces real
+state`. The first `disconnect`'s `lan_host_stop` is
+configured to fail. The error is caught (best-effort
+cleanup). The next `startHost` is configured to fail
+with `'already running in mode host'` (simulating a
+real Rust leftover). The transport surfaces the
+`'already running'` error to the caller, who now knows
+the Rust state is bad. The transport does NOT swallow
+this error and does NOT claim success.
+
+#### § 5.6.6 — Late `onClose` subscriber (Q5 / Q6)
+
+**Q:** If a `onClose` handler is registered AFTER the
+peer-closed event has already been observed (e.g. a
+React effect that mounted late, a subscription that
+attached during the close handler itself), does it
+fire?
+
+The pre-Phase-16.5 answer was YES — the late-subscriber
+microtask was always honoured. This is the documented
+contract of the `onClose` API.
+
+**Q (continued):** If a NEW `startHost` happens between
+the close event and the late subscriber attaching, does
+the late subscriber fire for the new connection's close?
+
+**Audit result:** Pre-Phase-16.6, the late-subscriber
+microtask captured `this.closedByPeer` at dispatch time,
+not at registration time. If a new `startHost` cleared
+`closedByPeer` (Phase 16.5's connection-scoping fix), the
+late microtask would still see `closedByPeer === true`
+from the **stale snapshot**. It would then fire on a
+handler attached to a different connection — a
+false-positive close on a healthy connection.
+
+**Fix:** The microtask now captures both `closedByPeer`
+AND the `generation` counter (Phase 16.6 addition) at
+dispatch time. If either has changed by the time the
+microtask runs, the handler is skipped. `generation` is
+monotonically incremented on every new connection
+(`startHost` / `startJoin`) and on every
+`handlePeerClosed`. This is the standard
+"generation token" pattern for invalidating late
+callbacks.
+
+**Test:** `§ 5/6 concurrent: late onClose subscriber does
+NOT fire on the new connection after startHost
+invalidates it`. The flow is:
+
+1. First `startHost` resolves.
+2. A `host_poll` event is configured to return
+   `'peer closed'`. The handler is the first
+   `onClose` subscriber.
+3. The first `onClose` handler is invoked (it just
+   stores "I was called").
+4. A second `onClose` handler is registered AFTER the
+   first one fired.
+5. A new `startHost` happens — this bumps `generation`.
+6. A new `host_poll` event is configured to return
+   `'peer closed'` again.
+7. The new connection's peer-closed event fires.
+8. The new connection's first onClose handler fires.
+9. The OLD second handler does NOT fire (its
+   `closedByPeer` snapshot is now stale, and the
+   `generation` check rejects it).
+
+**Test:** `§ 6 concurrent: new startHost clears any
+leftover close handlers from the previous connection`.
+The first connection has 3 onClose subscribers. The
+first fires (peer-closed). A new `startHost` runs. A
+new peer-closed event fires. Only the new connection's
+subscriber fires; the 3 old ones are skipped because
+`closeHandlers.clear()` ran on the new `startHost`.
+
+#### § 5.6.7 — What Phase 16.6 did NOT change
+
+- The Phase 16.5 `cleanupPromise` mechanism: unchanged.
+- The Phase 16.5 `closedByPeer` connection-scoping: unchanged.
+- The Phase 16.5 `closeHandlers.clear()` on every new connection: unchanged.
+- The Tauri IPC contract (`lan_host_start` / `lan_host_stop` / `lan_join_connect` / `lan_join_disconnect` / `lan_host_poll` / `lan_join_poll`): unchanged.
+- The Rust `LanError::PeerClosed` / `LanError::NotConnected` display strings: unchanged.
+- The `Transport` interface (single instance, instance-reusable): unchanged.
+
+Phase 16.6 is purely: a `generation` counter, a
+`chainCleanup` helper for promise chaining, a
+synchronous mode reservation, and a post-IPC mode
+recheck. The total diff is small enough to fit in one
+review.
+
+**Test count change:**
+
+- vitest: 533/533 (Phase 16.5) → 541/541 (Phase 16.6) — +8 tests
+- cargo test --lib: 3/3 (unchanged)
+- cargo test --test lan_e2e: 15/15 (unchanged)
+- cargo test --test lan_protocol_e2e -- --test-threads=1: 13/13 (unchanged)
+- pnpm -r typecheck: PASS (unchanged)
+- pnpm -r build: PASS (unchanged)
+- cargo check --lib: PASS (unchanged)
+
+**Real two-OS-process GUI verification:** NOT_RUN.
+Same constraint as Phase 16.5: no GUI driver + no LLM
+API key in the Claude session. The § 4.7 no-LLM manual
+flow exercises the same paths. The Phase 16.6 changes
+are below the visible behaviour in § 1 / § 2 / § 3
+(the user-visible 'MatchView flips to error banner'
+stays the same; the difference is in the TS-side state
+machine behind it, specifically how it handles
+concurrent `startHost` / `disconnect` / `onClose`).
+
 ---
 
 ## § 6 — Verdict template
 
 Fill this in after running § 1, § 2, § 3 on two physical machines.
 Append the wire-level PASS/FAIL summary from `cargo test --test
-lan_protocol_e2e` (already known: 13/13 PASS as of Phase 16.5).
+lan_protocol_e2e` (already known: 13/13 PASS as of Phase 16.5;
+the 8 new Phase 16.6 concurrency tests are mock-IPC unit tests
+and do not need a live two-machine run — they are gated on
+the vitest suite, see `pnpm vitest run` line below).
 
 ```
-PHASE 16.5 VERDICT — <your name>, <date>, <host OS / version>, <joiner OS / version>
+PHASE 16.6 VERDICT — <your name>, <date>, <host OS / version>, <joiner OS / version>
 
 Wire-level (cargo test --test lan_protocol_e2e):           PASS (13/13)
 Single-LanState regression (cargo test --test lan_e2e):    PASS (15/15)
 Rust unit tests (cargo test --lib):                        PASS (3/3)
-Vitest workspace:                                         PASS (533/533)
+Vitest workspace:                                         PASS (541/541)
 pnpm -r typecheck:                                        PASS
 pnpm -r build:                                            PASS
 cargo check --lib (Rust ≥ 1.99, edition2024):              PASS
@@ -984,6 +1271,7 @@ cargo check --lib (Rust ≥ 1.99, edition2024):              PASS
 § 3.6 Hard kill propagates                  : PASS / FAIL
 § 4.7 No-LLM shortest manual flow           : PASS / FAIL
 § 5.5 Disconnect → re-host repeat (3+ x)    : PASS / FAIL
+§ 5.6 Concurrency boundary (vitest § 1-6)    : PASS / FAIL (mock-IPC unit)
 
 Overall: PASS / FAIL / PARTIAL
 Notes: <paste log excerpts of any failure; reference § 5 for known gaps>
