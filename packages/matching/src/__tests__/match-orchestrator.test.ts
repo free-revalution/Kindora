@@ -337,6 +337,8 @@ describe('@kindora/matching — MatchOrchestrator', () => {
     class RawPair {
       readonly handlers: Set<(m: KsaMessage) => void> = new Set();
       private peer: RawPair | null = null;
+      private closeHandlers: Set<() => void> = new Set();
+      private closedByPeer = false;
 
       static pair(a: RawPair, b: RawPair): void {
         a.peer = b;
@@ -355,15 +357,61 @@ describe('@kindora/matching — MatchOrchestrator', () => {
           this.handlers.delete(handler);
         };
       }
+      /**
+       * Phase 16.4: peer-close hook. By default never fires. Tests
+       * that need to simulate a peer-side drop call
+       * `simulatePeerClose()` directly.
+       */
+      onClose(handler: () => void): () => void {
+        this.closeHandlers.add(handler);
+        if (this.closedByPeer) {
+          queueMicrotask(() => {
+            if (this.closedByPeer) {
+              try {
+                handler();
+              } catch {
+                // ignore — mirroring LanTransport's per-handler try/catch
+              }
+            }
+          });
+        }
+        return () => {
+          this.closeHandlers.delete(handler);
+        };
+      }
       async disconnect(): Promise<void> {
         if (this.peer) {
           this.peer.peer = null;
           this.peer = null;
         }
+        // Local disconnect does NOT fire onClose (mirrors LanTransport).
+        this.closeHandlers.clear();
       }
       /** Test-only: simulate an inbound message from the peer. */
       injectFromPeer(message: KsaMessage): void {
         for (const h of this.handlers) h(message);
+      }
+      /**
+       * Phase 16.4: simulate a remote-side drop. Fires every
+       * registered close handler once, mirrors LanTransport's
+       * idempotency + best-effort teardown.
+       */
+      simulatePeerClose(): void {
+        if (this.closedByPeer) return;
+        this.closedByPeer = true;
+        const handlers = Array.from(this.closeHandlers);
+        for (const h of handlers) {
+          try {
+            h();
+          } catch {
+            // ignore
+          }
+        }
+        this.peer = null;
+      }
+      /** Test-only: query the closed-by-peer flag. */
+      wasClosedByPeer(): boolean {
+        return this.closedByPeer;
       }
     }
 
@@ -595,6 +643,130 @@ describe('@kindora/matching — MatchOrchestrator', () => {
 
       await expect(startPromise).rejects.toBeInstanceOf(HandshakeClosedError);
       expect(sessionA.current().state).toBe('closed');
+    });
+
+    // ---- Phase 16.4: peer-close is distinct from user-cancel / generic timeout ----
+
+    it('throws HandshakeClosedError with "peer closed" message when transport fires onClose mid-wait', async () => {
+      // Build a tcp-connected pair with explicit transport access.
+      const sessionA = new PairingSession({ agentId: ID_A, displayName: 'Alice' });
+      const transportA = new RawPair();
+      sessionA.startHost(transportA);
+      sessionA.notifyTransportConnected();
+      let llmCalled = false;
+      const llmA: LLMProvider = {
+        async chat() {
+          llmCalled = true;
+          return { content: JSON.stringify(cannedAnalysis()), model: 'stub' };
+        },
+      };
+      const selfA = await makeSelf(ID_A, 'Alice', llmA);
+      const orch = new MatchOrchestrator(selfToDeps(selfA), ID_B, {
+        // Long enough that the peer-close path triggers FIRST.
+        // If the close path didn't fire, this test would still
+        // pass (the orchestrator times out with
+        // HandshakeTimeoutError), so we additionally assert that
+        // the error is NOT a timeout.
+        helloTimeoutMs: 5000,
+      });
+
+      // Attach the catch handler IMMEDIATELY so vitest's unhandled
+      // rejection tracker doesn't fire before the test asserts.
+      const settled: { value: unknown; error: unknown } = { value: undefined, error: undefined };
+      const startPromise = orch.start(sessionA).then(
+        (v) => {
+          settled.value = v;
+        },
+        (e: unknown) => {
+          settled.error = e;
+        },
+      );
+      // Give the orchestrator a moment to enter the hello wait.
+      await new Promise((r) => setTimeout(r, 20));
+      // Simulate the peer's TCP link dropping.
+      transportA.simulatePeerClose();
+      // Let the close handler run.
+      await new Promise((r) => setTimeout(r, 20));
+      await startPromise;
+
+      expect(settled.error).toBeInstanceOf(HandshakeClosedError);
+      // Phase 16.4: the message specifically mentions the peer
+      // closing, not a generic "session closed" or "timed out".
+      expect((settled.error as Error).message).toMatch(/peer closed/i);
+      expect(settled.error).not.toBeInstanceOf(HandshakeTimeoutError);
+      // LLM must NOT be called — the handshake never completed.
+      expect(llmCalled).toBe(false);
+      // Session is closed with the right reason.
+      expect(sessionA.current().state).toBe('closed');
+      expect(sessionA.current().closeReason).toBe('peer-closed');
+    });
+
+    it('does NOT classify a peer-close as a HandshakeTimeoutError', async () => {
+      const sessionA = new PairingSession({ agentId: ID_A, displayName: 'Alice' });
+      const transportA = new RawPair();
+      sessionA.startHost(transportA);
+      sessionA.notifyTransportConnected();
+      const llmA: LLMProvider = {
+        async chat() {
+          throw new Error('LLM must NOT be called');
+        },
+      };
+      const selfA = await makeSelf(ID_A, 'Alice', llmA);
+      const orch = new MatchOrchestrator(selfToDeps(selfA), ID_B, {
+        helloTimeoutMs: 5000,
+      });
+
+      const settled: { error: unknown } = { error: undefined };
+      const startPromise = orch.start(sessionA).then(
+        () => undefined,
+        (e: unknown) => {
+          settled.error = e;
+        },
+      );
+      await new Promise((r) => setTimeout(r, 20));
+      transportA.simulatePeerClose();
+      await new Promise((r) => setTimeout(r, 20));
+      await startPromise;
+
+      expect(settled.error).toBeInstanceOf(HandshakeClosedError);
+      expect(settled.error).not.toBeInstanceOf(HandshakeTimeoutError);
+    });
+
+    it('user-initiated disconnect still surfaces as HandshakeClosedError (existing behaviour preserved)', async () => {
+      // Sanity check: the user-cancel path goes through
+      // `session.disconnect('user-cancel')`, NOT through the
+      // transport's onClose. The orchestrator should still throw
+      // HandshakeClosedError, but with the user-cancel reason in
+      // the snapshot — NOT the peer-closed reason.
+      const { sessionA } = await makeTcpConnectedPair();
+      const llmA: LLMProvider = {
+        async chat() {
+          throw new Error('LLM must NOT be called');
+        },
+      };
+      const selfA = await makeSelf(ID_A, 'Alice', llmA);
+      const orch = new MatchOrchestrator(selfToDeps(selfA), ID_B, {
+        helloTimeoutMs: 5000,
+      });
+
+      const settled: { error: unknown } = { error: undefined };
+      const startPromise = orch.start(sessionA).then(
+        () => undefined,
+        (e: unknown) => {
+          settled.error = e;
+        },
+      );
+      await new Promise((r) => setTimeout(r, 20));
+      await sessionA.disconnect('user-cancel');
+      await new Promise((r) => setTimeout(r, 20));
+      await startPromise;
+
+      expect(settled.error).toBeInstanceOf(HandshakeClosedError);
+      // The reason in the snapshot is the user-cancel reason, NOT
+      // 'peer-closed'. The error message may still mention the
+      // generic "PairingSession closed" wording, but the snapshot
+      // closeReason is the source of truth for the UI.
+      expect(sessionA.current().closeReason).toBe('user-cancel');
     });
 
     it('host and joiner see symmetric handshake semantics (both must send and receive a valid hello)', async () => {

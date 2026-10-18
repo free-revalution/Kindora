@@ -3,6 +3,7 @@ import { render, screen, cleanup, fireEvent, waitFor } from '@testing-library/re
 import type { MatchAnalysis } from '@kindora/protocol';
 import { MatchView, LiveMatchView } from '../MatchView';
 import type { MatchOutcome } from '@kindora/matching';
+import { HandshakeClosedError } from '@kindora/matching';
 
 const SAMPLE_ANALYSIS: MatchAnalysis = {
   compatibilitySignal: 'strong',
@@ -130,5 +131,65 @@ describe('apps/desktop — MatchView', () => {
     await waitFor(() => {
       expect(screen.getByText('boom')).toBeInTheDocument();
     });
+  });
+
+  // ---- Phase 16.4: peer-close surfaces in the UI ----
+
+  it('LiveMatchView shows a peer-disconnected message when run() rejects with HandshakeClosedError (peer-close path)', async () => {
+    // The orchestrator throws `HandshakeClosedError('Peer closed the
+    // connection before hello was received.')` when the transport's
+    // `onClose` fires mid-wait. The view must surface that message
+    // verbatim so the user sees "peer disconnected" instead of a
+    // generic "boom" / "timed out".
+    const peerClosed = new HandshakeClosedError(
+      'Peer closed the connection before hello was received.',
+    );
+    render(
+      <LiveMatchView
+        run={() => Promise.reject(peerClosed)}
+        onDisconnect={() => undefined}
+      />,
+    );
+    await waitFor(() => {
+      expect(
+        screen.getByText(/peer closed the connection before hello was received/i),
+      ).toBeInTheDocument();
+    });
+  });
+
+  it('LiveMatchView does NOT show a peer-disconnected message for a generic Error (preserves the prior error path)', async () => {
+    // Regression: a regular Error that happens to mention "closed"
+    // (e.g. "stream closed") should NOT be re-interpreted as a peer
+    // disconnect. The view just shows the message verbatim.
+    render(
+      <LiveMatchView
+        run={() => Promise.reject(new Error('stream closed unexpectedly'))}
+        onDisconnect={() => undefined}
+      />,
+    );
+    await waitFor(() => {
+      expect(screen.getByText(/stream closed unexpectedly/)).toBeInTheDocument();
+    });
+    // The peer-close specific copy is NOT present.
+    expect(
+      screen.queryByText(/peer closed the connection before hello was received/i),
+    ).toBeNull();
+  });
+
+  it('MatchView error view renders the message and a back button (peer-close goes through the same path)', () => {
+    // Direct render of the error view — used by the live wrapper
+    // AND by parent code that already has an error string. The
+    // message text is what the user reads.
+    render(
+      <MatchView
+        phase="error"
+        error="Peer closed the connection before hello was received."
+        onDisconnect={() => undefined}
+      />,
+    );
+    expect(
+      screen.getByText(/peer closed the connection before hello was received/i),
+    ).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /back/i })).toBeInTheDocument();
   });
 });

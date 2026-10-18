@@ -13,7 +13,7 @@
  * See 开发手册.md § 18 Mode A, § 19.
  */
 import { decodeEnvelope, encodeEnvelope, type KsaMessage } from '@kindora/protocol';
-import type { MessageHandler, PeerInfo, Transport } from './index';
+import type { CloseHandler, MessageHandler, PeerInfo, Transport } from './index';
 
 interface Endpoint {
   readonly id: string;
@@ -143,8 +143,66 @@ export class LoopbackTransport implements Transport {
     };
   }
 
+  /**
+   * Phase 16.4: the loopback transport has no notion of a remote-side
+   * close. The peers are in-process and `disconnect()` is the only
+   * way to tear down a loopback link. We still implement the
+   * interface so `PairingSession` can call it uniformly — it just
+   * never fires.
+   *
+   * The handler set is kept (instead of being a hardcoded no-op)
+   * purely to support tests that need to simulate a peer-side
+   * drop on the loopback path. Production callers can ignore
+   * `onClose` — the loopback peers live in the same process and
+   * never really "close" the link until one side calls
+   * `disconnect()`.
+   */
+  private readonly closeHandlers = new Set<CloseHandler>();
+  private closedByPeer = false;
+  onClose(handler: CloseHandler): () => void {
+    this.closeHandlers.add(handler);
+    if (this.closedByPeer) {
+      queueMicrotask(() => {
+        if (this.closedByPeer) {
+          try {
+            handler();
+          } catch {
+            // ignore — mirroring LanTransport's per-handler try/catch
+          }
+        }
+      });
+    }
+    return () => {
+      this.closeHandlers.delete(handler);
+    };
+  }
+
+  /**
+   * Phase 16.4: test-only method. Simulates a remote-side drop by
+   * firing every registered `onClose` handler. Mirrors
+   * `LanTransport.handlePeerClosed` in shape (idempotency,
+   * best-effort cleanup). Production code does not call this —
+   * the loopback transport is normally torn down via
+   * `disconnect()`.
+   */
+  simulatePeerClose(): void {
+    if (this.closedByPeer) return;
+    this.closedByPeer = true;
+    const handlers = Array.from(this.closeHandlers);
+    for (const h of handlers) {
+      try {
+        h();
+      } catch {
+        // ignore — mirroring LanTransport's per-handler try/catch
+      }
+    }
+    this.endpoint.connected = false;
+  }
+
   async disconnect(): Promise<void> {
     this.endpoint.connected = false;
+    // Local disconnect does NOT fire onClose (mirrors LanTransport).
+    this.closeHandlers.clear();
     this.options.hub.unregister(this.endpoint.id);
   }
 

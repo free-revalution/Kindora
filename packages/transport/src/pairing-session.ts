@@ -162,6 +162,7 @@ export class PairingSession {
     this.transport = transport;
     this.setState({ state: 'hosting', code, closeReason: null, peerAgentId: null });
     this.wireTransport(transport);
+    this.installCloseHandler(transport);
     // Enter the room synchronously. If a peer is already there this
     // completes the pair immediately; otherwise the host waits.
     //
@@ -194,6 +195,7 @@ export class PairingSession {
     this.transport = transport;
     this.setState({ state: 'joining', code: normalised, closeReason: null, peerAgentId: null });
     this.wireTransport(transport);
+    this.installCloseHandler(transport);
     await transport.connect({
       agentId: this.options.agentId,
       displayName: this.options.displayName,
@@ -263,6 +265,12 @@ export class PairingSession {
    * state, transitions to `closed` with the given `reason`. The
    * transport is disconnected; its `disconnect()` errors are
    * swallowed because the wire is already gone in most failure paths.
+   *
+   * Phase 16.4: this is also the path the peer-close event handler
+   * (`onClose` from the transport) takes. A `failHandshake('peer-
+   * closed')` call from the close handler transitions the FSM and
+   * sets `closeReason` so an in-flight orchestrator can distinguish
+   * a peer drop from a generic timeout.
    */
   async failHandshake(reason: string): Promise<void> {
     if (this.snapshot.state === 'closed') return;
@@ -273,6 +281,16 @@ export class PairingSession {
     ) {
       return;
     }
+    // Phase 16.4: if a transport's onClose already drove us into
+    // 'closed' between the check above and the teardown, the
+    // subsequent `disconnect()` is idempotent and a no-op. We
+    // therefore re-check the state right before `setState` to
+    // avoid a stray transition that would overwrite an
+    // already-set `closeReason`. Reading via `current()` (which
+    // returns a fresh, type-narrowed snapshot) is intentional —
+    // using `this.snapshot` directly would let TypeScript's
+    // narrowing see the post-await state as still one of
+    // hosting/joining/tcp-connected and flag a tautology.
     const transport = this.transport;
     this.transport = null;
     if (transport) {
@@ -282,6 +300,7 @@ export class PairingSession {
         // ignore — the transport may already be gone.
       }
     }
+    if (this.current().state === 'closed') return;
     this.setState({ state: 'closed', closeReason: reason, peerAgentId: null });
   }
 
@@ -349,6 +368,16 @@ export class PairingSession {
   /** Tear down the transport and move to the terminal `closed` state. */
   async disconnect(reason: string = 'user-requested'): Promise<void> {
     if (this.snapshot.state === 'closed') return;
+    // Phase 16.4: drop the close handler BEFORE disconnecting so a
+    // local cancel does NOT fire the peer-close event. The
+    // transport's onClose is reserved for remote-side drops — a
+    // local `disconnect()` followed by a re-bind (on a fresh
+    // transport) is the only way a `PairingSession` re-enters the
+    // room.
+    if (this.closeUnsub) {
+      this.closeUnsub();
+      this.closeUnsub = null;
+    }
     try {
       if (this.transport) await this.transport.disconnect();
     } finally {
@@ -367,5 +396,28 @@ export class PairingSession {
 
   private wireTransport(transport: Transport): void {
     for (const h of this.messageHandlers) transport.onMessage(h);
+  }
+
+  /**
+   * Phase 16.4: subscribe to the transport's `onClose` event. When
+   * the transport observes a peer-side drop (TCP EOF / RST), it
+   * fires this handler. The session then transitions to `'closed'`
+   * with `closeReason = 'peer-closed'` so a waiting orchestrator
+   * can throw `HandshakeClosedError` instead of timing out.
+   *
+   * The handler does NOT fire for local `disconnect()` calls
+   * because the transport's `disconnect()` clears the close
+   * handlers and `PairingSession.disconnect` unsubscribes
+   * synchronously before the teardown.
+   *
+   * `failHandshake` is idempotent — if the user already cancelled
+   * (e.g. clicked Disconnect) the close handler is a no-op.
+   */
+  private closeUnsub: (() => void) | null = null;
+  private installCloseHandler(transport: Transport): void {
+    if (this.closeUnsub) this.closeUnsub();
+    this.closeUnsub = transport.onClose(() => {
+      void this.failHandshake('peer-closed');
+    });
   }
 }

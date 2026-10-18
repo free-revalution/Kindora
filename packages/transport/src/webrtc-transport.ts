@@ -14,7 +14,7 @@
  * See 开发手册.md § 18, § 19.
  */
 import type { KsaMessage } from '@kindora/protocol';
-import type { MessageHandler, PeerInfo, Transport } from './index';
+import type { CloseHandler, MessageHandler, PeerInfo, Transport } from './index';
 
 export interface WebRtcTransportOptions {
   /** STUN / TURN servers, e.g. ['stun:stun.l.google.com:19302']. */
@@ -50,6 +50,17 @@ export class WebRtcTransport implements Transport {
 
   onMessage(_handler: MessageHandler): () => void {
     throw new Error('WebRtcTransport.onMessage: transport not connected.');
+  }
+
+  /**
+   * Phase 16.4: the V0.1 stub never establishes a real DataChannel,
+   * so no peer-close event can ever fire. The interface is
+   * implemented to keep `Transport` callers uniform.
+   */
+  onClose(_handler: CloseHandler): () => void {
+    return () => {
+      // no-op unsubscribe
+    };
   }
 
   async disconnect(): Promise<void> {

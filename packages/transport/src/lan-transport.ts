@@ -28,7 +28,8 @@
 
 import type { KsaMessage } from '@kindora/protocol';
 import { decodeEnvelope, encodeEnvelope } from '@kindora/protocol';
-import type { MessageHandler, PeerInfo, Transport } from './index';
+import type { CloseHandler, MessageHandler, PeerInfo, Transport } from './index';
+import { LanError } from './lan-error';
 
 /** Tauri 2 `invoke` and `event` shim. Falls back to throwing if not in Tauri runtime. */
 interface TauriRuntime {
@@ -101,6 +102,16 @@ export class LanTransport implements Transport {
   private pollTimer: ReturnType<typeof setInterval> | null = null;
   /** Discovery timeout (ms) used by `connect(peer)` for the joiner path. */
   private readonly discoverTimeoutMs: number;
+  /**
+   * Phase 16.4: close handler set + idempotency flag. The flag is
+   * `true` once we've observed `Err(LanError::PeerClosed)` from the
+   * Rust `lan_host_poll` / `lan_join_poll` (or after the cleanup
+   * pass at end of `disconnect()`). All subsequent `onClose`
+   * firings are no-ops. This satisfies the "same connection
+   * reports drop only once" requirement.
+   */
+  private closeHandlers = new Set<CloseHandler>();
+  private closedByPeer = false;
 
   constructor(opts: LanTransportOptions) {
     this.opts = opts;
@@ -255,6 +266,43 @@ export class LanTransport implements Transport {
     };
   }
 
+  /**
+   * Phase 16.4: peer-close event hook. The handler fires ONCE per
+   * transport instance when the Rust side reports
+   * `Err(LanError::PeerClosed)` from a poll call. It does NOT fire
+   * for local `disconnect()` calls — those clear the close
+   * handlers via the explicit teardown path.
+   *
+   * `PairingSession` registers a handler that transitions the FSM
+   * to `'closed'` with `closeReason = 'peer-closed'`, so an
+   * in-flight `MatchOrchestrator` short-circuits its hello wait
+   * with `HandshakeClosedError` instead of `HandshakeTimeoutError`.
+   */
+  onClose(handler: CloseHandler): () => void {
+    this.closeHandlers.add(handler);
+    // If the close event already fired (e.g. the handler is
+    // registered after the wire drop), invoke it on the next
+    // microtask so the caller's bookkeeping still runs. This is
+    // safer than calling it synchronously inside `onClose` because
+    // the caller's `onClose` call may not have set up its own state
+    // yet.
+    if (this.closedByPeer) {
+      queueMicrotask(() => {
+        if (this.closedByPeer) {
+          try {
+            handler();
+          } catch (e) {
+            // Don't let one late subscriber crash the dispatch.
+            console.warn('[lan] onClose handler threw:', e);
+          }
+        }
+      });
+    }
+    return () => {
+      this.closeHandlers.delete(handler);
+    };
+  }
+
   async disconnect(): Promise<void> {
     this.stopPolling();
     if (this.mode === 'host') {
@@ -272,6 +320,14 @@ export class LanTransport implements Transport {
     }
     this.mode = 'idle';
     this.peer = null;
+    // Phase 16.4: local `disconnect()` does NOT fire `onClose`. The
+    // close event is reserved for peer-side drops. Clear the
+    // handler set so any late `onClose` call (e.g. a straggler poll
+    // tick that fires before the next macrotask) is a no-op. We
+    // intentionally leave `closedByPeer` as-is — a local cancel
+    // followed by a re-bind (e.g. reconnect) is a fresh
+    // transport instance, and this instance is done.
+    this.closeHandlers.clear();
   }
 
   // ---------- internals ----------
@@ -290,7 +346,64 @@ export class LanTransport implements Transport {
     }
   }
 
+  /**
+   * Phase 16.4: dispatch the peer-close event. Idempotent. Sets
+   * `closedByPeer` first so any re-entry (e.g. a handler calling
+   * `disconnect()` synchronously) doesn't double-fire. Stops the
+   * poll loop, fires every registered close handler (each in a
+   * try/catch — one bad handler must not silence the rest), then
+   * best-effort cleans up the Rust-side state (`lan_host_stop` /
+   * `lan_join_disconnect`) and forces our local state to
+   * 'idle'.
+   *
+   * The order matters: handlers are fired BEFORE the Rust cleanup
+   * so a handler that synchronously reads `lan_host_status` (or
+   * similar) still sees a coherent state. The Rust cleanup is
+   * fire-and-forget — the peer is already gone, so any failure
+   * here is irrelevant.
+   */
+  private handlePeerClosed(): void {
+    if (this.closedByPeer) return;
+    this.closedByPeer = true;
+    this.stopPolling();
+    // Snapshot the handler set so a handler that registers a new
+    // handler doesn't get a recursive call.
+    const handlers = Array.from(this.closeHandlers);
+    for (const h of handlers) {
+      try {
+        h();
+      } catch (e) {
+        // Don't let one bad handler silence the rest.
+        console.warn('[lan] onClose handler threw:', e);
+      }
+    }
+    // Best-effort Rust-side cleanup. The previous Phase 16.3
+    // contract: the read loop already set the `peer_closed`
+    // atomic, and the writer half has been dropped by the OS, so
+    // the only thing left in the Rust state is a `HostSide` /
+    // `JoinSide` whose `link` is half-closed. We must remove that
+    // state so a fresh `host_start` / `join_connect` on the same
+    // LanState can proceed without `AlreadyRunning`. We swallow
+    // any error — the wire is gone, the cleanup is best-effort.
+    const cleanup =
+      this.mode === 'host'
+        ? this.tauri.invoke('lan_host_stop').catch(() => undefined)
+        : this.mode === 'join'
+          ? this.tauri.invoke('lan_join_disconnect').catch(() => undefined)
+          : Promise.resolve();
+    void cleanup;
+    this.mode = 'idle';
+    this.peer = null;
+  }
+
   private async pollOnce(): Promise<void> {
+    // Phase 16.4: if a prior tick already detected the close, do
+    // not run another poll. The Rust side's `host_poll` will
+    // continue to return `Err(PeerClosed)` until the cleanup
+    // happens, and a second `handlePeerClosed` is a no-op thanks
+    // to the `closedByPeer` flag, but skipping the IPC call
+    // entirely keeps the polling cost at zero after a peer drop.
+    if (this.closedByPeer) return;
     try {
       const messages =
         this.mode === 'host'
@@ -330,7 +443,19 @@ export class LanTransport implements Transport {
         }
       }
     } catch (err) {
-      // Swallow poll errors — the next tick will retry.
+      // Phase 16.4: classify the rejection. `Err(LanError::
+      // PeerClosed)` is the explicit "remote end dropped the TCP
+      // link" signal — fire `onClose` and stop polling. Other
+      // errors (NotConnected, Io, Tauri runtime failure) are
+      // transient or local; we log at debug and let the next tick
+      // retry. This is the same retry behaviour as before — only
+      // the peer-close path is new.
+      const lanErr = LanError.from(err);
+      if (lanErr.isPeerClosed()) {
+        this.handlePeerClosed();
+        return;
+      }
+      // Don't let one bad poll kill the rest.
       console.debug('[lan] poll error:', err);
     }
   }

@@ -444,8 +444,19 @@ export class MatchOrchestrator {
         // Either timeout or session closed. Distinguish BEFORE we
         // call failHandshake — once failHandshake runs, the session
         // is in 'closed' and we can no longer tell which case it
-        // was.
+        // was. Phase 16.4: a `closeReason` of `'peer-closed'`
+        // means the wire dropped mid-wait (the transport fired its
+        // `onClose` event, which called `failHandshake('peer-
+        // closed')` for us). Surface that as the more specific
+        // `HandshakeClosedError` rather than the generic
+        // `HandshakeTimeoutError` — the UI / caller can show "peer
+        // disconnected" instead of "timed out".
         const wasClosedMidWait = session.current().state === 'closed';
+        if (wasClosedMidWait && session.current().closeReason === 'peer-closed') {
+          throw new HandshakeClosedError(
+            'Peer closed the connection before hello was received.',
+          );
+        }
         if (!wasClosedMidWait) {
           await session.failHandshake('hello-timeout').catch(() => undefined);
         }

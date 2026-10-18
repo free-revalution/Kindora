@@ -497,6 +497,139 @@ existing `match-orchestrator.test.ts` covers (2) with a malformed-
 JSON stub; (1) is covered by an LLM-stub that throws. Both
 **PASS**.
 
+### § 5.4 — PeerClosed propagation closure (FIXED in Phase 16.4)
+
+**Where:** `packages/transport/src/lan-transport.ts`,
+`packages/transport/src/pairing-session.ts`,
+`packages/matching/src/orchestrator.ts`,
+`apps/desktop/src/views/MatchView.tsx`.
+
+**Original symptom (Phase 16.3):** the Rust side
+(`lan_host_poll` / `lan_join_poll`) returned
+`Err(LanError::PeerClosed)` correctly when the remote end dropped
+the TCP link. But the TS-side `LanTransport.pollOnce()` caught
+the error and `console.debug`'d it — the event was lost. An
+in-flight `MatchOrchestrator` was therefore stuck in the hello
+wait until its own 5 s `helloTimeoutMs` fired, then surfaced a
+`HandshakeTimeoutError`. The user saw "handshake timed out" when
+the actual cause was a peer drop that arrived 200 ms after
+connect. There was no way to distinguish "peer closed" from
+"peer never sent a hello".
+
+**Fix (Phase 16.4):** the `Transport` interface gains an
+`onClose(handler)` hook. `LanTransport.pollOnce()` now classifies
+the caught error with the new `LanError.from(err)` helper
+(`packages/transport/src/lan-error.ts`):
+
+- `kind === 'peer-closed'` → fire `onClose` handlers
+  (idempotent — `closedByPeer` flag prevents double-fire), stop
+  the poll loop, best-effort Rust-side cleanup
+  (`lan_host_stop` / `lan_join_disconnect`), force `mode = 'idle'`.
+  Local `disconnect()` does NOT fire `onClose` (the close event is
+  reserved for remote-side drops).
+- other `LanError` kinds → log at debug, let the next tick retry
+  (same retry behaviour as before; only the peer-close path is
+  new).
+
+`PairingSession` subscribes to `onClose` from `startHost` /
+`startJoin` and routes the event through `failHandshake('peer-closed')`.
+The FSM transitions to `'closed'` with `closeReason = 'peer-closed'`,
+so `MatchOrchestrator` (mid-hello-wait) throws
+`HandshakeClosedError` (message: "Peer closed the connection
+before hello was received.") instead of timing out.
+
+`LoopbackTransport` mirrors the interface so tests can drive a
+peer-side drop with a new `simulatePeerClose()` method. The
+`WebRtcTransport` stub gets a no-op `onClose`.
+
+**Distinguishing local cancel from remote drop:**
+
+- Local `disconnect()` (user cancels, or view unmounts) goes
+  through `PairingSession.disconnect(reason)`, which
+  unsubscribes the close handler BEFORE calling
+  `transport.disconnect()`. The transport's `disconnect()`
+  clears its close handler set. A late poll tick on the dead
+  session cannot fire `onClose` — both ends of the channel are
+  severed.
+- A real remote drop (FIN / RST from the OS) is observed in
+  the Rust read loop, which sets `peer_closed = true` and
+  causes the next `host_poll` / `join_poll` to return
+  `Err(LanError::PeerClosed)`. The TS catch path is the only
+  source of `onClose` firings.
+
+The two paths are independent and `closeReason` in
+`PairingSnapshot` is the source of truth for the UI:
+`'peer-closed'` for the second, anything else (e.g.
+`'user-cancel'`) for the first.
+
+**UI surfacing:** `MatchView` now inspects the thrown error
+type. `HandshakeClosedError` whose message matches `/peer
+closed/i` shows a dedicated peer-disconnected message ("The
+other side closed the connection before the handshake
+finished. You can try pairing again."). Generic `Error`s
+fall through to the existing "handshake failed" banner.
+
+**Verification (automated):**
+
+- `packages/transport/src/__tests__/lan-error.test.ts` (NEW) — 11
+  classification tests covering each `LanErrorKind` and the
+  plain-object defensive path.
+- `packages/transport/src/__tests__/lan-transport.test.ts` — 6
+  new tests under the Tauri-shim block: `host: peer-closed
+  from lan_host_poll fires onClose exactly once`, `joiner:
+  peer-closed from lan_join_poll fires onClose exactly once`,
+  `local disconnect does NOT fire onClose (only peer-side drops
+  do)`, `onClose handler is unsubscribed correctly`, `onClose
+  handler that throws does not block the dispatch`, and `after
+  peer-closed, a fresh LanTransport can start a new host on the
+  same LanState`.
+- `packages/transport/src/__tests__/pairing-session.test.ts` — 5
+  new tests under `peer-close hook (Transport.onClose)`:
+  session drives to `closed` with `closeReason: 'peer-closed'`
+  from `tcp-connected` and from `hosting`; local disconnect
+  clears the close handler (late `simulatePeerClose` ignored);
+  idempotency on two `onClose` firings; reconnect on a fresh
+  `PairingSession` after a peer-close.
+- `packages/matching/src/__tests__/match-orchestrator.test.ts` —
+  3 new tests in the `MatchOutcome error paths` block: the
+  orchestrator throws `HandshakeClosedError` (message matches
+  `/peer closed/i`, NOT `HandshakeTimeoutError`) when the
+  transport fires `onClose` mid-wait; the orchestrator does NOT
+  classify a peer-close as `HandshakeTimeoutError`; user-
+  initiated disconnect still surfaces as
+  `HandshakeClosedError` (existing behaviour preserved).
+- `apps/desktop/src/views/__tests__/MatchView.test.tsx` — 3
+  new tests: `LiveMatchView` shows a peer-disconnected message
+  when `run()` rejects with `HandshakeClosedError`; does NOT
+  show that message for a generic `Error`; the error view
+  renders the message and a back button.
+- `apps/desktop/src-tauri/tests/lan_protocol_e2e.rs` — the 3
+  `let _ = joiner.join_send(...).await` lines (in
+  `two_instance_host_silent_then_link_drops`,
+  `two_instance_mid_handshake_disconnect`,
+  `two_instance_post_protocol_disconnect`) are replaced with
+  explicit `match` blocks that document the four allowed
+  return values — `Ok(())`, `Err(PeerClosed)`,
+  `Err(NotConnected)`, `Err(Io(_))` — and panic on anything
+  else. The strong `PeerClosed` assertion (via `join_poll`)
+  remains in `two_instance_tcp_drop_joiner_perspective`.
+
+**Test counts:** 523 vitest tests across 54 files pass; 13
+`lan_protocol_e2e` tests pass; 15 `lan_e2e` tests pass;
+`cargo check --lib` clean; full `pnpm -r typecheck` clean;
+full `pnpm -r build` clean.
+
+**Status:** **FIXED**. The peer-drop path is now closed-loop
+end-to-end: Rust → Tauri IPC → `LanTransport` → `PairingSession`
+→ `MatchOrchestrator` → `MatchView` shows a dedicated
+peer-disconnected message. Reconnecting on the same `LanState`
+after a drop works (covered by
+`two_instance_reconnect_after_tcp_drop` on the Rust side and the
+"fresh LanTransport on the same LanState" vitest case on the TS
+side). A live two-machine run is still required to confirm the
+GUI behaviour matches — automated test pass does NOT equal GUI
+acceptance (per Phase 16.4 brief § 四).
+
 ---
 
 ## § 6 — Verdict template

@@ -341,4 +341,79 @@ describe('@kindora/transport — PairingSession', () => {
       expect(sessionA.current().peerAgentId).toBeNull();
     });
   });
+
+  // ---- Phase 16.4: peer-close propagation ----
+
+  describe('peer-close hook (Transport.onClose)', () => {
+    it('drives the session to closed with reason peer-closed when the transport fires onClose', async () => {
+      const { sessionB, tb } = makeFixture();
+      await sessionB.startJoin(tb, 'ABCDEF');
+      // Simulate a peer-side drop while the session is in
+      // 'tcp-connected' (no hello exchange yet).
+      tb.simulatePeerClose();
+      // Allow the microtask queue to drain.
+      await new Promise((r) => setTimeout(r, 10));
+      const snap = sessionB.current();
+      expect(snap.state).toBe('closed');
+      expect(snap.closeReason).toBe('peer-closed');
+    });
+
+    it('drives the session to closed from hosting (host-side pre-accept drop)', async () => {
+      const { sessionA, ta } = makeFixture();
+      sessionA.startHost(ta);
+      // Host is in 'hosting' (peer not yet arrived).
+      ta.simulatePeerClose();
+      await new Promise((r) => setTimeout(r, 10));
+      const snap = sessionA.current();
+      expect(snap.state).toBe('closed');
+      expect(snap.closeReason).toBe('peer-closed');
+    });
+
+    it('local disconnect clears the close handler — a subsequent onClose is ignored', async () => {
+      const { sessionB, tb } = makeFixture();
+      await sessionB.startJoin(tb, 'ABCDEF');
+      await sessionB.disconnect('user-cancel');
+      // After disconnect, the handler is unsubscribed. A late
+      // simulatePeerClose must not flip the state to closed again
+      // (it should already be 'closed' with the user-cancel reason).
+      tb.simulatePeerClose();
+      await new Promise((r) => setTimeout(r, 10));
+      const snap = sessionB.current();
+      expect(snap.state).toBe('closed');
+      expect(snap.closeReason).toBe('user-cancel');
+    });
+
+    it('idempotency: two onClose firings on the same transport drive the session to closed exactly once with the right reason', async () => {
+      const { sessionB, tb } = makeFixture();
+      await sessionB.startJoin(tb, 'ABCDEF');
+      // Manually fire onClose twice. The transport guarantees
+      // single-fire, but even if a buggy transport fired twice, the
+      // session's `failHandshake` is idempotent — the second call
+      // must not overwrite `closeReason`.
+      tb.simulatePeerClose();
+      tb.simulatePeerClose();
+      await new Promise((r) => setTimeout(r, 10));
+      const snap = sessionB.current();
+      expect(snap.state).toBe('closed');
+      expect(snap.closeReason).toBe('peer-closed');
+    });
+
+    it('reconnect after peer-close: a fresh PairingSession on a fresh transport transitions to connected', async () => {
+      // First session: peer closes mid-handshake.
+      const first = makeFixture();
+      await first.sessionB.startJoin(first.tb, 'ABCDEF');
+      first.tb.simulatePeerClose();
+      await new Promise((r) => setTimeout(r, 10));
+      expect(first.sessionB.current().state).toBe('closed');
+
+      // Second session: a fresh PairingSession on the same hub
+      // using a fresh transport. Must reach 'connected' cleanly.
+      const second = makeFixture();
+      const code = second.sessionA.startHost(second.ta);
+      await pairThem(second.sessionA, second.sessionB, second.ta, second.tb);
+      expect(second.sessionA.current().state).toBe('connected');
+      expect(second.sessionB.current().state).toBe('connected');
+      expect(code).toHaveLength(6);
+    });
+  });
 });

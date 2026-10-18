@@ -34,6 +34,16 @@ interface MockState {
   hostStarted: boolean;
   joinStarted: boolean;
   discoverResults: Array<{ ip: string; port: number; agent_id: string; display_name: string; code: string }>;
+  /**
+   * Phase 16.4: control whether the next `lan_host_poll` /
+   * `lan_join_poll` invocation throws `peer closed`. Once set, the
+   * mock switches the relevant poll into a permanently-peer-closed
+   * mode (every subsequent call also throws), so the test exercises
+   * both the first observation and any retry / second-poll edge
+   * cases.
+   */
+  hostPollPeerClosed: boolean;
+  joinPollPeerClosed: boolean;
 }
 
 function makeKsaHello(agentId: string, displayName: string): KsaMessage {
@@ -78,6 +88,7 @@ function installTauriMock(state: MockState) {
         case 'lan_host_linked':
           return Boolean(state.hostLink?.connected);
         case 'lan_host_poll': {
+          if (state.hostPollPeerClosed) throw new Error('peer closed');
           const link = state.hostLink;
           if (!link) return [];
           const drained = link.inbound.splice(0, link.inbound.length);
@@ -108,6 +119,7 @@ function installTauriMock(state: MockState) {
           };
         }
         case 'lan_join_poll': {
+          if (state.joinPollPeerClosed) throw new Error('peer closed');
           const link = state.joinLink;
           if (!link) return [];
           return link.inbound.splice(0, link.inbound.length);
@@ -138,6 +150,8 @@ describe('LanTransport (Tauri shim)', () => {
       hostStarted: false,
       joinStarted: false,
       discoverResults: [],
+      hostPollPeerClosed: false,
+      joinPollPeerClosed: false,
     };
     installTauriMock(state);
   });
@@ -344,6 +358,135 @@ describe('LanTransport (Tauri shim)', () => {
     await t.connect({ agentId: 'peer', displayName: 'Peer', hint: 'ABC123' });
     expect(t.isConnected()).toBe(true);
     await t.disconnect();
+  });
+
+  // ---- Phase 16.4: peer-close propagation (onClose hook) ----
+
+  it('host: peer-closed from lan_host_poll fires onClose exactly once', async () => {
+    const t = new LanTransport({ selfAgentId: 'self', selfDisplayName: 'Self' });
+    await t.startHost('ABC123');
+    // The mock's hostLink starts as null — give the host a peer so
+    // the next poll is meaningful. (hostPollPeerClosed is checked
+    // before hostLink, but a no-link peer would still be a real
+    // scenario; the important thing here is that the IPC throws.)
+    state.hostLink = { inbound: [], outbound: [], connected: true };
+    state.hostPollPeerClosed = true;
+    let fired = 0;
+    t.onClose(() => {
+      fired += 1;
+    });
+    // Poll interval is 200ms. Wait long enough for at least one tick
+    // and short enough to keep the test snappy.
+    await new Promise((r) => setTimeout(r, 500));
+    expect(fired).toBe(1);
+    // Subsequent ticks do not re-fire.
+    await new Promise((r) => setTimeout(r, 500));
+    expect(fired).toBe(1);
+    // A second `onClose` registered after the event fires once on
+    // the next microtask (the late-subscriber contract).
+    let lateFired = 0;
+    t.onClose(() => {
+      lateFired += 1;
+    });
+    await new Promise((r) => setTimeout(r, 50));
+    expect(lateFired).toBe(1);
+    await t.disconnect();
+  });
+
+  it('joiner: peer-closed from lan_join_poll fires onClose exactly once', async () => {
+    const t = new LanTransport({ selfAgentId: 'self', selfDisplayName: 'Self' });
+    state.discoverResults = [
+      { ip: '192.168.1.10', port: 52420, agent_id: 'peer', display_name: 'Peer', code: 'ABC123' },
+    ];
+    await t.startJoin(state.discoverResults[0]!);
+    state.joinPollPeerClosed = true;
+    let fired = 0;
+    t.onClose(() => {
+      fired += 1;
+    });
+    await new Promise((r) => setTimeout(r, 500));
+    expect(fired).toBe(1);
+    await new Promise((r) => setTimeout(r, 500));
+    expect(fired).toBe(1);
+    await t.disconnect();
+  });
+
+  it('local disconnect does NOT fire onClose (only peer-side drops do)', async () => {
+    const t = new LanTransport({ selfAgentId: 'self', selfDisplayName: 'Self' });
+    await t.startHost('ABC123');
+    let fired = 0;
+    t.onClose(() => {
+      fired += 1;
+    });
+    await t.disconnect();
+    // Give a couple of poll cycles a chance to run; none should
+    // observe a peer-closed because the mock's hostPollPeerClosed
+    // is still false.
+    await new Promise((r) => setTimeout(r, 500));
+    expect(fired).toBe(0);
+  });
+
+  it('onClose handler is unsubscribed correctly', async () => {
+    const t = new LanTransport({ selfAgentId: 'self', selfDisplayName: 'Self' });
+    await t.startHost('ABC123');
+    state.hostLink = { inbound: [], outbound: [], connected: true };
+    let fired = 0;
+    const unsub = t.onClose(() => {
+      fired += 1;
+    });
+    unsub();
+    state.hostPollPeerClosed = true;
+    await new Promise((r) => setTimeout(r, 500));
+    expect(fired).toBe(0);
+    await t.disconnect();
+  });
+
+  it('onClose handler that throws does not block the dispatch', async () => {
+    const t = new LanTransport({ selfAgentId: 'self', selfDisplayName: 'Self' });
+    await t.startHost('ABC123');
+    state.hostLink = { inbound: [], outbound: [], connected: true };
+    state.hostPollPeerClosed = true;
+    let secondFired = 0;
+    // Suppress the expected warn log for this test.
+    const origWarn = console.warn;
+    console.warn = () => undefined;
+    try {
+      t.onClose(() => {
+        throw new Error('boom');
+      });
+      t.onClose(() => {
+        secondFired += 1;
+      });
+      await new Promise((r) => setTimeout(r, 500));
+      expect(secondFired).toBe(1);
+    } finally {
+      console.warn = origWarn;
+    }
+    await t.disconnect();
+  });
+
+  it('after peer-closed, a fresh LanTransport can start a new host on the same LanState', async () => {
+    // First host: runs, peer-closes, transport tears down.
+    const t1 = new LanTransport({ selfAgentId: 'self', selfDisplayName: 'Self' });
+    await t1.startHost('ABC123');
+    state.hostLink = { inbound: [], outbound: [], connected: true };
+    state.hostPollPeerClosed = true;
+    let fired = 0;
+    t1.onClose(() => {
+      fired += 1;
+    });
+    await new Promise((r) => setTimeout(r, 500));
+    expect(fired).toBe(1);
+    await t1.disconnect();
+
+    // Reset the mock so the second host can run cleanly.
+    state.hostLink = null;
+    state.hostStarted = false;
+    state.hostPollPeerClosed = false;
+    const t2 = new LanTransport({ selfAgentId: 'self', selfDisplayName: 'Self' });
+    await t2.startHost('DEF456');
+    expect(t2.isConnected()).toBe(false);
+    await t2.disconnect();
   });
 });
 

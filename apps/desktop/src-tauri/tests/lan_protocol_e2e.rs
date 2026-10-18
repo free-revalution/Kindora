@@ -443,15 +443,36 @@ async fn two_instance_host_silent_then_link_drops() {
     assert!(!host.host_linked().await, "host_linked must be false after stop");
 
     // Phase 16.3 § 5.1 fix: `joiner.join_send` no longer silently
-    // succeeds after `host_stop`. The `peer_closed` flag was set
-    // when the host's drop propagated through the read loop, so the
-    // send fast-fails with `Err(PeerClosed)`. We use `let _ =` here
-    // to keep this test resilient to that change — the strong
-    // assertion lives in `two_instance_tcp_drop_joiner_perspective`
-    // below. (Phase 16.1's "DOCUMENTED GAP" comment for this branch
-    // is therefore no longer accurate; the manual § 5.1 records the
-    // fix.)
-    let _ = joiner.join_send("post-stop".to_string()).await;
+    // succeeds after `host_stop`. The `peer_closed` flag is set when
+    // the host-side drop propagates through the read loop, and the
+    // send fast-fails with `Err(PeerClosed)`. Allowed return values
+    // for this post-stop send (race-dependent — which one wins
+    // depends on whether the kernel writer-half closed and the read
+    // loop propagated `peer_closed` BEFORE the write is issued):
+    //   - `Ok(())`            kernel TCP write buffer accepted the
+    //                         bytes before the FIN propagated
+    //                         (the bytes are silently dropped at the
+    //                         far end because no one is reading).
+    //   - `Err(PeerClosed)`   § 5.1 fast-fail on the `peer_closed`
+    //                         atomic (preferred, deterministic).
+    //   - `Err(NotConnected)` joiner side already torn the link down
+    //                         locally (out-of-order teardown).
+    //   - `Err(Io(_))`        kernel EPIPE / ECONNRESET on the
+    //                         half-closed writer.
+    // Any other return value is a regression — e.g. an unclassified
+    // `Invalid` or a `Json` error means the wire is mangling
+    // something it should not.
+    match joiner.join_send("post-stop".to_string()).await {
+        Ok(())
+        | Err(kindora_lib::LanError::PeerClosed)
+        | Err(kindora_lib::LanError::NotConnected)
+        | Err(kindora_lib::LanError::Io(_)) => {}
+        other => panic!(
+            "post-stop join_send returned unexpected value: {:?} \
+             (expected Ok or Err(PeerClosed|NotConnected|Io))",
+            other
+        ),
+    }
     joiner.join_disconnect().await.expect("join_disconnect");
 }
 
@@ -509,11 +530,29 @@ async fn two_instance_mid_handshake_disconnect() {
 
     // Phase 16.3 § 5.1 fix: the joiner detects the host-side drop
     // within ≤ 1 s of `host_stop` via `Err(PeerClosed)` from
-    // `join_poll` (the `peer_closed` atomic). The send below is
-    // kept as a non-asserting call: it is one of the paths the
-    // fix touched (now fast-fails on the closed flag). The strong
+    // `join_poll` (the `peer_closed` atomic). The send below
+    // races against the FIN's propagation through the read loop.
+    // Allowed return values for this mid-handshake post-stop
+    // send (same set as `two_instance_host_silent_then_link_drops`):
+    //   - `Ok(())`            kernel accepted the bytes into the
+    //                         TCP write buffer before the read loop
+    //                         marked the link dead.
+    //   - `Err(PeerClosed)`   § 5.1 fast-fail on the atomic.
+    //   - `Err(NotConnected)` link already torn down.
+    //   - `Err(Io(_))`        kernel EPIPE / ECONNRESET.
+    // Anything else is a regression. The strong PeerClosed
     // assertion lives in `two_instance_tcp_drop_joiner_perspective`.
-    let _ = joiner.join_send("reply".to_string()).await;
+    match joiner.join_send("reply".to_string()).await {
+        Ok(())
+        | Err(kindora_lib::LanError::PeerClosed)
+        | Err(kindora_lib::LanError::NotConnected)
+        | Err(kindora_lib::LanError::Io(_)) => {}
+        other => panic!(
+            "mid-handshake post-stop join_send returned unexpected value: {:?} \
+             (expected Ok or Err(PeerClosed|NotConnected|Io))",
+            other
+        ),
+    }
 
     joiner.join_disconnect().await.expect("join_disconnect");
 }
@@ -561,15 +600,33 @@ async fn two_instance_post_protocol_disconnect() {
     assert!(!host.host_linked().await, "host_linked must be false after stop");
 
     // Phase 16.3 § 5.1 fix: post-stop, the joiner's `join_send` no
-    // longer succeeds silently. The kernel accepts bytes into the
-    // still-open writer half, but the `peer_closed` flag (set when
-    // the host-side drop propagated) fast-fails the next send with
-    // `Err(PeerClosed)`. We keep `let _ =` here to remain agnostic
-    // to whether the flag was set in time on this particular run —
-    // the strong assertion lives in
-    // `two_instance_post_protocol_disconnect`'s sibling test
+    // longer succeeds silently. The kernel may still accept bytes
+    // into the (now half-closed) writer half, but the
+    // `peer_closed` flag (set when the host-side drop propagated
+    // through the read loop) fast-fails the next send with
+    // `Err(PeerClosed)`. Allowed return values for this
+    // post-protocol post-stop send (race-dependent):
+    //   - `Ok(())`            kernel accepted the bytes; the far
+    //                         end has no reader so they're dropped
+    //                         silently — the TS-side peer-close
+    //                         handler will fire on the next poll.
+    //   - `Err(PeerClosed)`   § 5.1 fast-fail on the atomic.
+    //   - `Err(NotConnected)` link already torn down.
+    //   - `Err(Io(_))`        kernel EPIPE / ECONNRESET.
+    // Anything else is a regression. The strong PeerClosed
+    // assertion lives in
     // `two_instance_tcp_drop_joiner_perspective` below.
-    let _ = joiner.join_send("after-stop".to_string()).await;
+    match joiner.join_send("after-stop".to_string()).await {
+        Ok(())
+        | Err(kindora_lib::LanError::PeerClosed)
+        | Err(kindora_lib::LanError::NotConnected)
+        | Err(kindora_lib::LanError::Io(_)) => {}
+        other => panic!(
+            "post-protocol post-stop join_send returned unexpected value: {:?} \
+             (expected Ok or Err(PeerClosed|NotConnected|Io))",
+            other
+        ),
+    }
     joiner.join_disconnect().await.expect("join_disconnect");
 }
 

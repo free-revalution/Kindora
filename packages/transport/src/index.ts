@@ -30,6 +30,33 @@ export interface PeerInfo {
 
 export type MessageHandler = (message: KsaMessage) => void;
 
+/**
+ * Close handler — invoked when the transport detects the underlying
+ * link has been closed by the remote side (NOT by a local
+ * `disconnect()` call). The Phase 16.4 close path uses this to
+ * propagate peer-side drops from the transport layer up to the
+ * `PairingSession`, which then transitions to `'closed'` with a
+ * `'peer-closed'` reason and lets in-flight orchestrators throw
+ * `HandshakeClosedError` instead of timing out.
+ *
+ * Phase 16.4 contract:
+ *   - Fires AT MOST ONCE per transport instance (idempotent — the
+ *     `peer_closed` atomic on the Rust side collapses the read-loop
+ *     EOF and any subsequent `Disconnected` inbox drain into a
+ *     single observable event).
+ *   - Does NOT fire for local `disconnect()` calls — those go
+ *     through the watch channel on the Rust side, which explicitly
+ *     leaves `peer_closed` false.
+ *   - Does NOT fire for `NotConnected` errors (e.g. the host has
+ *     already been torn down before any peer arrived).
+ *
+ * The handler runs synchronously on the polling tick that observed
+ * the close. It MUST NOT throw — handlers that do are caught and
+ * logged; the close event itself is still delivered to other
+ * subscribers.
+ */
+export type CloseHandler = () => void;
+
 export interface Transport {
   connect(peer: PeerInfo): Promise<void>;
   send(message: KsaMessage): Promise<void>;
@@ -39,6 +66,16 @@ export interface Transport {
    * for every incoming envelope. Returns an unsubscribe function.
    */
   onMessage(handler: MessageHandler): () => void;
+  /**
+   * Register a handler for the peer-closed event. Phase 16.4: this
+   * is the half of the Transport contract that surfaces `Err(
+   * LanError::PeerClosed)` from the wire to the application layer.
+   *
+   * Returns an unsubscribe function. The handler fires at most once
+   * per transport instance; calling `disconnect()` after the
+   * handler has fired is a no-op.
+   */
+  onClose(handler: CloseHandler): () => void;
   disconnect(): Promise<void>;
 }
 
@@ -77,6 +114,14 @@ export {
   type PairingSessionOptions,
   type StateChangeHandler,
 } from './pairing-session';
+
+/**
+ * Phase 16.4: typed `LanError` class for classifying Tauri IPC
+ * rejections from the `lan_*` commands. See `lan-error.ts` for the
+ * discrimination rules and the relationship to the Rust
+ * `LanError` enum.
+ */
+export { LanError, type LanErrorKind } from './lan-error';
 
 export {
   WireRateLimiter,
