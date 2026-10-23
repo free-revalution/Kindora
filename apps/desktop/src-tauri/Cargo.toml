@@ -1,5 +1,11 @@
 [package]
 name = "kindora-desktop"
+# `tauri dev` invokes `cargo run` WITHOUT `--bin`. This crate ships three
+# binaries (`src/main.rs` plus the `src/bin/lan_cross_process_*` test harnesses
+# added in Phase 13), so cargo cannot disambiguate and `tauri dev` fails with
+# "could not determine which binary to run" (exit 101) unless we name one here.
+# Regression guard: `cargo_manifest_declares_default_run` in `src/lib.rs`.
+default-run = "kindora-desktop"
 version = "0.1.0"
 description = "Kindora Desktop — Personal AI Social Agent client."
 authors = ["Kindora Contributors"]

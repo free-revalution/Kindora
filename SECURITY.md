@@ -5,9 +5,12 @@
 If you discover a security vulnerability in Kindora, please report it privately:
 
 - Open a GitHub Security Advisory on this repository, **OR**
-- Email: `security@kindora.local` (placeholder — replace with the project's actual contact)
+- Email: **jiang-revolution@outlook.com**
 
 Please do **not** open a public issue for security-sensitive reports.
+
+Participation in this project is governed by the
+[Code of Conduct](CODE_OF_CONDUCT.md).
 
 ## Threat Model (V0.1)
 

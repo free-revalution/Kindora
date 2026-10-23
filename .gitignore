@@ -9,11 +9,13 @@ out/
 *.tsbuildinfo
 
 # Tauri / Rust
+# NOTE: `apps/desktop/src-tauri/Cargo.lock` is deliberately NOT ignored.
+# This crate builds an application (a shipped desktop binary), not a library,
+# so the lockfile must be committed: it is what makes a clean-clone build
+# reproducible and pins the dependency versions CI resolves.
 src-tauri/target/
-src-tauri/Cargo.lock
 src-tauri/gen/
 apps/desktop/src-tauri/target/
-apps/desktop/src-tauri/Cargo.lock
 apps/desktop/src-tauri/gen/
 
 # Experiments — Rust build artifacts

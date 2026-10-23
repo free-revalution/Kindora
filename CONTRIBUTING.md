@@ -25,8 +25,29 @@ Thanks for your interest in improving Kindora.
 ```bash
 pnpm install
 pnpm test
-pnpm dev
+
+# Run the desktop app — note this is NOT `pnpm dev`, which only starts Vite
+pnpm -C apps/desktop tauri:dev
 ```
+
+Rust tests run from the Tauri crate:
+
+```bash
+cd apps/desktop/src-tauri
+cargo test --lib
+cargo test --test lan_e2e -- --test-threads=1
+cargo test --test lan_protocol_e2e -- --test-threads=1
+```
+
+Prerequisites and troubleshooting are in the
+[README Quick Start](README.md#quick-start). Note that Rust **stable** is
+required — `rust-toolchain.toml` at the repository root pins it.
+
+## Code of Conduct
+
+This project follows the
+[Contributor Covenant 2.1](CODE_OF_CONDUCT.md). By participating you are
+expected to uphold it.
 
 ## Pull Requests
 
