@@ -18,6 +18,9 @@ KSA = **Kindora Social Agent Protocol**, version `0.1`.
 
 ## Message Types (V0.1)
 
+The complete list, as defined in `packages/protocol/src/index.ts`
+(`MESSAGE_TYPES`):
+
 - `hello`
 - `profile_exchange`
 - `match_request`
@@ -26,6 +29,9 @@ KSA = **Kindora Social Agent Protocol**, version `0.1`.
 - `icebreaker_response`
 - `chat_message`
 - `permission_request`
+- `consent_accept`
+- `consent_reject`
+- `block`
 - `disconnect`
 
 ## Validation Rules

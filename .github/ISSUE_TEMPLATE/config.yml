@@ -1,0 +1,21 @@
+# Issue templates for Kindora.
+#
+# `blank_issues_enabled: false` pushes every report through one of the three
+# templates below. A blank issue is easy to file and hard to act on, and this
+# repository is small enough that every issue should carry enough context for
+# the maintainer to act on it without a round trip of questions.
+
+blank_issues_enabled: false
+
+contact_links:
+  - name: 💬 Question, idea, or general discussion
+    url: https://github.com/free-revalution/Kindora/discussions
+    about: Not sure whether your thought is a bug, a feature, or a question? Start here.
+
+  - name: 🔒 Security vulnerability
+    url: https://github.com/free-revalution/Kindora/security/advisories/new
+    about: Report privately. Please do not open a public issue for a vulnerability — see SECURITY.md.
+
+  - name: 📖 Development status and roadmap
+    url: https://github.com/free-revalution/Kindora/blob/main/docs/DEVELOPMENT_STATUS.md
+    about: What is really implemented, what is only tested at the socket layer, and what is planned.

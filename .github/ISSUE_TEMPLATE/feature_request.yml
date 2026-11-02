@@ -1,0 +1,81 @@
+name: Feature request
+description: Suggest something Kindora could do that it does not do today.
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Kindora is exploring one hypothesis: *can personal AI agents help people
+        discover meaningful human connections?*
+
+        A feature request is strongest when it shows how it serves that
+        hypothesis. If it would not, say so anyway — that is useful information
+        too.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem are you trying to solve?
+      description: The situation today, without proposing a solution yet.
+      placeholder: I cannot pair with someone on a different network because ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: scenario
+    attributes:
+      label: How would you use it?
+      description: A concrete walk-through of the moment you are imagining.
+    validations:
+      required: true
+
+  - type: textarea
+    id: value
+    attributes:
+      label: Why does it matter to you?
+      description: What does Kindora do better once this exists?
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What have you tried instead?
+      description: Including workarounds you built yourself, if any.
+
+  - type: textarea
+    id: implementation
+    attributes:
+      label: Implementation thoughts (optional)
+      description: |
+        Rough ideas are welcome, but they are not required and they are not a
+        commitment. If the design is uncertain, a technical proposal is a
+        better fit — see the "Technical proposal" template.
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Which part of Kindora does this touch?
+      options:
+        - Agent / matching
+        - Transport / networking
+        - Storage / privacy
+        - Desktop UI / UX
+        - Localization
+        - LLM providers
+        - Protocol
+        - Documentation / community
+        - Not sure
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched the existing issues and discussions, and this is not a duplicate.
+          required: true
+        - label: This does not involve ranking algorithms, advertising, paid placement, or selling user data.
+          required: true

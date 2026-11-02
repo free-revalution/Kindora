@@ -1,6 +1,8 @@
 # Product
 
-The authoritative product specification is [开发手册.md](../开发手册.md) (zh). This document provides an English summary.
+This document is the English summary of the product. For what is actually
+implemented — and what is not — see
+[DEVELOPMENT_STATUS.md](DEVELOPMENT_STATUS.md).
 
 ## Positioning
 

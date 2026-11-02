@@ -1,0 +1,94 @@
+name: Technical proposal
+description: Propose a change to how Kindora is designed, structured, or built.
+title: "[Proposal]: "
+labels: ["discussion", "help wanted"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this template for changes that touch the protocol, the transport, the
+        data model, the security boundaries, or the shape of a package.
+
+        **Small changes do not need this.** A bug fix or a UI tweak should just
+        be a pull request. If you are unsure which one you have, open a
+        [discussion](https://github.com/free-revalution/Kindora/discussions)
+        and ask.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What is wrong or missing today? Be concrete about the code path or the user-visible behaviour.
+      placeholder: Today `WebRtcTransport.connect()` throws, so ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: What you would build, and how it fits into the existing packages and commands.
+    validations:
+      required: true
+
+  - type: textarea
+    id: impact
+    attributes:
+      label: Technical impact
+      description: |
+        Which packages, commands, wire messages, or stored data are affected?
+        Does the KSA wire format change? Is existing data still readable?
+      placeholder: |
+        - Packages: `@kindora/transport`, `@kindora/protocol`
+        - Wire format: adds a new envelope type, version stays 0.1
+        - Migration: none — old sessions are read-only
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you considered
+      description: What else could solve this, and why did you not pick it?
+    validations:
+      required: true
+
+  - type: textarea
+    id: risks
+    attributes:
+      label: Risks and compatibility
+      description: |
+        What could break? What is the migration path? What are the security
+        implications? See [SECURITY.md](https://github.com/free-revalution/Kindora/blob/main/SECURITY.md) for the
+        current boundaries.
+    validations:
+      required: true
+
+  - type: textarea
+    id: testing
+    attributes:
+      label: How would this be tested?
+      description: |
+        Unit tests, integration tests, or a manual procedure. The LAN
+        integration suite in `apps/desktop/src-tauri/tests/` binds real sockets —
+        if your change touches the transport, that is where it belongs.
+
+  - type: dropdown
+    id: scope
+    attributes:
+      label: How large is this?
+    options:
+        - Small — a contained change to one package
+        - Medium — spans packages or touches the wire format
+        - Large — a new capability or a redesign
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched the existing issues and discussions, and this is not a duplicate.
+          required: true
+        - label: I am willing to help implement this, or at least to review the design.

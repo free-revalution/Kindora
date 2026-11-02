@@ -1,43 +1,26 @@
 # Roadmap
 
-## V0.1 — Validate the Core Hypothesis (current)
+> The canonical roadmap now lives at the repository root:
+> **[ROADMAP.md](../ROADMAP.md)**.
+>
+> It was moved there so that GitHub renders it as a first-class project page
+> and so the "Roadmap" link in the README points at a single source of truth.
+> This stub is kept so that older links to `docs/ROADMAP.md` keep working.
 
-**Goal:** prove that Agent-to-Agent → Human-to-Human is a real, valuable flow.
+## Current phase
 
-Scope:
+**V0.1 — Core experience.** The agent profile, matching, consent, icebreaker,
+chat, LAN transport and OS-keychain secret storage are implemented and covered
+by automated tests. What is **not** done: verification against a live LLM
+provider, a complete two-machine GUI session, and any form of cross-network
+(WebRTC) pairing.
 
-- Personal Agent
-- Manual Pairing (LAN / localhost first, then manual WebRTC signaling)
-- Agent-to-Agent matching (structured + LLM semantic)
-- Human consent flow
-- Icebreaker generation
-- Human chat
-- "Ask My Agent" assistant
-- Local SQLite storage + OS keychain for API keys
+See [../ROADMAP.md](../ROADMAP.md) for the full phase plan, and
+[DEVELOPMENT_STATUS.md](DEVELOPMENT_STATUS.md) for the per-feature truth with
+code evidence.
 
-Out of scope: see [开发手册.md § 68](../开发手册.md).
+## Deliberately out of scope
 
-## V0.2 — Better Discovery + Matching
-
-- QR-code pairing
-- Better matching heuristics
-- Improved P2P
-- Localization (zh / en)
-
-## V0.3 — Network Layer
-
-- DHT / Rendezvous
-- Relay / TURN
-- Encrypted agent identity
-
-## V0.4 — Relationship Engine
-
-- Repeated interaction patterns
-- Shared activity suggestions
-- Trust (local-only)
-
-## V1.0 — Open Agent Social Network
-
-- Open protocol
-- Federated agents
-- Cross-client compatibility
+Ranking algorithms that decide what a user should see; paid placement and
+advertising; data brokerage; and agent-authored messages sent without a human
+pressing send.

@@ -1,0 +1,100 @@
+name: Bug report
+description: Something in Kindora does not behave the way the documentation says it should.
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report this.
+
+        **Before you submit:** please remove any API keys, tokens, real names, or
+        personal data from the text below. Kindora stores API keys in the OS
+        keychain and never shows them, so a real key should never appear in a
+        bug report — if one does, treat it as compromised and rotate it.
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Where did you see it?
+      description: This decides which part of the codebase gets the report.
+      options:
+        - Desktop app (Tauri window)
+        - Browser dev mode (`pnpm dev`)
+        - Rust tests / LAN transport
+        - TypeScript tests
+        - Documentation only
+        - Not sure
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Kindora version or commit
+      description: The output of git rev-parse --short HEAD is good enough.
+      placeholder: e.g. main @ a1b2c3d
+    validations:
+      required: true
+
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+      description: "OS and version, plus the architecture (Apple Silicon / x86_64)."
+      placeholder: e.g. macOS 15.5 (Apple Silicon)
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: Numbered, and starting from a fresh launch where possible.
+      placeholder: |
+        1. Launch Kindora with `pnpm -C apps/desktop tauri:dev`
+        2. Open Settings, choose provider X
+        3. ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect to happen?
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: What actually happened?
+      description: What you saw, not what you think caused it.
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Error output or logs
+      description: |
+        From the terminal that launched `tauri:dev`, or from the browser console.
+
+        **Redact API keys, tokens and personal data first.**
+      render: text
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Anything else?
+      description: What you were doing, what you expected, anything unusual.
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched the existing issues and this is not a duplicate.
+          required: true
+        - label: I removed API keys, tokens and personal data from everything above.
+          required: true
