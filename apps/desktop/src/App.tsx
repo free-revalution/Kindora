@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import type { SocialProfile } from '@kindora/protocol';
 import type { StoredAgent } from '@kindora/storage';
 import { Welcome } from './views/Welcome';
@@ -22,7 +22,8 @@ import {
   refreshBlockListSnapshot,
 } from './lib/connect-service';
 import { createAgent, loadAgent, updateProfile } from './lib/agent-service';
-import { loadProvider } from './lib/llm-service';
+import { loadLlmStatus, type LlmStatus } from './lib/llm-service';
+import { useTranslate, I18nProvider, LLM_STATUS_KEYS } from './i18n';
 
 type View =
   | { kind: 'loading' }
@@ -58,21 +59,58 @@ type View =
     };
 
 export default function App() {
+  // `App` owns the provider rather than `main.tsx`. That way every entry point
+  // — the real window and every test that renders `<App />` — is wired for
+  // translations by construction, and `useI18n()`'s "no provider" warning
+  // becomes a real signal instead of routine noise.
+  return (
+    <I18nProvider>
+      <AppShell />
+    </I18nProvider>
+  );
+}
+
+function AppShell() {
+  const t = useTranslate();
   const [view, setView] = useState<View>({ kind: 'loading' });
-  const [llmReady, setLlmReady] = useState(false);
+  const [llmStatus, setLlmStatus] = useState<LlmStatus>({
+    ready: false,
+    reason: 'not_configured',
+  });
+
+  /**
+   * Re-read the saved LLM configuration.
+   *
+   * This has to be a callback the Settings screen can trigger, not a one-off
+   * read at startup: the Connect screen gates on `llmStatus.ready`, and the
+   * only way a user configures an LLM is by saving it in Settings while the
+   * app is already running. Reading once at mount meant a successful save
+   * changed nothing until the app was restarted — the save banner said
+   * "Saved" while the app still believed there was no LLM.
+   */
+  const refreshLlmStatus = useCallback(() => {
+    void loadLlmStatus()
+      .then(setLlmStatus)
+      .catch((err: unknown) => {
+        // A broken config is a state to report, not a crash. `loadLlmStatus`
+        // never throws, so this is belt-and-braces.
+        console.error('Kindora: could not read the saved LLM config.', err);
+        setLlmStatus({ ready: false, reason: 'invalid_config' });
+      });
+  }, []);
 
   useEffect(() => {
     void loadAgent().then((agent) => {
       setView(agent ? { kind: 'home', agent } : { kind: 'welcome' });
     });
-    void loadProvider().then((p) => setLlmReady(p !== null));
+    refreshLlmStatus();
     void refreshBlockListSnapshot();
-  }, []);
+  }, [refreshLlmStatus]);
 
   if (view.kind === 'loading') {
     return (
       <main className="text-kindora-500 flex h-full items-center justify-center text-sm">
-        Loading…
+        {t('app.loading')}
       </main>
     );
   }
@@ -84,7 +122,7 @@ export default function App() {
   if (view.kind === 'create') {
     return (
       <CreateAgentForm
-        submitLabel="Create Agent"
+        variant="create"
         onSubmit={async (profile) => {
           const agent = await createAgent(profile as SocialProfile);
           setView({ kind: 'home', agent });
@@ -97,7 +135,7 @@ export default function App() {
     return (
       <CreateAgentForm
         initialProfile={view.agent.profile}
-        submitLabel="Save"
+        variant="edit"
         onCancel={() => setView({ kind: 'home', agent: view.agent })}
         onSubmit={async (profile) => {
           const updated = await updateProfile(view.agent, profile as SocialProfile);
@@ -108,13 +146,21 @@ export default function App() {
   }
 
   if (view.kind === 'settings') {
-    return <Settings onClose={() => setView({ kind: 'home', agent: view.agent })} />;
+    return (
+      <Settings
+        onClose={() => setView({ kind: 'home', agent: view.agent })}
+        onSaved={refreshLlmStatus}
+      />
+    );
   }
 
   if (view.kind === 'connect') {
+    const notReady = llmStatus.reason ? LLM_STATUS_KEYS[llmStatus.reason] : undefined;
     return (
       <ConnectView
-        llmReady={llmReady}
+        llmReady={llmStatus.ready}
+        llmNotReadyTitle={notReady ? t(notReady.title) : undefined}
+        llmNotReadyBody={notReady ? t(notReady.body) : undefined}
         onConnected={(handle) => setView({ kind: 'match', agent: view.agent, handle })}
         onCancel={() => setView({ kind: 'home', agent: view.agent })}
       />

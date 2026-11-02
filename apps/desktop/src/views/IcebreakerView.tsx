@@ -24,6 +24,7 @@ import type {
   GenerateIcebreakerResult,
 } from '@kindora/agent';
 import { ICEBREAKER_TOPIC_CAP } from '@kindora/agent';
+import { useTranslate } from '../i18n';
 
 export type IcebreakerPhase =
   | 'idle'
@@ -70,6 +71,7 @@ export function IcebreakerView({
   onSkip,
   onDisconnect,
 }: IcebreakerViewProps) {
+  const t = useTranslate();
   const isLoading = phase === 'generating' || phase === 'regenerating';
 
   return (
@@ -77,28 +79,24 @@ export function IcebreakerView({
       <header className="flex items-start justify-between">
         <div>
           <p className="text-kindora-500 dark:text-kindora-400 text-xs uppercase tracking-wide">
-            Pick a starter
+            {t('icebreaker.eyebrow')}
           </p>
-          <h1 className="mt-1 text-3xl font-semibold tracking-tight">
-            {peerDisplayName}
-          </h1>
+          <h1 className="mt-1 text-3xl font-semibold tracking-tight">{peerDisplayName}</h1>
           <p className="text-kindora-500 dark:text-kindora-400 mt-1 text-sm">
-            You: {selfDisplayName}
+            {t('icebreaker.you', { name: selfDisplayName })}
           </p>
         </div>
         <button type="button" className="kindora-button-ghost" onClick={onDisconnect}>
-          Close
+          {t('common.close')}
         </button>
       </header>
 
       <section className="kindora-card flex flex-col gap-2">
         <h2 className="text-kindora-500 dark:text-kindora-400 text-xs uppercase tracking-wide">
-          How icebreakers work
+          {t('icebreaker.howItWorks')}
         </h2>
         <p className="text-sm leading-relaxed">
-          Your agent suggests up to {ICEBREAKER_TOPIC_CAP} conversation starters based
-          on both profiles. Pick one to send, edit it, ask for new ones, or skip
-          straight to chat. Nothing is sent automatically — the choice is yours.
+          {t('icebreaker.howItWorksBody', { max: ICEBREAKER_TOPIC_CAP })}
         </p>
       </section>
 
@@ -108,11 +106,11 @@ export function IcebreakerView({
           data-testid="icebreaker-error"
         >
           <h2 className="text-rose-600 dark:text-rose-400 text-xs uppercase tracking-wide">
-            Generation failed
+            {t('icebreaker.generationFailed')}
           </h2>
-          <p className="text-sm leading-relaxed">{error ?? 'Unknown error.'}</p>
+          <p className="text-sm leading-relaxed">{error ?? t('icebreaker.unknownError')}</p>
           <button type="button" className="kindora-button-ghost self-start" onClick={onRegenerate}>
-            Try again
+            {t('icebreaker.tryAgain')}
           </button>
         </section>
       )}
@@ -123,12 +121,9 @@ export function IcebreakerView({
           data-testid="icebreaker-blocked"
         >
           <h2 className="text-rose-600 dark:text-rose-400 text-xs uppercase tracking-wide">
-            Icebreaker disabled
+            {t('icebreaker.disabled')}
           </h2>
-          <p className="text-sm leading-relaxed">
-            Both profiles disallow agent-assisted conversation starters. You can still
-            enter the chat and write your own message.
-          </p>
+          <p className="text-sm leading-relaxed">{t('icebreaker.disabledBody')}</p>
         </section>
       )}
 
@@ -138,11 +133,11 @@ export function IcebreakerView({
           data-testid="icebreaker-degraded"
         >
           <h2 className="text-amber-600 dark:text-amber-400 text-xs uppercase tracking-wide">
-            Couldn’t generate starters
+            {t('icebreaker.couldNotGenerate')}
           </h2>
           <p className="text-sm leading-relaxed">{degradationNote}</p>
           <button type="button" className="kindora-button-ghost self-start" onClick={onRegenerate}>
-            Try again
+            {t('icebreaker.tryAgain')}
           </button>
         </section>
       )}
@@ -180,14 +175,15 @@ function IcebreakerTopicList({
   onUse: (chosen: string) => void;
   phase: IcebreakerPhase;
 }) {
+  const t = useTranslate();
   if (isLoading && topics.length === 0) {
     return (
       <section className="kindora-card flex flex-col gap-3" data-testid="icebreaker-loading">
         <h2 className="text-kindora-500 dark:text-kindora-400 text-xs uppercase tracking-wide">
-          Drafting starters
+          {t('icebreaker.drafting')}
         </h2>
         <p className="text-kindora-500 dark:text-kindora-400 text-sm italic">
-          Your agent is thinking about what to say…
+          {t('icebreaker.thinking')}
         </p>
         <div
           className="border-kindora-200 dark:border-kindora-700 h-2 w-40 animate-pulse rounded-full border"
@@ -204,8 +200,7 @@ function IcebreakerTopicList({
         data-testid="icebreaker-empty"
       >
         <p className="text-kindora-500 dark:text-kindora-400 text-sm italic">
-          No starters yet — click Regenerate to ask your agent again, or Skip to enter
-          the chat directly.
+          {t('icebreaker.empty')}
         </p>
       </section>
     );
@@ -239,6 +234,7 @@ function IcebreakerTopicRow({
   /** Called with the text the user wants to send (edited or original). */
   onUse: (chosen: string) => void;
 }) {
+  const t = useTranslate();
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(topic);
 
@@ -272,7 +268,7 @@ function IcebreakerTopicRow({
             disabled={disabled || draft.trim().length === 0}
             data-testid="icebreaker-use"
           >
-            Use edited
+            {t('icebreaker.useEdited')}
           </button>
           <button
             type="button"
@@ -283,7 +279,7 @@ function IcebreakerTopicRow({
             }}
             data-testid="icebreaker-cancel-edit"
           >
-            Cancel
+            {t('common.cancel')}
           </button>
         </div>
       </article>
@@ -301,7 +297,7 @@ function IcebreakerTopicRow({
           disabled={disabled}
           data-testid="icebreaker-use"
         >
-          Use
+          {t('icebreaker.use')}
         </button>
         <button
           type="button"
@@ -310,7 +306,7 @@ function IcebreakerTopicRow({
           disabled={disabled}
           data-testid="icebreaker-edit"
         >
-          Edit
+          {t('icebreaker.edit')}
         </button>
       </div>
     </article>
@@ -334,10 +330,11 @@ function ActionBar({
   onSkip: () => void;
   isLoading: boolean;
 }) {
+  const t = useTranslate();
   return (
     <section className="kindora-card flex flex-col gap-3" data-testid="icebreaker-actions">
       <h2 className="text-kindora-500 dark:text-kindora-400 text-xs uppercase tracking-wide">
-        Or
+        {t('icebreaker.or')}
       </h2>
       <div className="flex flex-wrap gap-2">
         <button
@@ -347,7 +344,7 @@ function ActionBar({
           disabled={isLoading}
           data-testid="icebreaker-regenerate"
         >
-          {topicsEmpty ? 'Generate starters' : 'Regenerate'}
+          {topicsEmpty ? t('icebreaker.generate') : t('icebreaker.regenerate')}
         </button>
         <button
           type="button"
@@ -355,11 +352,11 @@ function ActionBar({
           onClick={onSkip}
           data-testid="icebreaker-skip"
         >
-          Skip — enter chat
+          {t('icebreaker.skip')}
         </button>
       </div>
       <p className="text-kindora-500 dark:text-kindora-400 text-xs">
-        Phase {phase} · AI only suggests — it never sends anything for you.
+        Phase {phase} · {t('icebreaker.aiOnlySuggests')}
       </p>
     </section>
   );

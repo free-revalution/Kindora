@@ -15,33 +15,51 @@ import {
   type SocialIntent,
   type SocialProfile,
 } from '@kindora/protocol';
-import { isProfileValid, validateProfile } from '@kindora/agent';
+import { DEFAULT_PROFILE_LIMITS, isProfileValid, validateProfile } from '@kindora/agent';
+import {
+  CONVERSATION_STYLE_KEYS,
+  PROFILE_VALIDATION_KEYS,
+  SOCIAL_INTENT_KEYS,
+  useTranslate,
+  type TranslationKey,
+} from '../i18n';
 
-const SUGGESTED_INTERESTS = [
-  'AI',
-  'Programming',
-  'Open Source',
-  'Gaming',
-  'FPV',
-  'Indie Hacking',
-  'Music',
-  'Reading',
-  'Climbing',
+/**
+ * Suggestions are translation KEYS, not strings. The label the user sees — and
+ * therefore the value stored in `profile.interests` — is resolved through `t`,
+ * so a Chinese user gets Chinese suggestions that are meaningful to them.
+ */
+const SUGGESTED_INTEREST_KEYS: readonly TranslationKey[] = [
+  'agent.suggestedInterest.ai',
+  'agent.suggestedInterest.programming',
+  'agent.suggestedInterest.openSource',
+  'agent.suggestedInterest.gaming',
+  'agent.suggestedInterest.fpv',
+  'agent.suggestedInterest.indieHacking',
+  'agent.suggestedInterest.music',
+  'agent.suggestedInterest.reading',
+  'agent.suggestedInterest.climbing',
 ];
 
 export interface CreateAgentFormProps {
   initialProfile?: SocialProfile;
-  submitLabel: string;
+  /**
+   * Which screen this is. Drives the heading and the submit button label.
+   * An explicit variant replaces the old `submitLabel === 'Save'` string
+   * comparison, which could not survive being translated.
+   */
+  variant: 'create' | 'edit';
   onSubmit: (profile: SocialProfile) => Promise<void>;
   onCancel?: () => void;
 }
 
 export function CreateAgentForm({
   initialProfile,
-  submitLabel,
+  variant,
   onSubmit,
   onCancel,
 }: CreateAgentFormProps) {
+  const t = useTranslate();
   const [nickname, setNickname] = useState(initialProfile?.nickname ?? '');
   const [bio, setBio] = useState(initialProfile?.bio ?? '');
   const [interests, setInterests] = useState<string[]>(initialProfile?.interests ?? []);
@@ -71,14 +89,26 @@ export function CreateAgentForm({
     boundaries,
   };
   const errors = validateProfile(profile);
-  const errorByField = new Map(errors.map((e) => [e.field, e.message]));
+  // Validation messages come from `@kindora/agent` in English. We localise them
+  // from the error's `code` (see PROFILE_VALIDATION_KEYS) and pass the real
+  // limit through, so the number shown always matches the limit that actually
+  // rejected the input. `message` remains the fallback for any code we have not
+  // mapped yet.
+  const errorByField = new Map(
+    errors.map((e) => [
+      e.field,
+      t(PROFILE_VALIDATION_KEYS[e.code], { max: validationLimit(e.code) }),
+    ]),
+  );
   const canSubmit = isProfileValid(profile) && !submitting;
+
+  const suggestedInterests = SUGGESTED_INTEREST_KEYS.map((k) => t(k));
 
   function addInterest(value: string) {
     const trimmed = value.trim();
     if (!trimmed) return;
     if (interests.includes(trimmed)) return;
-    if (interests.length >= 12) return;
+    if (interests.length >= DEFAULT_PROFILE_LIMITS.maxInterests) return;
     setInterests([...interests, trimmed]);
     setInterestInput('');
   }
@@ -91,7 +121,7 @@ export function CreateAgentForm({
     const trimmed = value.trim();
     if (!trimmed) return;
     if (currentActivities.includes(trimmed)) return;
-    if (currentActivities.length >= 12) return;
+    if (currentActivities.length >= DEFAULT_PROFILE_LIMITS.maxActivities) return;
     setCurrentActivities([...currentActivities, trimmed]);
     setActivityInput('');
   }
@@ -134,47 +164,48 @@ export function CreateAgentForm({
     >
       <header>
         <h1 className="text-3xl font-semibold tracking-tight">
-          {submitLabel === 'Save' ? 'Edit your agent' : 'Create your agent'}
+          {t(variant === 'edit' ? 'agent.editTitle' : 'agent.createTitle')}
         </h1>
-        <p className="text-kindora-600 dark:text-kindora-300 mt-2 text-sm">
-          This profile is stored locally and only the public parts are ever shared with another
-          agent.
-        </p>
+        <p className="text-kindora-600 dark:text-kindora-300 mt-2 text-sm">{t('agent.body')}</p>
       </header>
 
-      <Field label="Nickname" error={errorByField.get('nickname')}>
+      <Field label={t('agent.nickname')} error={errorByField.get('nickname')}>
         <input
           type="text"
           value={nickname}
           onChange={(e) => setNickname(e.target.value)}
           maxLength={32}
           className="kindora-input"
-          placeholder="Jason"
+          placeholder={t('agent.nicknamePlaceholder')}
           autoFocus
         />
       </Field>
 
-      <Field label="Bio" error={errorByField.get('bio')}>
+      <Field label={t('agent.bio')} error={errorByField.get('bio')}>
         <textarea
           value={bio}
           onChange={(e) => setBio(e.target.value)}
           maxLength={280}
           rows={3}
           className="kindora-input resize-y"
-          placeholder="Software engineer interested in AI agents."
+          placeholder={t('agent.bioPlaceholder')}
         />
       </Field>
 
-      <Field label="Interests" hint="Up to 12" error={errorByField.get('interests')}>
+      <Field
+        label={t('agent.interests')}
+        hint={t('agent.interestsHint', { max: DEFAULT_PROFILE_LIMITS.maxInterests })}
+        error={errorByField.get('interests')}
+      >
         <div className="flex flex-wrap gap-2">
           {interests.map((i) => (
-            <Chip key={i} onRemove={() => removeInterest(i)}>
+            <Chip key={i} onRemove={() => removeInterest(i)} removeLabel={t('agent.removeItem', { value: i })}>
               {i}
             </Chip>
           ))}
           {interests.length === 0 && (
             <span className="text-kindora-500 dark:text-kindora-400 text-sm">
-              Pick a few from below or type your own.
+              {t('agent.interestsEmpty')}
             </span>
           )}
         </div>
@@ -190,38 +221,40 @@ export function CreateAgentForm({
               }
             }}
             className="kindora-input flex-1"
-            placeholder="Add an interest and press Enter"
+            placeholder={t('agent.interestsPlaceholder')}
           />
           <button
             type="button"
             className="kindora-button-ghost"
             onClick={() => addInterest(interestInput)}
           >
-            Add
+            {t('common.add')}
           </button>
         </div>
         <div className="mt-3 flex flex-wrap gap-2">
-          {SUGGESTED_INTERESTS.filter((s) => !interests.includes(s)).map((s) => (
-            <button
-              key={s}
-              type="button"
-              onClick={() => addInterest(s)}
-              className="border-kindora-300 text-kindora-600 hover:border-kindora-500 hover:text-kindora-800 dark:border-kindora-600 dark:text-kindora-200 dark:hover:border-kindora-400 rounded-full border border-dashed px-3 py-1 text-xs"
-            >
-              + {s}
-            </button>
-          ))}
+          {suggestedInterests
+            .filter((s) => !interests.includes(s))
+            .map((s) => (
+              <button
+                key={s}
+                type="button"
+                onClick={() => addInterest(s)}
+                className="border-kindora-300 text-kindora-600 hover:border-kindora-500 hover:text-kindora-800 dark:border-kindora-600 dark:text-kindora-200 dark:hover:border-kindora-400 rounded-full border border-dashed px-3 py-1 text-xs"
+              >
+                + {s}
+              </button>
+            ))}
         </div>
       </Field>
 
       <Field
-        label="Current activities"
-        hint="Up to 12 — only shared if your boundaries allow it"
+        label={t('agent.currentActivities')}
+        hint={t('agent.currentActivitiesHint', { max: DEFAULT_PROFILE_LIMITS.maxActivities })}
         error={errorByField.get('currentActivities')}
       >
         <div className="flex flex-wrap gap-2">
           {currentActivities.map((a) => (
-            <Chip key={a} onRemove={() => removeActivity(a)}>
+            <Chip key={a} onRemove={() => removeActivity(a)} removeLabel={t('agent.removeItem', { value: a })}>
               {a}
             </Chip>
           ))}
@@ -238,21 +271,21 @@ export function CreateAgentForm({
               }
             }}
             className="kindora-input flex-1"
-            placeholder="Building an AI Social Agent project."
+            placeholder={t('agent.currentActivitiesPlaceholder')}
           />
           <button
             type="button"
             className="kindora-button-ghost"
             onClick={() => addActivity(activityInput)}
           >
-            Add
+            {t('common.add')}
           </button>
         </div>
       </Field>
 
       <Field
-        label="Social intent"
-        hint="Pick what you're looking for. Pick at least one."
+        label={t('agent.socialIntent')}
+        hint={t('agent.socialIntentHint')}
         error={errorByField.get('socialIntent')}
       >
         <div className="flex flex-col gap-2">
@@ -261,15 +294,15 @@ export function CreateAgentForm({
               key={intent}
               checked={socialIntent.includes(intent)}
               onChange={() => toggleIntent(intent)}
-              label={intentLabel(intent)}
+              label={t(SOCIAL_INTENT_KEYS[intent])}
             />
           ))}
         </div>
       </Field>
 
       <Field
-        label="Conversation style"
-        hint="Pick at least one."
+        label={t('agent.conversationStyle')}
+        hint={t('agent.conversationStyleHint')}
         error={errorByField.get('conversationStyle')}
       >
         <div className="flex flex-wrap gap-2">
@@ -279,7 +312,7 @@ export function CreateAgentForm({
               active={conversationStyle.includes(style)}
               onClick={() => toggleStyle(style)}
             >
-              {capitalize(style)}
+              {t(CONVERSATION_STYLE_KEYS[style])}
             </Toggle>
           ))}
         </div>
@@ -293,40 +326,41 @@ export function CreateAgentForm({
             onClick={onCancel}
             disabled={submitting}
           >
-            Cancel
+            {t('common.cancel')}
           </button>
         ) : (
           <span />
         )}
         <button type="submit" className="kindora-button px-8" disabled={!canSubmit}>
-          {submitting ? 'Saving…' : submitLabel}
+          {submitting ? t('common.saving') : t(variant === 'edit' ? 'agent.saveSubmit' : 'agent.createSubmit')}
         </button>
       </div>
     </form>
   );
 }
 
-function intentLabel(intent: SocialIntent): string {
-  switch (intent) {
-    case 'similar_interests':
-      return 'Meet people with similar interests';
-    case 'project_partner':
-      return 'Find project partners';
-    case 'gaming_partner':
-      return 'Find gaming partners';
-    case 'learning_partner':
-      return 'Find learning partners';
-    case 'technical_discussion':
-      return 'Discuss technical topics';
-    case 'long_term_friendship':
-      return 'Make long-term friends';
-    case 'activity_partner':
-      return 'Find activity partners';
+/**
+ * The limit each validation code refers to. Kept beside the form rather than
+ * parsed out of the English `message` — a wording change must not silently
+ * change which number the user is shown.
+ */
+function validationLimit(code: keyof typeof PROFILE_VALIDATION_KEYS): number {
+  switch (code) {
+    case 'nickname_too_long':
+      return DEFAULT_PROFILE_LIMITS.maxNickname;
+    case 'bio_too_long':
+      return DEFAULT_PROFILE_LIMITS.maxBio;
+    case 'interests_too_many':
+      return DEFAULT_PROFILE_LIMITS.maxInterests;
+    case 'activities_too_many':
+      return DEFAULT_PROFILE_LIMITS.maxActivities;
+    case 'social_intent_too_many':
+      return DEFAULT_PROFILE_LIMITS.maxIntent;
+    case 'conversation_style_too_many':
+      return DEFAULT_PROFILE_LIMITS.maxStyle;
+    default:
+      return 0;
   }
-}
-
-function capitalize(s: string): string {
-  return s.charAt(0).toUpperCase() + s.slice(1);
 }
 
 function Field({
@@ -354,16 +388,19 @@ function Field({
   );
 }
 
-function Chip({ children, onRemove }: { children: React.ReactNode; onRemove: () => void }) {
+function Chip({
+  children,
+  onRemove,
+  removeLabel,
+}: {
+  children: React.ReactNode;
+  onRemove: () => void;
+  removeLabel: string;
+}) {
   return (
     <span className="kindora-chip">
       {children}
-      <button
-        type="button"
-        onClick={onRemove}
-        aria-label={`Remove ${typeof children === 'string' ? children : ''}`}
-        className="kindora-chip-x"
-      >
+      <button type="button" onClick={onRemove} aria-label={removeLabel} className="kindora-chip-x">
         ×
       </button>
     </span>

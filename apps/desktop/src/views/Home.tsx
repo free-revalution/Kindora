@@ -4,7 +4,9 @@
  * 开发手册.md § 42.
  */
 
+import type { SocialIntent } from '@kindora/protocol';
 import type { StoredAgent } from '@kindora/storage';
+import { SOCIAL_INTENT_SHORT_KEYS, CONVERSATION_STYLE_KEYS, useTranslate, type Translate } from '../i18n';
 
 export interface HomeProps {
   agent: StoredAgent;
@@ -14,17 +16,18 @@ export interface HomeProps {
 }
 
 export function Home({ agent, onEdit, onConnect, onSettings }: HomeProps) {
+  const t = useTranslate();
   const { profile } = agent;
   return (
     <main className="mx-auto flex w-full max-w-2xl flex-col gap-8 px-6 py-10">
       <header className="flex items-start justify-between">
         <div>
           <p className="text-kindora-500 dark:text-kindora-400 text-xs uppercase tracking-wide">
-            My Agent
+            {t('home.myAgent')}
           </p>
           <h1 className="mt-1 flex items-center gap-2 text-3xl font-semibold tracking-tight">
             <span className="h-3 w-3 rounded-full bg-emerald-500" aria-hidden />
-            {profile.nickname || 'Unnamed'}
+            {profile.nickname || t('home.unnamed')}
           </h1>
           <p className="text-kindora-500 dark:text-kindora-400 mt-1 font-mono text-xs">
             {agent.agentId.slice(0, 8)}…
@@ -32,10 +35,10 @@ export function Home({ agent, onEdit, onConnect, onSettings }: HomeProps) {
         </div>
         <div className="flex gap-2">
           <button type="button" className="kindora-button-ghost" onClick={onSettings}>
-            Settings
+            {t('home.settings')}
           </button>
           <button type="button" className="kindora-button-ghost" onClick={onEdit}>
-            Edit Profile
+            {t('home.editProfile')}
           </button>
         </div>
       </header>
@@ -45,11 +48,11 @@ export function Home({ agent, onEdit, onConnect, onSettings }: HomeProps) {
 
         <div className="mt-6">
           <h2 className="text-kindora-500 dark:text-kindora-400 text-xs uppercase tracking-wide">
-            Interests
+            {t('home.interests')}
           </h2>
           <div className="mt-2 flex flex-wrap gap-2">
             {profile.interests.length === 0 ? (
-              <span className="text-kindora-400 text-sm">No interests yet.</span>
+              <span className="text-kindora-400 text-sm">{t('home.noInterests')}</span>
             ) : (
               profile.interests.map((i) => (
                 <span key={i} className="kindora-chip-plain">
@@ -63,7 +66,7 @@ export function Home({ agent, onEdit, onConnect, onSettings }: HomeProps) {
         {profile.currentActivities.length > 0 && (
           <div className="mt-6">
             <h2 className="text-kindora-500 dark:text-kindora-400 text-xs uppercase tracking-wide">
-              Currently
+              {t('home.currently')}
             </h2>
             <ul className="mt-2 space-y-1 text-sm">
               {profile.currentActivities.map((a) => (
@@ -76,33 +79,31 @@ export function Home({ agent, onEdit, onConnect, onSettings }: HomeProps) {
 
       <section className="kindora-card">
         <h2 className="text-kindora-500 dark:text-kindora-400 text-xs uppercase tracking-wide">
-          Looking for
+          {t('home.lookingFor')}
         </h2>
-        <p className="mt-2 text-sm">{intentSummary(profile.socialIntent)}</p>
+        <p className="mt-2 text-sm">{intentSummary(t, profile.socialIntent)}</p>
 
         <h2 className="text-kindora-500 dark:text-kindora-400 mt-6 text-xs uppercase tracking-wide">
-          Conversation style
+          {t('home.conversationStyle')}
         </h2>
-        <p className="mt-2 text-sm">{profile.conversationStyle.join(' · ')}</p>
+        <p className="mt-2 text-sm">
+          {profile.conversationStyle.map((s) => t(CONVERSATION_STYLE_KEYS[s])).join(' · ')}
+        </p>
       </section>
 
       <section className="flex justify-center pt-2">
         <button type="button" className="kindora-button px-10 py-3 text-base" onClick={onConnect}>
-          Connect Agent
+          {t('home.connectAgent')}
         </button>
       </section>
     </main>
   );
 }
 
-function intentSummary(intents: readonly string[]): string {
+function intentSummary(
+  t: Translate,
+  intents: readonly SocialIntent[],
+): string {
   if (intents.length === 0) return '—';
-  return intents.map(humanize).join(' · ');
-}
-
-function humanize(intent: string): string {
-  return intent
-    .split('_')
-    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
-    .join(' ');
+  return intents.map((i) => t(SOCIAL_INTENT_SHORT_KEYS[i])).join(' · ');
 }

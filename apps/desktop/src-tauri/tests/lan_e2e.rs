@@ -32,6 +32,13 @@ fn next_test_port() -> u16 {
 }
 
 fn fresh_state() -> kindora_lib::LanState {
+    fresh_state_with_port().0
+}
+
+/// Same as `fresh_state`, but also returns the UDP discovery port the
+/// state was given — needed by the test that asserts the port is
+/// released when the host stops.
+fn fresh_state_with_port() -> (kindora_lib::LanState, u16) {
     // `rt-multi-thread` runtime is set by the `#[tokio::test]` macro;
     // the helper exists so every test gets a clean LanState.
     let state = kindora_lib::LanState::new();
@@ -43,10 +50,11 @@ fn fresh_state() -> kindora_lib::LanState {
     // host still accepts a real TCP dial from any interface. This is
     // a documented test-only override — production uses 255.255.255.255
     // and binds 0.0.0.0:52419.
+    let port = next_test_port();
     state.set_broadcast_addr(LOOPBACK_BROADCAST.to_string());
     state.set_udp_bind_addr(LOOPBACK_BROADCAST.to_string());
-    state.set_udp_port(next_test_port());
-    state
+    state.set_udp_port(port);
+    (state, port)
 }
 
 /// Drive host_start, then wait for `host_linked` to flip true.
@@ -227,6 +235,113 @@ async fn host_double_start_is_rejected() {
         "expected 'already running' error, got: {msg}"
     );
     state.host_stop().await.expect("host_stop");
+}
+
+/// Two starts that overlap must produce exactly one host.
+///
+/// This is the regression guard for the "already running in mode host"
+/// error the desktop app showed. `host_start` awaits its binds, so a
+/// bare "is a host already running?" check was never atomic: both
+/// calls passed it, both spawned a UDP responder on the same fixed
+/// discovery port (the loser lost the bind with EADDRINUSE) and the
+/// loser was only rejected afterwards. The reservation makes
+/// check-and-set atomic, so the loser must fail *before* it touches
+/// the network.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_host_start_yields_exactly_one_host() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let state = fresh_state();
+
+    let (a, b) = tokio::join!(
+        state.host_start("CONCUR".into(), "agent-a".into(), "A".into()),
+        state.host_start("CONCUR".into(), "agent-b".into(), "B".into()),
+    );
+    assert!(
+        a.is_ok() ^ b.is_ok(),
+        "exactly one concurrent host_start must succeed; got a={:?} b={:?}",
+        a.as_ref().err(),
+        b.as_ref().err(),
+    );
+    if let Err(e) = &b {
+        assert!(
+            e.to_string().contains("already running"),
+            "the loser must be rejected with 'already running', got: {e}"
+        );
+    }
+    if let Err(e) = &a {
+        assert!(
+            e.to_string().contains("already running"),
+            "the loser must be rejected with 'already running', got: {e}"
+        );
+    }
+
+    // The loser must not have leaked a responder: after the winner is
+    // stopped, the next start must succeed and be discoverable.
+    state.host_stop().await.expect("host_stop");
+    state
+        .host_start("CONCUR".into(), "agent-c".into(), "C".into())
+        .await
+        .expect("host_start after the race");
+    state.host_stop().await.expect("cleanup host_stop");
+}
+
+/// `host_stop` must not return until the discovery socket is released.
+///
+/// The discovery port is fixed, so the next `host_start` binds it
+/// again. Signalling the responder to stop without waiting for it to
+/// exit let the next start race the teardown and lose the bind with
+/// EADDRINUSE — the app showed a pairing code while the responder was
+/// already dead, so no peer could ever find the host.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn host_stop_releases_the_discovery_port() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let (state, port) = fresh_state_with_port();
+    state
+        .host_start("FREE01".into(), "agent-host".into(), "HostDisplay".into())
+        .await
+        .expect("host_start");
+    state.host_stop().await.expect("host_stop");
+
+    // The port must be free the moment host_stop returns. Binding it
+    // here is the check: a responder that has not exited yet still
+    // holds the socket.
+    let socket = tokio::net::UdpSocket::bind((LOOPBACK_BROADCAST, port))
+        .await
+        .expect("the discovery port must be released by the time host_stop returns");
+    drop(socket);
+}
+
+/// A host that was stopped and started again must still be discoverable.
+///
+/// This is the end-to-end version of the EADDRINUSE defect: the second
+/// start used to succeed while its responder silently died, so the
+/// host displayed a pairing code that no joiner could ever answer.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_restarted_host_is_still_discoverable() {
+    let _ = env_logger::builder().is_test(true).try_init();
+    let state = fresh_state();
+    let code = "RSTRTD".to_string();
+
+    state
+        .host_start(code.clone(), "agent-host".into(), "HostDisplay".into())
+        .await
+        .expect("first host_start");
+    state.host_stop().await.expect("host_stop");
+    state
+        .host_start(code.clone(), "agent-host".into(), "HostDisplay".into())
+        .await
+        .expect("second host_start");
+
+    let peers = state
+        .join_discover(code.clone(), 2000)
+        .await
+        .expect("discover");
+    assert!(
+        !peers.is_empty(),
+        "a restarted host must still answer UDP discovery"
+    );
+
+    state.host_stop().await.expect("cleanup host_stop");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

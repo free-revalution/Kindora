@@ -161,12 +161,27 @@ impl TcpLink {
 }
 
 struct HostSide {
+    /// Identifies this particular host start.
+    ///
+    /// `host_start` reserves the slot before it awaits any bind, so a
+    /// concurrent `host_stop` can take the reservation away again. The
+    /// epoch lets the start detect that and unwind instead of
+    /// resurrecting a host the user just stopped.
+    epoch: u64,
     tcp_port: u16,
     agent_id: String,
     display_name: String,
     code: String,
     link: Option<TcpLink>,
     udp_shutdown: Option<tokio::sync::watch::Sender<bool>>,
+    /// Resolves once the UDP responder has exited and released its
+    /// socket.
+    ///
+    /// The discovery port is fixed, so the next `host_start` cannot
+    /// bind it until the previous responder has actually dropped the
+    /// socket. `host_stop` waits on this so a stop→start sequence
+    /// cannot lose the bind to a half-finished teardown.
+    udp_done: Option<tokio::sync::oneshot::Receiver<()>>,
     /// Signalled when the accept loop has handed off (or failed) so
     /// host_stop can wait for it to exit instead of racing the lock.
     accept_task_done: Option<tokio::sync::oneshot::Sender<()>>,
@@ -182,12 +197,14 @@ struct JoinSide {
 impl Default for HostSide {
     fn default() -> Self {
         Self {
+            epoch: 0,
             tcp_port: 0,
             agent_id: String::new(),
             display_name: String::new(),
             code: String::new(),
             link: None,
             udp_shutdown: None,
+            udp_done: None,
             accept_task_done: None,
         }
     }
@@ -227,6 +244,10 @@ pub struct LanState {
 struct Inner {
     host: Option<HostSide>,
     join: Option<JoinSide>,
+    /// Monotonic counter identifying each host start. The reservation
+    /// carries the epoch it was created with so a start can tell
+    /// whether its slot is still the one it reserved.
+    host_epoch: u64,
 }
 
 impl LanState {
@@ -307,40 +328,106 @@ impl LanState {
         agent_id: String,
         display_name: String,
     ) -> Result<HostInfo, LanError> {
-        // Lock-check: refuse double-start.
-        {
+        // ---- 1. Reserve the host slot ----
+        //
+        // The binds below are awaited, so the state lock cannot be held
+        // across them. A bare "is a host already running?" check is
+        // therefore NOT atomic: two concurrent `host_start` calls both
+        // passed it, both spawned a UDP responder on the same fixed
+        // discovery port (the loser lost the bind with EADDRINUSE) and
+        // the loser was only rejected afterwards with `AlreadyRunning`.
+        // Reserving the slot first makes check-and-set atomic, so the
+        // loser returns before it touches the network at all.
+        //
+        // The shutdown channels are created up front and stored in the
+        // reservation, so a `host_stop` that lands while we are still
+        // binding can still stop the responder we are about to spawn.
+        let (udp_sh_tx, udp_sh_rx) = tokio::sync::watch::channel(false);
+        let (udp_done_tx, udp_done_rx) = tokio::sync::oneshot::channel::<()>();
+        let epoch = {
             let mut g = self.inner.lock().await;
             if g.host.is_some() {
                 return Err(LanError::AlreadyRunning("host".into()));
             }
-            // Reserve the host slot by inserting a placeholder; we'll
-            // fill in tcp_port + link + accept_task_done after we bind.
-            // We can't hold the lock across the bind below, so we use
-            // a sentinel-free pattern: bind, then insert.
-            let _ = &mut *g; // keep the lock until end of scope
-        }
+            g.host_epoch = g.host_epoch.wrapping_add(1);
+            let epoch = g.host_epoch;
+            g.host = Some(HostSide {
+                epoch,
+                tcp_port: 0,
+                agent_id: agent_id.clone(),
+                display_name: display_name.clone(),
+                code: code.clone(),
+                link: None,
+                udp_shutdown: Some(udp_sh_tx.clone()),
+                udp_done: Some(udp_done_rx),
+                accept_task_done: None,
+            });
+            epoch
+        };
 
-        let listener = TcpListener::bind(("0.0.0.0", 0)).await?;
-        let tcp_port = listener.local_addr()?.port();
+        // ---- 2. Bind the TCP listener ----
+        let listener = match TcpListener::bind(("0.0.0.0", 0)).await {
+            Ok(l) => l,
+            Err(e) => {
+                self.release_host_reservation(epoch).await;
+                return Err(LanError::Io(e));
+            }
+        };
+        let tcp_port = match listener.local_addr() {
+            Ok(addr) => addr.port(),
+            Err(e) => {
+                self.release_host_reservation(epoch).await;
+                return Err(LanError::Io(e));
+            }
+        };
 
-        // UDP responder
-        let (udp_sh_tx, udp_sh_rx) = tokio::sync::watch::channel(false);
+        // ---- 3. Bind the UDP discovery socket ----
+        //
+        // The bind happens HERE, not inside the spawned responder task.
+        // It has to be observable: with the bind inside the task, a
+        // port clash (a previous host that had not finished tearing
+        // down) produced a host that *looked* fine while its responder
+        // had already died in the background — the pairing code was on
+        // screen and no peer could ever discover it.
+        let bind_u = self.current_udp_bind_addr();
+        let port_u = self.current_udp_port();
+        let udp_bind: SocketAddr = match format!("{bind_u}:{port_u}").parse() {
+            Ok(a) => a,
+            Err(e) => {
+                self.release_host_reservation(epoch).await;
+                return Err(LanError::Invalid(format!("{e}")));
+            }
+        };
+        let udp_socket = match tokio::net::UdpSocket::bind(udp_bind).await {
+            Ok(s) => s,
+            Err(e) => {
+                self.release_host_reservation(epoch).await;
+                return Err(LanError::Io(e));
+            }
+        };
+
+        // ---- 4. Spawn the UDP responder ----
         let code_u = code.clone();
         let agent_u = agent_id.clone();
         let display_u = display_name.clone();
-        let bind_u = self.current_udp_bind_addr();
-        let port_u = self.current_udp_port();
         tokio::spawn(async move {
-            let res = udp_responder(code_u, agent_u, display_u, tcp_port, bind_u, port_u, udp_sh_rx).await;
+            let res =
+                udp_responder(udp_socket, code_u, agent_u, display_u, tcp_port, udp_sh_rx).await;
             if let Err(e) = res {
                 log::warn!("[lan] udp responder exited: {e}");
             }
+            // The discovery port is only free once this task drops the
+            // socket. Tell `host_stop` that it has been released so a
+            // following `host_start` can rebind it.
+            let _ = udp_done_tx.send(());
         });
 
-        // Accept loop. Clones the Arc<Mutex<Inner>> so the spawned task
-        // can push the link into HostSide without going through a
-        // local mpsc channel (which was the V0.1 bug: accept_rx was
-        // dropped at end of host_start, so the link was never received).
+        // ---- 5. Spawn the accept loop ----
+        //
+        // Clones the Arc<Mutex<Inner>> so the spawned task can push the
+        // link into HostSide without going through a local mpsc channel
+        // (which was the V0.1 bug: accept_rx was dropped at end of
+        // host_start, so the link was never received).
         let (accept_done_tx, accept_done_rx) = tokio::sync::oneshot::channel::<()>();
         let state_for_accept = self.clone();
         let code_a = code.clone();
@@ -351,22 +438,28 @@ impl LanState {
         // thing that needs to wait for the loop to exit, and that's
         // handled via the listener being dropped on host_stop.
 
-        // Insert the host side. Acquire the lock briefly.
+        // ---- 6. Fill the reservation in ----
+        //
+        // If a concurrent `host_stop` already took the reservation, our
+        // host is no longer wanted. Unwind instead of resurrecting a
+        // host the user just stopped.
         {
             let mut g = self.inner.lock().await;
-            // Re-check inside the lock (race-free vs. another host_start).
-            if g.host.is_some() {
-                return Err(LanError::AlreadyRunning("host".into()));
+            let ours = g.host.as_ref().map(|h| h.epoch) == Some(epoch);
+            if !ours {
+                // Stop the responder and the accept loop we just
+                // spawned — nobody else knows about them, and the
+                // accept loop holds the TCP listener open.
+                let _ = udp_sh_tx.send(true);
+                let _ = accept_done_tx.send(());
+                return Err(LanError::Invalid(
+                    "host was stopped while it was starting".into(),
+                ));
             }
-            g.host = Some(HostSide {
-                tcp_port,
-                agent_id: agent_id.clone(),
-                display_name: display_name.clone(),
-                code: code.clone(),
-                link: None,
-                udp_shutdown: Some(udp_sh_tx),
-                accept_task_done: Some(accept_done_tx),
-            });
+            if let Some(h) = g.host.as_mut() {
+                h.tcp_port = tcp_port;
+                h.accept_task_done = Some(accept_done_tx);
+            }
         }
 
         // Keep the JoinHandle alive in a fire-and-forget way — the
@@ -381,6 +474,19 @@ impl LanState {
             display_name,
             code,
         })
+    }
+
+    /// Drop the host reservation, but only if it is still the one this
+    /// start created.
+    ///
+    /// Used on the failure paths of `host_start`: if a concurrent
+    /// `host_stop` already took the slot, releasing it here would
+    /// delete somebody else's host.
+    async fn release_host_reservation(&self, epoch: u64) {
+        let mut g = self.inner.lock().await;
+        if g.host.as_ref().map(|h| h.epoch) == Some(epoch) {
+            g.host = None;
+        }
     }
 
     pub async fn host_poll(&self) -> Result<Vec<String>, LanError> {
@@ -477,9 +583,23 @@ impl LanState {
             g.host.take()
         };
         if let Some(ref mut host) = h {
-            // 1) Signal the UDP responder to stop (drops its socket).
+            // 1) Signal the UDP responder to stop, then WAIT for it to
+            //    release its socket.
+            //
+            //    The discovery port is fixed, so the next `host_start`
+            //    cannot bind it until the old responder has actually
+            //    dropped the socket. Signalling without waiting let the
+            //    next start race the teardown and lose the bind with
+            //    EADDRINUSE — a host that looked started but could
+            //    never be discovered by a peer.
             if let Some(u) = host.udp_shutdown.take() {
                 let _ = u.send(true);
+            }
+            if let Some(rx) = host.udp_done.take() {
+                // Bounded: the responder exits as soon as it observes
+                // the shutdown flag. The timeout only guards against a
+                // wedged task — it must never hang the UI.
+                let _ = tokio::time::timeout(std::time::Duration::from_secs(2), rx).await;
             }
             // 2) Signal the read loop to stop, then drop the writer
             //    to close the TCP socket from our side.
@@ -760,19 +880,21 @@ async fn accept_loop(
     }
 }
 
+/// UDP discovery responder.
+///
+/// The socket is bound by the caller (`host_start`) and handed in
+/// already-bound. Binding here instead would make a port clash
+/// invisible to the caller: the host would start, show a pairing code,
+/// and only then discover in the background that its responder had
+/// died — so no peer could ever find it.
 async fn udp_responder(
+    socket: tokio::net::UdpSocket,
     code: String,
     agent_id: String,
     display_name: String,
     tcp_port: u16,
-    bind_addr: String,
-    bind_port: u16,
     mut shutdown: tokio::sync::watch::Receiver<bool>,
 ) -> Result<(), LanError> {
-    let bind: SocketAddr = format!("{bind_addr}:{bind_port}")
-        .parse()
-        .map_err(|e: std::net::AddrParseError| LanError::Invalid(format!("{e}")))?;
-    let socket = tokio::net::UdpSocket::bind(bind).await?;
     let mut buf = [0u8; 4096];
     loop {
         if *shutdown.borrow() {

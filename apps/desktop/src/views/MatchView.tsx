@@ -20,6 +20,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type { MatchOutcome } from '@kindora/matching';
 import { summariseAnalysis } from '@kindora/matching';
+import { COMPATIBILITY_SIGNAL_KEYS, useTranslate } from '../i18n';
 
 export type MatchPhase = 'connecting' | 'exchanging' | 'analysing' | 'done' | 'error';
 
@@ -36,9 +37,12 @@ export interface MatchViewProps {
   onDisconnect: () => void;
 }
 
-export function MatchView({ title = 'Connected with', phase, outcome, error, onDisconnect }: MatchViewProps) {
+export function MatchView({ title, phase, outcome, error, onDisconnect }: MatchViewProps) {
+  const t = useTranslate();
   if (phase === 'error') {
-    return <ErrorView message={error ?? 'Something went wrong.'} onDisconnect={onDisconnect} />;
+    return (
+      <ErrorView message={error ?? t('match.errorFallback')} onDisconnect={onDisconnect} />
+    );
   }
   if (phase !== 'done' || !outcome) {
     return <ProgressView phase={phase} onDisconnect={onDisconnect} />;
@@ -46,13 +50,14 @@ export function MatchView({ title = 'Connected with', phase, outcome, error, onD
 
   const local = summariseAnalysis(outcome.localAnalysis);
   const peer = outcome.peerAnalysis ? summariseAnalysis(outcome.peerAnalysis) : null;
+  const heading = title ?? t('match.connectedWith');
 
   return (
     <main className="mx-auto flex w-full max-w-2xl flex-col gap-6 px-6 py-10">
       <header className="flex items-start justify-between">
         <div>
           <p className="text-kindora-500 dark:text-kindora-400 text-xs uppercase tracking-wide">
-            {title}
+            {heading}
           </p>
           <h1 className="mt-1 flex items-center gap-2 text-3xl font-semibold tracking-tight">
             {outcome.peerDisplayName}
@@ -62,39 +67,53 @@ export function MatchView({ title = 'Connected with', phase, outcome, error, onD
           </p>
         </div>
         <button type="button" className="kindora-button-ghost" onClick={onDisconnect}>
-          Disconnect
+          {t('consent.disconnect')}
         </button>
       </header>
 
-      <SignalCard label="Your agent says" tone={local.signalTone} signal={local.signalLabel} />
+      {/* The signal LABEL is localised from the raw protocol value rather than
+          taken from `summary.signalLabel`, which is English-only and lives in
+          @kindora/matching. `signalTone` (a style hint, not copy) still comes
+          from there. */}
+      <SignalCard
+        label={t('match.yourAgentSays')}
+        tone={local.signalTone}
+        signal={t(COMPATIBILITY_SIGNAL_KEYS[outcome.localAnalysis.compatibilitySignal])}
+      />
       {peer && (
-        <SignalCard label="Their agent says" tone={peer.signalTone} signal={peer.signalLabel} />
+        <SignalCard
+          label={t('match.theirAgentSays')}
+          tone={peer.signalTone}
+          signal={t(COMPATIBILITY_SIGNAL_KEYS[outcome.peerAnalysis!.compatibilitySignal])}
+        />
       )}
       {!peer && (
         <p className="text-kindora-500 dark:text-kindora-400 text-sm italic">
-          Their agent is still thinking. Showing your local result only.
+          {t('match.peerStillThinking')}
         </p>
       )}
 
-      <Section title="Common ground">
+      <Section title={t('match.commonGround')}>
         {local.commonGround.length === 0 ? (
-          <p className="text-kindora-500 dark:text-kindora-400 text-sm">No overlaps surfaced.</p>
+          <p className="text-kindora-500 dark:text-kindora-400 text-sm">
+            {t('match.noCommonGround')}
+          </p>
         ) : (
           <ChipList items={local.commonGround} />
         )}
       </Section>
 
-      <Section title="Recommended topics">
+      <Section title={t('match.recommendedTopics')}>
         {local.recommendedTopics.length === 0 ? (
-          <p className="text-kindora-500 dark:text-kindora-400 text-sm">No topics suggested.</p>
+          <p className="text-kindora-500 dark:text-kindora-400 text-sm">{t('match.noTopics')}</p>
         ) : (
           <ChipList items={local.recommendedTopics} />
         )}
       </Section>
 
-      <Section title="Potential friction">
+      <Section title={t('match.potentialFriction')}>
         {local.potentialFriction.length === 0 ? (
-          <p className="text-kindora-500 dark:text-kindora-400 text-sm">No friction points flagged.</p>
+          <p className="text-kindora-500 dark:text-kindora-400 text-sm">{t('match.noFriction')}</p>
         ) : (
           <ul className="space-y-1 text-sm">
             {local.potentialFriction.map((f) => (
@@ -104,10 +123,8 @@ export function MatchView({ title = 'Connected with', phase, outcome, error, onD
         )}
       </Section>
 
-      <Section title="Explanation">
-        <p className="text-sm leading-relaxed">
-          {local.explanation || 'No explanation provided.'}
-        </p>
+      <Section title={t('match.explanation')}>
+        <p className="text-sm leading-relaxed">{local.explanation || t('match.noExplanation')}</p>
       </Section>
     </main>
   );
@@ -168,14 +185,15 @@ function ChipList({ items }: { items: readonly string[] }) {
 }
 
 function ProgressView({ phase, onDisconnect }: { phase: MatchPhase; onDisconnect: () => void }) {
+  const t = useTranslate();
   const message =
     phase === 'connecting'
-      ? 'Connecting…'
+      ? t('match.progressConnecting')
       : phase === 'exchanging'
-        ? 'Exchanging profiles…'
+        ? t('match.progressExchanging')
         : phase === 'analysing'
-          ? 'Your agent is analysing compatibility…'
-          : 'Working…';
+          ? t('match.progressAnalysing')
+          : t('match.progressWorking');
   return (
     <main className="mx-auto flex w-full max-w-2xl flex-col items-center gap-6 px-6 py-20">
       <p className="text-kindora-500 dark:text-kindora-400 text-sm">{message}</p>
@@ -184,20 +202,23 @@ function ProgressView({ phase, onDisconnect }: { phase: MatchPhase; onDisconnect
         aria-hidden
       />
       <button type="button" className="kindora-button-ghost" onClick={onDisconnect}>
-        Cancel
+        {t('common.cancel')}
       </button>
     </main>
   );
 }
 
 function ErrorView({ message, onDisconnect }: { message: string; onDisconnect: () => void }) {
+  const t = useTranslate();
   return (
     <main className="mx-auto flex w-full max-w-2xl flex-col gap-4 px-6 py-20">
       <section className="kindora-card flex flex-col gap-3">
-        <h2 className="text-rose-600 dark:text-rose-400 text-xs uppercase tracking-wide">Error</h2>
+        <h2 className="text-rose-600 dark:text-rose-400 text-xs uppercase tracking-wide">
+          {t('common.error')}
+        </h2>
         <p className="text-sm leading-relaxed">{message}</p>
         <button type="button" className="kindora-button-ghost self-start" onClick={onDisconnect}>
-          Back
+          {t('common.back')}
         </button>
       </section>
     </main>

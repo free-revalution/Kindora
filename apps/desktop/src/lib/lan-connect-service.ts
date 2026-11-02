@@ -122,6 +122,23 @@ export function isLanAvailable(): boolean {
 }
 
 /**
+ * The Rust side keeps exactly one host slot and binds a fixed UDP
+ * discovery port (52419), so two LAN hosts cannot coexist: the second
+ * responder loses the bind (EADDRINUSE) and the start is rejected with
+ * "already running in mode host".
+ *
+ * Two starts really do arrive back to back in practice — React
+ * StrictMode double-invokes effects in development, and the Connect
+ * screen re-runs its host effect whenever the transport changes. The
+ * cleanup chain inside `LanTransport` cannot help, because every start
+ * builds a *new* transport instance and each instance has its own
+ * chain. So the serialisation lives here, one level up, where the
+ * resource actually lives.
+ */
+let activeLanHost: LanHostHandle | null = null;
+let lanHostChain: Promise<unknown> = Promise.resolve();
+
+/**
  * Start a LAN host pairing flow.
  *
  *  1. Generate the 6-character pairing code (single source of truth
@@ -144,8 +161,39 @@ export function isLanAvailable(): boolean {
  * Throws if the Tauri runtime is unavailable or if
  * `transport.startHost` fails. On any throw before step 3, nothing
  * has been wired up; the caller can safely retry.
+ *
+ * Calls are serialised — see `lanHostChain` below.
  */
 export async function startLanHost(input: LanStartInput): Promise<LanHostHandle> {
+  const run = async (): Promise<LanHostHandle> => {
+    // Tear down whatever was running before we bind. This happens
+    // *inside* the chain on purpose: the previous host may still be
+    // starting when this call arrives, so reading `activeLanHost` at
+    // call time would miss it.
+    //
+    // `previous.disconnect()` is awaitable, so we do not bind until
+    // the Rust side has actually released the host slot and the fixed
+    // discovery port.
+    const previous = activeLanHost;
+    if (previous) {
+      activeLanHost = null;
+      await previous.disconnect('superseded');
+    }
+    const handle = await startLanHostInner(input);
+    activeLanHost = handle;
+    return handle;
+  };
+  const result = lanHostChain.then(run, run);
+  // The chain must never reject: one failed start would otherwise
+  // poison every later one.
+  lanHostChain = result.then(
+    () => undefined,
+    () => undefined,
+  );
+  return result;
+}
+
+async function startLanHostInner(input: LanStartInput): Promise<LanHostHandle> {
   if (!isLanAvailable()) {
     throw new Error('startLanHost: Tauri runtime not available. Use loopback mode in browser dev.');
   }
@@ -215,9 +263,9 @@ export async function startLanHost(input: LanStartInput): Promise<LanHostHandle>
   }, 200);
 
   // Idempotency guard for the disconnect path. See `disconnect` below.
-  let disconnected = false;
+  let disconnectPromise: Promise<void> | null = null;
 
-  return {
+  const handle: LanHostHandle = {
     role: 'host',
     pairingCode: code,
     session,
@@ -227,20 +275,32 @@ export async function startLanHost(input: LanStartInput): Promise<LanHostHandle>
       return new MatchOrchestrator(toOrchestratorSelf(input), '');
     },
     async disconnect(reason: string = 'user-requested') {
-      // Idempotent: a second caller (e.g. unmount cleanup racing
-      // with a user-triggered disconnect) must not double-tear-down.
-      // The transport and session disconnect are already no-ops
-      // after the first call, but the `clearInterval` would warn in
-      // strict mode and the duplicate `await transport.disconnect()`
-      // is wasted IPC. Guard with the closed flag.
-      if (disconnected) return;
-      disconnected = true;
-      clearInterval(poll);
-      resolved = true;
-      await transport.disconnect();
-      await session.disconnect(reason);
+      try {
+        // Idempotent, but *awaitable*: a second caller waits for the
+        // same teardown instead of returning immediately.
+        //
+        // This matters because the Rust side owns a single host slot and
+        // a fixed UDP discovery port. A caller that returns early lets
+        // the next `startLanHost` bind before the Rust `host_stop` has
+        // landed, which surfaces as "already running in mode host" or as
+        // a discovery responder that lost the bind with EADDRINUSE.
+        if (!disconnectPromise) {
+          clearInterval(poll);
+          resolved = true;
+          disconnectPromise = (async () => {
+            await transport.disconnect();
+            await session.disconnect(reason);
+          })();
+        }
+        await disconnectPromise;
+      } finally {
+        // This handle is no longer the live host, so the service-level
+        // singleton does not have to tear it down again.
+        if (activeLanHost === handle) activeLanHost = null;
+      }
     },
   };
+  return handle;
 }
 
 /**

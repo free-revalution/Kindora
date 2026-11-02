@@ -50,6 +50,7 @@ export function createAgentConfig(opts: AgentRuntimeOptions = {}): AgentRuntimeC
 export { type AgentIdentity, createAgentIdentity, buildCapabilities } from './identity';
 export {
   type ProfileValidationError,
+  type ProfileValidationCode,
   type ProfileLimits,
   DEFAULT_PROFILE_LIMITS,
   validateProfile,

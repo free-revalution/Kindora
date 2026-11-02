@@ -35,6 +35,7 @@ import {
   type ChatAssistHandle,
 } from '@kindora/matching';
 import type { ChatSnapshot } from '@kindora/matching';
+import { CHAT_ASSIST_KIND_KEYS, useI18n, useTranslate, LOCALES } from '../i18n';
 
 export type ChatPhase = 'loading' | 'open' | 'closed';
 
@@ -85,6 +86,7 @@ export function ChatView({
   onAskRegenerate,
   onAskDismissSuggestion,
 }: ChatViewProps) {
+  const t = useTranslate();
   const isClosed = snapshot.state === 'closed';
   const trimmed = draft.trim();
   const canSend =
@@ -96,13 +98,13 @@ export function ChatView({
       <header className="flex items-start justify-between" data-testid="chat-header">
         <div>
           <p className="text-kindora-500 dark:text-kindora-400 text-xs uppercase tracking-wide">
-            Chat with
+            {t('chat.eyebrow')}
           </p>
           <h1 className="mt-1 text-3xl font-semibold tracking-tight">
             {peerDisplayName}
           </h1>
           <p className="text-kindora-500 dark:text-kindora-400 mt-1 text-sm">
-            You: {selfDisplayName}
+            {t('chat.you', { name: selfDisplayName })}
           </p>
         </div>
         <button
@@ -111,7 +113,7 @@ export function ChatView({
           onClick={onDisconnect}
           data-testid="chat-close"
         >
-          {isClosed ? 'Back' : 'Disconnect'}
+          {t(isClosed ? 'chat.back' : 'chat.disconnect')}
         </button>
       </header>
 
@@ -121,11 +123,10 @@ export function ChatView({
           data-testid="chat-blocked-local"
         >
           <h2 className="text-rose-600 dark:text-rose-400 text-xs uppercase tracking-wide">
-            Blocked
+            {t('chat.blockedLocal')}
           </h2>
           <p className="text-sm leading-relaxed">
-            You blocked {peerDisplayName}. Their id is on your local block list; future
-            pairing requests will be refused automatically.
+            {t('chat.blockedLocalBody', { peer: peerDisplayName })}
           </p>
         </section>
       )}
@@ -136,11 +137,10 @@ export function ChatView({
           data-testid="chat-blocked-peer"
         >
           <h2 className="text-rose-600 dark:text-rose-400 text-xs uppercase tracking-wide">
-            You were blocked
+            {t('chat.blockedByPeer')}
           </h2>
           <p className="text-sm leading-relaxed">
-            {peerDisplayName} blocked you. Their id has been added to your local block
-            list so you don’t try to reconnect.
+            {t('chat.blockedByPeerBody', { peer: peerDisplayName })}
           </p>
         </section>
       )}
@@ -148,7 +148,7 @@ export function ChatView({
       {isClosed && snapshot.closeReason === 'peer-disconnect' && (
         <section className="kindora-card flex flex-col gap-2" data-testid="chat-peer-left">
           <p className="text-sm leading-relaxed">
-            {peerDisplayName} closed the conversation.
+            {t('chat.peerLeft', { peer: peerDisplayName })}
           </p>
         </section>
       )}
@@ -163,9 +163,7 @@ export function ChatView({
             className="text-kindora-500 dark:text-kindora-400 text-sm italic"
             data-testid="chat-history-empty"
           >
-            {phase === 'open'
-              ? 'No messages yet — say hi.'
-              : 'No messages exchanged.'}
+            {t(phase === 'open' ? 'chat.emptyOpen' : 'chat.emptyClosed')}
           </p>
         )}
         {snapshot.entries.map((entry) => (
@@ -212,7 +210,7 @@ export function ChatView({
           htmlFor="chat-input"
           className="text-kindora-500 dark:text-kindora-400 text-xs uppercase tracking-wide"
         >
-          Message
+          {t('chat.message')}
         </label>
         <textarea
           id="chat-input"
@@ -221,7 +219,9 @@ export function ChatView({
           value={draft}
           onChange={(e) => onDraftChange(e.target.value)}
           placeholder={
-            isClosed ? 'Chat is closed.' : `Message ${peerDisplayName}…`
+            isClosed
+              ? t('chat.inputClosed')
+              : t('chat.inputOpen', { peer: peerDisplayName })
           }
           disabled={isClosed || sending}
           maxLength={maxTextLength * 2 /* allow typing past, validate below */}
@@ -244,7 +244,7 @@ export function ChatView({
             disabled={!canSend}
             data-testid="chat-send"
           >
-            {sending ? 'Sending…' : 'Send'}
+            {t(sending ? 'chat.sending' : 'chat.send')}
           </button>
         </div>
       </form>
@@ -257,10 +257,10 @@ export function ChatView({
           disabled={isClosed || snapshot.blockedByLocal}
           data-testid="chat-block"
         >
-          {snapshot.blockedByLocal ? 'Already blocked' : 'Block'}
+          {t(snapshot.blockedByLocal ? 'chat.alreadyBlocked' : 'chat.block')}
         </button>
         <p className="text-kindora-500 dark:text-kindora-400 text-xs">
-          AI never sends — every entry here came from a real human.
+          {t('chat.aiNeverSends')}
         </p>
       </footer>
     </main>
@@ -282,9 +282,10 @@ function ChatBubble({
   timestamp: string;
   peerDisplayName: string;
 }) {
+  const { t, locale } = useI18n();
   const isSent = direction === 'sent';
   const align = isSent ? 'items-end' : 'items-start';
-  const label = isSent ? 'You' : peerDisplayName;
+  const label = isSent ? t('chat.bubbleYou') : peerDisplayName;
   const bubbleClass = isSent
     ? 'border-kindora-300 bg-kindora-50 dark:border-kindora-600 dark:bg-kindora-800/60'
     : 'border-emerald-300 bg-emerald-50 dark:border-emerald-700 dark:bg-emerald-900/30';
@@ -295,7 +296,7 @@ function ChatBubble({
       data-direction={direction}
     >
       <p className="text-kindora-500 dark:text-kindora-400 text-xs">
-        {label} · {formatTime(timestamp)}
+        {label} · {formatTime(timestamp, LOCALES[locale].htmlLang)}
       </p>
       <p
         className={`max-w-[80%] whitespace-pre-wrap break-words rounded-2xl border px-3 py-2 text-sm leading-relaxed ${bubbleClass}`}
@@ -306,11 +307,13 @@ function ChatBubble({
   );
 }
 
-function formatTime(iso: string): string {
+function formatTime(iso: string, locale: string): string {
   try {
     const d = new Date(iso);
     if (Number.isNaN(d.getTime())) return '';
-    return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    // Explicit locale rather than `[]`, so timestamps follow the language the
+    // user picked instead of whatever the OS happens to be set to.
+    return d.toLocaleTimeString(locale, { hour: '2-digit', minute: '2-digit' });
   } catch {
     return '';
   }
@@ -364,12 +367,14 @@ function ChatAssistPanel({
   onUseSuggestion(text: string): void;
   onAskDismissSuggestion(id: string): void;
 }) {
+  const t = useTranslate();
+
   // Closed panel: show a single button.
   if (!state.open) {
     return (
       <section className="kindora-card flex flex-wrap items-center justify-between gap-2" data-testid="chat-assist-closed">
         <p className="text-kindora-500 dark:text-kindora-400 text-sm">
-          Stuck? Ask your agent for help.
+          {t('chat.assist.closedPrompt')}
         </p>
         <button
           type="button"
@@ -378,7 +383,7 @@ function ChatAssistPanel({
           disabled={disabled || state.unavailable}
           data-testid="chat-assist-open"
         >
-          Ask My Agent
+          {t('chat.assist.open')}
         </button>
       </section>
     );
@@ -395,12 +400,9 @@ function ChatAssistPanel({
       <header className="flex items-start justify-between">
         <div>
           <p className="text-kindora-500 dark:text-kindora-400 text-xs uppercase tracking-wide">
-            Ask My Agent
+            {t('chat.assist.title')}
           </p>
-          <p className="mt-1 text-sm leading-relaxed">
-            Suggestions from your agent. The human reviews every one — nothing is sent
-            until you click Send yourself.
-          </p>
+          <p className="mt-1 text-sm leading-relaxed">{t('chat.assist.subtitle')}</p>
         </div>
         <button
           type="button"
@@ -409,7 +411,7 @@ function ChatAssistPanel({
           disabled={state.busy}
           data-testid="chat-assist-close"
         >
-          Close
+          {t('common.close')}
         </button>
       </header>
 
@@ -418,8 +420,7 @@ function ChatAssistPanel({
           className="text-kindora-500 dark:text-kindora-400 text-xs italic"
           data-testid="chat-assist-unavailable"
         >
-          {state.unavailableReason ??
-            'Assistant is not available right now (no LLM configured).'}
+          {state.unavailableReason ?? t('chat.assist.unavailableFallback')}
         </p>
       )}
 
@@ -436,7 +437,7 @@ function ChatAssistPanel({
             htmlFor="chat-assist-query"
             className="text-kindora-500 dark:text-kindora-400 text-xs uppercase tracking-wide"
           >
-            What do you want help with?
+            {t('chat.assist.queryLabel')}
           </label>
           <textarea
             id="chat-assist-query"
@@ -444,13 +445,13 @@ function ChatAssistPanel({
             rows={2}
             value={state.query}
             onChange={(e) => onAskChangeQuery(e.target.value)}
-            placeholder='e.g. "help me reply to their last message" or "what should I ask them next?"'
+            placeholder={t('chat.assist.queryPlaceholder')}
             disabled={state.busy}
             data-testid="chat-assist-query"
           />
           <div className="flex items-center justify-between gap-2">
             <p className="text-kindora-500 dark:text-kindora-400 text-xs">
-              Phase 10 · AI only suggests — it never sends for you (§ 32).
+              Phase 10 · {t('chat.assist.aiOnlySuggests')}
             </p>
             <button
               type="submit"
@@ -458,7 +459,7 @@ function ChatAssistPanel({
               disabled={!canSubmit}
               data-testid="chat-assist-submit"
             >
-              {state.busy ? 'Thinking…' : 'Ask'}
+              {t(state.busy ? 'chat.assist.thinking' : 'chat.assist.ask')}
             </button>
           </div>
         </form>
@@ -478,7 +479,7 @@ function ChatAssistPanel({
           className="text-kindora-500 dark:text-kindora-400 text-sm italic"
           data-testid="chat-assist-loading"
         >
-          Your agent is reading the chat…
+          {t('chat.assist.reading')}
         </p>
       )}
 
@@ -487,7 +488,7 @@ function ChatAssistPanel({
           className="text-kindora-500 dark:text-kindora-400 text-sm italic"
           data-testid="chat-assist-empty"
         >
-          {state.display.summary || 'No suggestions came back.'}
+          {state.display.summary || t('chat.assist.noSuggestions')}
         </p>
       )}
 
@@ -518,7 +519,7 @@ function ChatAssistPanel({
               disabled={state.busy || !state.query.trim()}
               data-testid="chat-assist-regenerate"
             >
-              Regenerate
+              {t('chat.assist.regenerate')}
             </button>
           </div>
         </section>
@@ -536,6 +537,10 @@ function ChatAssistSuggestionRow({
   onUse(text: string): void;
   onDismiss(id: string): void;
 }) {
+  const t = useTranslate();
+  // Localised from the raw `kind`; `suggestion.kindLabel` from
+  // @kindora/matching is English-only.
+  const kindLabel = t(CHAT_ASSIST_KIND_KEYS[suggestion.kind]);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(suggestion.text);
 
@@ -551,7 +556,7 @@ function ChatAssistSuggestionRow({
         data-kind={suggestion.kind}
       >
         <p className="text-kindora-500 dark:text-kindora-400 text-xs uppercase tracking-wide">
-          {suggestion.kindLabel}
+          {kindLabel}
         </p>
         <textarea
           className="border-kindora-200 dark:border-kindora-700 w-full resize-none rounded-md border bg-transparent p-2 text-sm leading-relaxed"
@@ -573,7 +578,7 @@ function ChatAssistSuggestionRow({
             disabled={draft.trim().length === 0}
             data-testid="chat-assist-use"
           >
-            Use edited
+            {t('chat.assist.useEdited')}
           </button>
           <button
             type="button"
@@ -584,7 +589,7 @@ function ChatAssistSuggestionRow({
             }}
             data-testid="chat-assist-cancel-edit"
           >
-            Cancel
+            {t('common.cancel')}
           </button>
         </div>
       </article>
@@ -598,7 +603,7 @@ function ChatAssistSuggestionRow({
       data-kind={suggestion.kind}
     >
       <p className="text-kindora-500 dark:text-kindora-400 text-xs uppercase tracking-wide">
-        {suggestion.kindLabel}
+        {kindLabel}
       </p>
       <p className="text-sm leading-relaxed">{suggestion.text}</p>
       {suggestion.rationale && (
@@ -613,7 +618,7 @@ function ChatAssistSuggestionRow({
           onClick={() => onUse(suggestion.text)}
           data-testid="chat-assist-use"
         >
-          Use
+          {t('chat.assist.use')}
         </button>
         <button
           type="button"
@@ -621,7 +626,7 @@ function ChatAssistSuggestionRow({
           onClick={() => setEditing(true)}
           data-testid="chat-assist-edit"
         >
-          Edit
+          {t('chat.assist.edit')}
         </button>
         <button
           type="button"
@@ -629,7 +634,7 @@ function ChatAssistSuggestionRow({
           onClick={() => onDismiss(suggestion.id)}
           data-testid="chat-assist-dismiss"
         >
-          Dismiss
+          {t('chat.assist.dismiss')}
         </button>
       </div>
     </article>
@@ -690,6 +695,7 @@ export function LiveChatView({
   chatAssist,
   chatAssistError,
 }: LiveChatViewProps) {
+  const t = useTranslate();
   const [snapshot, setSnapshot] = useState<ChatSnapshot | undefined>(undefined);
   const [draft, setDraft] = useState(initialDraft ?? '');
   const [sending, setSending] = useState(false);
@@ -747,7 +753,7 @@ export function LiveChatView({
         className="text-kindora-500 flex h-full min-h-screen items-center justify-center text-sm"
         data-testid="chat-loading"
       >
-        Opening chat…
+        {t('chat.opening')}
       </main>
     );
   }
@@ -792,9 +798,7 @@ export function LiveChatView({
         setAssistError(result.degradationNote);
       }
       if (result.boundaryBlocked) {
-        setAssistError(
-          'Both profiles disallow agent conversation — assistant is disabled for this chat.',
-        );
+        setAssistError(t('chat.assist.boundaryBlocked'));
       }
     } catch (e: unknown) {
       setAssistError(e instanceof Error ? e.message : String(e));

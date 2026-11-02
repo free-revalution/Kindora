@@ -21,6 +21,7 @@ import { useEffect, useRef, useState } from 'react';
 import type { MatchOutcome } from '@kindora/matching';
 import type { ConsentDecision, ConsentOutcome, ConsentState } from '@kindora/matching';
 import { summariseAnalysis } from '@kindora/matching';
+import { COMPATIBILITY_SIGNAL_KEYS, useTranslate, type TranslationKey } from '../i18n';
 
 export interface ConsentViewProps {
   /** Match outcome from Phase 6 — needed to render the analysis header. */
@@ -46,6 +47,7 @@ export function ConsentView({
   onDisconnect,
   finalOutcome,
 }: ConsentViewProps) {
+  const t = useTranslate();
   const local = summariseAnalysis(outcome.localAnalysis);
   // "Terminal" means we hide the action buttons. This happens when:
   //   - A final outcome is set (state-machine finished), OR
@@ -64,13 +66,15 @@ export function ConsentView({
       <header className="flex items-start justify-between">
         <div>
           <p className="text-kindora-500 dark:text-kindora-400 text-xs uppercase tracking-wide">
-            {isAccepted
-              ? 'Connected with'
-              : isBlocked
-                ? 'Blocked'
-                : isRejected
-                  ? 'Connection closed'
-                  : 'Match found'}
+            {t(
+              isAccepted
+                ? 'consent.eyebrowAccepted'
+                : isBlocked
+                  ? 'consent.eyebrowBlocked'
+                  : isRejected
+                    ? 'consent.eyebrowClosed'
+                    : 'consent.eyebrowMatchFound',
+            )}
           </p>
           <h1 className="mt-1 text-3xl font-semibold tracking-tight">
             {outcome.peerDisplayName}
@@ -80,19 +84,19 @@ export function ConsentView({
           </p>
         </div>
         <button type="button" className="kindora-button-ghost" onClick={onDisconnect}>
-          {isAccepted ? 'Close' : 'Disconnect'}
+          {t(isAccepted ? 'consent.close' : 'consent.disconnect')}
         </button>
       </header>
 
       {/* Compatibility signal — quick recap so the user remembers the context. */}
       <section className="kindora-card flex flex-col gap-2">
         <p className="text-kindora-500 dark:text-kindora-400 text-xs uppercase tracking-wide">
-          Compatibility
+          {t('consent.compatibility')}
         </p>
         <p
           className={`inline-flex w-fit items-center gap-1 rounded-full border px-3 py-1 text-sm ${signalClass(local.signalTone)}`}
         >
-          {local.signalLabel}
+          {t(COMPATIBILITY_SIGNAL_KEYS[outcome.localAnalysis.compatibilitySignal])}
         </p>
       </section>
 
@@ -104,11 +108,10 @@ export function ConsentView({
       {isTimedOut && (
         <section className="kindora-card flex flex-col gap-2">
           <h2 className="text-rose-600 dark:text-rose-400 text-xs uppercase tracking-wide">
-            Peer didn’t respond
+            {t('consent.peerNoResponse')}
           </h2>
           <p className="text-sm leading-relaxed">
-            You accepted, but {outcome.peerDisplayName} didn’t reply in time. You can close
-            this session and try again later.
+            {t('consent.peerNoResponseBody', { peer: outcome.peerDisplayName })}
           </p>
         </section>
       )}
@@ -116,11 +119,10 @@ export function ConsentView({
       {isAccepted && (
         <section className="kindora-card flex flex-col gap-2">
           <h2 className="text-emerald-600 dark:text-emerald-400 text-xs uppercase tracking-wide">
-            Conversation unlocked
+            {t('consent.unlocked')}
           </h2>
           <p className="text-sm leading-relaxed">
-            Both you and {outcome.peerDisplayName} accepted. The chat is open. (Chat lands in
-            Phase 9 — for now, this confirms the wire flow works end-to-end.)
+            {t('consent.unlockedBody', { peer: outcome.peerDisplayName })}
           </p>
         </section>
       )}
@@ -128,12 +130,15 @@ export function ConsentView({
       {isBlocked && (
         <section className="kindora-card flex flex-col gap-2">
           <h2 className="text-rose-600 dark:text-rose-400 text-xs uppercase tracking-wide">
-            {finalOutcome?.blockedByLocal ? 'Blocked' : 'You were blocked'}
+            {t(finalOutcome?.blockedByLocal ? 'consent.blockedLocal' : 'consent.blockedByPeer')}
           </h2>
           <p className="text-sm leading-relaxed">
-            {finalOutcome?.blockedByLocal
-              ? `${outcome.peerDisplayName} can no longer reach you. Future pairing requests from this agent are refused.`
-              : `${outcome.peerDisplayName} blocked you. Their id has been added to your local block list so you don’t try to reconnect.`}
+            {t(
+              finalOutcome?.blockedByLocal
+                ? 'consent.blockedLocalBody'
+                : 'consent.blockedByPeerBody',
+              { peer: outcome.peerDisplayName },
+            )}
           </p>
         </section>
       )}
@@ -155,51 +160,56 @@ export function ConsentView({
 /* Sub-components                                                      */
 /* ------------------------------------------------------------------ */
 
+const CONSENT_BANNER_KEYS: Readonly<
+  Record<ConsentState, { headline: TranslationKey; body: TranslationKey }>
+> = {
+  awaiting_decision: {
+    headline: 'consent.bannerAwaitingHeadline',
+    body: 'consent.bannerAwaitingBody',
+  },
+  accepted_local: {
+    headline: 'consent.bannerAcceptedLocalHeadline',
+    body: 'consent.bannerAcceptedLocalBody',
+  },
+  accepted_peer: {
+    headline: 'consent.bannerAcceptedPeerHeadline',
+    body: 'consent.bannerAcceptedPeerBody',
+  },
+  accepted_both: {
+    headline: 'consent.bannerAcceptedBothHeadline',
+    body: 'consent.bannerAcceptedBothBody',
+  },
+  rejected: {
+    headline: 'consent.bannerRejectedHeadline',
+    body: 'consent.bannerRejectedBody',
+  },
+  blocked: {
+    headline: 'consent.bannerBlockedHeadline',
+    body: 'consent.bannerBlockedBody',
+  },
+};
+
+const CONSENT_TONE_CLASS: Readonly<Record<ConsentState, string>> = {
+  awaiting_decision: 'border-kindora-200 dark:border-kindora-700',
+  accepted_local: 'border-amber-300 dark:border-amber-700',
+  accepted_peer: 'border-amber-300 dark:border-amber-700',
+  accepted_both: 'border-emerald-300 dark:border-emerald-700',
+  rejected: 'border-rose-300 dark:border-rose-700',
+  blocked: 'border-rose-300 dark:border-rose-700',
+};
+
 function ConsentStatusBanner({ state, peerName }: { state: ConsentState; peerName: string }) {
-  let headline: string;
-  let body: string;
-  let toneClass: string;
-  switch (state) {
-    case 'awaiting_decision':
-      headline = 'Your turn';
-      body = `Decide whether to open a conversation with ${peerName}. Both of you must accept before chat is unlocked.`;
-      toneClass = 'border-kindora-200 dark:border-kindora-700';
-      break;
-    case 'accepted_local':
-      headline = 'Waiting for them';
-      body = `You accepted. Waiting for ${peerName} to accept too.`;
-      toneClass = 'border-amber-300 dark:border-amber-700';
-      break;
-    case 'accepted_peer':
-      headline = 'They accepted';
-      body = `${peerName} accepted. Click Accept to unlock the conversation.`;
-      toneClass = 'border-amber-300 dark:border-amber-700';
-      break;
-    case 'accepted_both':
-      headline = 'Both accepted';
-      body = 'Conversation unlocked.';
-      toneClass = 'border-emerald-300 dark:border-emerald-700';
-      break;
-    case 'rejected':
-      headline = 'Connection rejected';
-      body = 'The match was declined.';
-      toneClass = 'border-rose-300 dark:border-rose-700';
-      break;
-    case 'blocked':
-      headline = 'Blocked';
-      body = 'Future pairing requests from this agent are refused.';
-      toneClass = 'border-rose-300 dark:border-rose-700';
-      break;
-  }
+  const t = useTranslate();
+  const keys = CONSENT_BANNER_KEYS[state];
   return (
     <section
-      className={`kindora-card flex flex-col gap-2 border ${toneClass}`}
+      className={`kindora-card flex flex-col gap-2 border ${CONSENT_TONE_CLASS[state]}`}
       data-testid="consent-status"
     >
       <h2 className="text-kindora-500 dark:text-kindora-400 text-xs uppercase tracking-wide">
-        {headline}
+        {t(keys.headline)}
       </h2>
-      <p className="text-sm leading-relaxed">{body}</p>
+      <p className="text-sm leading-relaxed">{t(keys.body, { peer: peerName })}</p>
     </section>
   );
 }
@@ -218,11 +228,12 @@ function ConsentActions({
   // Buttons stay enabled until a terminal state is reached. The
   // "accept" button is highlighted positively; reject/block are
   // styled to look destructive.
+  const t = useTranslate();
   const disabled = state === 'accepted_both' || state === 'rejected' || state === 'blocked';
   return (
     <section className="kindora-card flex flex-col gap-3">
       <h2 className="text-kindora-500 dark:text-kindora-400 text-xs uppercase tracking-wide">
-        What do you want to do?
+        {t('consent.whatToDo')}
       </h2>
       <div className="flex flex-wrap gap-2">
         <button
@@ -232,7 +243,7 @@ function ConsentActions({
           disabled={disabled}
           data-testid="consent-accept"
         >
-          Accept
+          {t('consent.accept')}
         </button>
         <button
           type="button"
@@ -241,7 +252,7 @@ function ConsentActions({
           disabled={disabled}
           data-testid="consent-reject"
         >
-          Reject
+          {t('consent.reject')}
         </button>
         <button
           type="button"
@@ -250,12 +261,11 @@ function ConsentActions({
           disabled={disabled}
           data-testid="consent-block"
         >
-          Block
+          {t('consent.block')}
         </button>
       </div>
       <p className="text-kindora-500 dark:text-kindora-400 text-xs">
-        Block stores the peer’s id locally so they can’t pair with you again. Reject closes
-        this connection only.
+        {t('consent.actionsNote')}
       </p>
     </section>
   );

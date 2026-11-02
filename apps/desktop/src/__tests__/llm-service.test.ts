@@ -1,6 +1,8 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import {
   clearLLMConfig,
+  clearStoredApiKey,
+  hasStoredApiKey,
   loadLLMConfig,
   loadProvider,
   saveLLMConfig,
@@ -57,6 +59,21 @@ describe('apps/desktop — llm-service persistence', () => {
     expect(typeof provider!.chat).toBe('function');
   });
 
+  it('loadProvider returns null — not a throw — when the saved provider has no API key', async () => {
+    // A config whose key is missing is "not configured yet", not a crash. It is
+    // exactly the state a failed keychain write leaves behind, and `App` calls
+    // `loadProvider()` on every startup: throwing here turned a half-configured
+    // app into an unhandled rejection before the UI could say anything.
+    await saveLLMConfig({ provider: 'anthropic', model: 'claude-sonnet-4-5' });
+    await expect(loadProvider()).resolves.toBeNull();
+  });
+
+  it('loadProvider still builds a provider for a keyless provider (Ollama)', async () => {
+    await saveLLMConfig({ provider: 'ollama', baseUrl: 'http://localhost:11434', model: 'llama3.1' });
+    const provider = await loadProvider();
+    expect(provider).not.toBeNull();
+  });
+
   it('clearLLMConfig wipes everything', async () => {
     await saveLLMConfig({ provider: 'anthropic', model: 'claude-sonnet-4-5' }, 'sk-ant');
     await clearLLMConfig();
@@ -65,10 +82,34 @@ describe('apps/desktop — llm-service persistence', () => {
     expect(localStorage.getItem('kindora:secret:llm:anthropic:api-key')).toBeNull();
   });
 
-  it('saveLLMConfig with empty API key removes the stored key', async () => {
+  it('saveLLMConfig with an empty API key keeps the stored key', async () => {
+    // The Settings screen passes the *live input value*, which is empty
+    // whenever the user has not typed a new key this session. Treating
+    // that as "delete" silently wiped a key that was already stored —
+    // the user re-saved an unchanged provider and lost the key. An empty
+    // key now means "leave the stored key alone".
     await saveLLMConfig({ provider: 'anthropic', model: 'claude-sonnet-4-5' }, 'sk-ant');
     await saveLLMConfig({ provider: 'anthropic', model: 'claude-sonnet-4-5' }, '');
+    expect(localStorage.getItem('kindora:secret:llm:anthropic:api-key')).not.toBeNull();
+    expect(await hasStoredApiKey('anthropic')).toBe(true);
+  });
+
+  it('clearStoredApiKey removes the stored key', async () => {
+    await saveLLMConfig({ provider: 'anthropic', model: 'claude-sonnet-4-5' }, 'sk-ant');
+    expect(await hasStoredApiKey('anthropic')).toBe(true);
+    await clearStoredApiKey('anthropic');
     expect(localStorage.getItem('kindora:secret:llm:anthropic:api-key')).toBeNull();
+    expect(await hasStoredApiKey('anthropic')).toBe(false);
+  });
+
+  it('hasStoredApiKey reports existence per provider, without revealing the key', async () => {
+    expect(await hasStoredApiKey('anthropic')).toBe(false);
+    await saveLLMConfig({ provider: 'anthropic', model: 'claude-sonnet-4-5' }, 'sk-ant-secret');
+    expect(await hasStoredApiKey('anthropic')).toBe(true);
+    // A different provider has its own keyspace.
+    expect(await hasStoredApiKey('openai-compatible')).toBe(false);
+    // A provider that needs no key never has one.
+    expect(await hasStoredApiKey('ollama')).toBe(false);
   });
 });
 

@@ -27,6 +27,7 @@ import {
   toLanInput,
   type LanConnectHandle,
 } from '../lib/lan-connect-service';
+import { useTranslate } from '../i18n';
 
 export type ConnectMode = 'host' | 'join';
 export type TransportMode = 'loopback' | 'lan';
@@ -34,8 +35,10 @@ export type TransportMode = 'loopback' | 'lan';
 export interface ConnectViewProps {
   /** Whether the LLM is configured. Pairing without an LLM is meaningless. */
   readonly llmReady: boolean;
-  /** Reason LLM is not ready, shown as a banner. */
-  readonly llmNotReadyReason?: string;
+  /** Heading for the "LLM not ready" banner. */
+  readonly llmNotReadyTitle?: string;
+  /** Body for the "LLM not ready" banner. */
+  readonly llmNotReadyBody?: string;
   /** Called once pairing has produced a usable handle. */
   readonly onConnected: (handle: ConnectHandle) => void;
   /** Called when the user cancels. */
@@ -44,10 +47,12 @@ export interface ConnectViewProps {
 
 export function ConnectView({
   llmReady,
-  llmNotReadyReason,
+  llmNotReadyTitle,
+  llmNotReadyBody,
   onConnected,
   onCancel,
 }: ConnectViewProps) {
+  const t = useTranslate();
   const [mode, setMode] = useState<ConnectMode>('host');
   const [transport, setTransport] = useState<TransportMode>(
     isLanAvailable() ? 'lan' : 'loopback',
@@ -59,27 +64,25 @@ export function ConnectView({
       <header className="flex items-start justify-between">
         <div>
           <p className="text-kindora-500 dark:text-kindora-400 text-xs uppercase tracking-wide">
-            Connect
+            {t('connect.eyebrow')}
           </p>
-          <h1 className="mt-1 text-3xl font-semibold tracking-tight">Pair with another agent</h1>
+          <h1 className="mt-1 text-3xl font-semibold tracking-tight">{t('connect.title')}</h1>
           <p className="text-kindora-600 dark:text-kindora-300 mt-2 max-w-md text-sm leading-relaxed">
-            Share a 6-character code with the other person, or type theirs. Once paired, your agents
-            exchange profiles and run a local compatibility analysis.
+            {t('connect.body')}
           </p>
         </div>
         <button type="button" className="kindora-button-ghost" onClick={onCancel}>
-          Cancel
+          {t('common.cancel')}
         </button>
       </header>
 
       {!llmReady && (
         <section className="kindora-card flex flex-col gap-2">
           <h2 className="text-rose-600 dark:text-rose-400 text-xs uppercase tracking-wide">
-            LLM not configured
+            {llmNotReadyTitle ?? t('connect.llmNotConfigured')}
           </h2>
           <p className="text-sm leading-relaxed">
-            {llmNotReadyReason ??
-              'Configure an LLM provider in Settings before pairing. Pairing exchanges profiles and runs a local analysis, which needs an LLM.'}
+            {llmNotReadyBody ?? t('connect.llmNotConfiguredBody')}
           </p>
         </section>
       )}
@@ -91,14 +94,14 @@ export function ConnectView({
             className={`kindora-toggle ${mode === 'host' ? 'kindora-toggle-active' : 'kindora-toggle-idle'}`}
             onClick={() => setMode('host')}
           >
-            Host
+            {t('connect.host')}
           </button>
           <button
             type="button"
             className={`kindora-toggle ${mode === 'join' ? 'kindora-toggle-active' : 'kindora-toggle-idle'}`}
             onClick={() => setMode('join')}
           >
-            Join
+            {t('connect.join')}
           </button>
         </div>
         <div className="ml-auto flex gap-2">
@@ -107,21 +110,17 @@ export function ConnectView({
             className={`kindora-toggle ${transport === 'lan' ? 'kindora-toggle-active' : 'kindora-toggle-idle'}`}
             onClick={() => setTransport('lan')}
             disabled={!lanAvailable}
-            title={
-              lanAvailable
-                ? 'LAN: real UDP discovery + TCP message channel between two Tauri clients on the same network.'
-                : 'LAN mode is only available in the Tauri desktop app (not in browser dev).'
-            }
+            title={lanAvailable ? t('connect.lanTitle') : t('connect.lanUnavailableTitle')}
           >
-            LAN
+            {t('connect.lan')}
           </button>
           <button
             type="button"
             className={`kindora-toggle ${transport === 'loopback' ? 'kindora-toggle-active' : 'kindora-toggle-idle'}`}
             onClick={() => setTransport('loopback')}
-            title="Loopback: in-process pairing (browser dev / single-machine tests)."
+            title={t('connect.loopbackTitle')}
           >
-            Loopback
+            {t('connect.loopback')}
           </button>
         </div>
       </div>
@@ -148,6 +147,7 @@ function HostPanel({
   transport: TransportMode;
   onConnected: ConnectViewProps['onConnected'];
 }) {
+  const t = useTranslate();
   const [handle, setHandle] = useState<ConnectHandle | null>(null);
   const [lanHandle, setLanHandle] = useState<LanConnectHandle | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -188,7 +188,8 @@ function HostPanel({
   useEffect(() => {
     if (!llmReady) return;
     let cancelled = false;
-    void (async () => {
+
+    const start = async (): Promise<void> => {
       try {
         if (transport === 'lan') {
           const input = await toLanInput();
@@ -215,9 +216,36 @@ function HostPanel({
       } catch (e: unknown) {
         if (!cancelled) setError(e instanceof Error ? e.message : String(e));
       }
-    })();
+    };
+
+    void start();
+
     return () => {
+      // The host this effect started has to go away when the effect is
+      // torn down — which happens when the transport changes AND when
+      // React StrictMode runs the effect twice in development.
+      //
+      // The cleanup used to only flip `cancelled`, leaving the host
+      // alive on the Rust side. The Rust side owns a single host slot
+      // and a fixed UDP discovery port, so the next start either hit
+      // "already running in mode host" or raced the old responder's
+      // teardown and lost the bind with EADDRINUSE.
+      //
+      // The handle may not exist yet — `start` is still awaiting the
+      // IPC. `start` handles that case itself: it sees `cancelled` and
+      // disconnects the handle it just created. So this cleanup only
+      // has to deal with handles that already exist.
       cancelled = true;
+      const lh = lanHandleRef.current;
+      lanHandleRef.current = null;
+      if (lh) {
+        void lh.disconnect('cancelled');
+      }
+      const h = handleRef.current;
+      handleRef.current = null;
+      if (h) {
+        void h.disconnect('cancelled');
+      }
     };
   }, [llmReady, transport]);
 
@@ -287,19 +315,23 @@ function HostPanel({
   if (error) {
     return (
       <section className="kindora-card flex flex-col gap-2">
-        <h2 className="text-rose-600 dark:text-rose-400 text-xs uppercase tracking-wide">Error</h2>
+        <h2 className="text-rose-600 dark:text-rose-400 text-xs uppercase tracking-wide">
+          {t('common.error')}
+        </h2>
         <p className="text-sm leading-relaxed">{error}</p>
       </section>
     );
   }
   const code = handle?.pairingCode ?? lanHandle?.pairingCode;
   if (!code) {
-    return <p className="text-kindora-500 dark:text-kindora-400 text-sm">Preparing room…</p>;
+    return (
+      <p className="text-kindora-500 dark:text-kindora-400 text-sm">{t('connect.preparingRoom')}</p>
+    );
   }
   return (
     <section className="kindora-card flex flex-col items-center gap-4">
       <h2 className="text-kindora-500 dark:text-kindora-400 text-xs uppercase tracking-wide">
-        Share this code {transport === 'lan' ? '(over LAN)' : '(loopback)'}
+        {t(transport === 'lan' ? 'connect.shareCodeLan' : 'connect.shareCodeLoopback')}
       </h2>
       <p
         className="font-mono text-5xl font-semibold tracking-[0.4em]"
@@ -308,7 +340,7 @@ function HostPanel({
         {code}
       </p>
       <p className="text-kindora-500 dark:text-kindora-400 text-center text-sm">
-        Waiting for the other person to enter this code…
+        {t('connect.waitingForPeer')}
       </p>
     </section>
   );
@@ -327,6 +359,7 @@ function JoinPanel({
   transport: TransportMode;
   onConnected: ConnectViewProps['onConnected'];
 }) {
+  const t = useTranslate();
   const [code, setCode] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -418,14 +451,14 @@ function JoinPanel({
   return (
     <form className="kindora-card flex flex-col gap-3" onSubmit={handleSubmit}>
       <label className="text-kindora-500 dark:text-kindora-400 text-xs uppercase tracking-wide">
-        Pairing code ({transport === 'lan' ? 'over LAN' : 'loopback'})
+        {t(transport === 'lan' ? 'connect.pairingCodeLan' : 'connect.pairingCodeLoopback')}
       </label>
       <input
         type="text"
         inputMode="text"
         autoComplete="off"
         autoFocus
-        placeholder="ABCDEF"
+        placeholder={t('connect.codePlaceholder')}
         value={code}
         onChange={(e) => setCode(e.target.value.toUpperCase())}
         className="kindora-input font-mono tracking-[0.3em]"
@@ -438,7 +471,9 @@ function JoinPanel({
         className="kindora-button self-start"
         disabled={!llmReady || busy || code.length < 4}
       >
-        {busy ? (transport === 'lan' ? 'Searching LAN…' : 'Joining…') : 'Join'}
+        {busy
+          ? t(transport === 'lan' ? 'connect.searchingLan' : 'connect.joining')
+          : t('connect.join')}
       </button>
     </form>
   );

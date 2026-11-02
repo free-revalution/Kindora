@@ -108,20 +108,16 @@ describe('apps/desktop — App end-to-end flow', () => {
     // 5) Back on Home — Settings closed.
     expect(screen.getByText('Sam')).toBeInTheDocument();
 
-    // 6) Open ConnectView directly — `llmReady` won't refresh in this
-    //    test run because the App's loadProvider useEffect fires only
-    //    on mount. So we exercise ConnectView's "host code renders"
-    //    path by pre-configuring the LLM via the saveLLMConfig call
-    //    directly (already done in step 4) and then opening Connect.
-    //    The host panel needs an LLM, so we explicitly call
-    //    loadProvider() to confirm it's ready, then click Connect.
-    const { loadProvider } = await import('../lib/llm-service');
-    const provider = await loadProvider();
-    expect(provider).not.toBeNull();
-
+    // 6) Open Connect. The LLM saved in step 4 must be usable NOW —
+    //    not only after the app is restarted. The App re-reads the saved
+    //    config when Settings reports a successful save, so the Connect
+    //    screen must not claim there is no LLM.
     await act(async () => {
       fireEvent.click(screen.getByRole('button', { name: 'Connect Agent' }));
     });
+
+    await waitFor(() => expect(screen.queryByText(/LLM not configured/i)).not.toBeInTheDocument());
+    expect(await screen.findByTestId('host-pairing-code')).toBeInTheDocument();
   });
 
   it('Welcome view appears when no agent exists; Home after creation', async () => {
