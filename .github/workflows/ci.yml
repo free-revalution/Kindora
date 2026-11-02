@@ -6,8 +6,14 @@ name: CI
 # required checks: it needs platform-specific dependencies and a
 # full Rust toolchain, and the `pnpm -r build` + `pnpm -r test` +
 # `pnpm -r typecheck` jobs below already cover the TypeScript /
-# Rust-lib surface. The optional `tauri-build` job runs in a
-# separate workflow (`tauri.yml`) on tagged releases.
+# Rust-lib surface. A tagged-release build workflow does not exist
+# yet — installers are not published (see README § Status).
+#
+# `pnpm lint` and `pnpm format:check` are intentionally NOT gating:
+# they are useful locally (`pnpm lint`, `pnpm format`) but were not
+# green across the whole tree when this workflow was written, and
+# adding a permanently-red required check helps nobody. They become
+# gating once the tree is clean.
 
 on:
   push:
@@ -30,8 +36,10 @@ jobs:
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
-        with:
-          version: 9
+        # No `version:` input on purpose — the action reads
+        # `packageManager` from the root package.json (pnpm@10.32.1).
+        # Pinning `version: 9` here would install pnpm 9 against a
+        # pnpm-10 lockfile.
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -78,6 +86,13 @@ jobs:
         # release tagging.
         run: cargo check --lib --message-format=short
 
+      - name: Rust unit tests
+        working-directory: apps/desktop/src-tauri
+        # The `--lib` target's own #[test] fns (error -> display-string
+        # contracts in lan.rs). No sockets, no timing — safe to run in
+        # parallel.
+        run: cargo test --lib --message-format=short
+
       - name: LAN end-to-end Rust tests
         working-directory: apps/desktop/src-tauri
         # Exercises the production LanState (host_start, host_poll,
@@ -87,3 +102,9 @@ jobs:
         # the macOS/Linux kernel UDP buffer pool, so we force
         # --test-threads=1. cargo exits non-zero on any test failure.
         run: cargo test --test lan_e2e --message-format=short -- --test-threads=1
+
+      - name: LAN protocol end-to-end Rust tests
+        working-directory: apps/desktop/src-tauri
+        # The KSA 0.1 envelope contract over a real socket: build,
+        # validate, serialise, replay-guard, rate-limit.
+        run: cargo test --test lan_protocol_e2e --message-format=short -- --test-threads=1
