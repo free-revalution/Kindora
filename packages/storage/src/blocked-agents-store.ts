@@ -45,8 +45,18 @@ function getStorage(): Storage {
   return globalThis.localStorage;
 }
 
-function isValidAgentId(s: unknown): s is string {
-  return typeof s === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s);
+/**
+ * True iff the value looks like an agent id (a UUID v4).
+ *
+ * Exported because the Phase D database implementation has to apply the
+ * same rule when it reads rows back: an entry that is not a valid id
+ * is dropped rather than stored.
+ */
+export function isValidBlockedAgentId(s: unknown): s is string {
+  return (
+    typeof s === 'string' &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s)
+  );
 }
 
 function sortByBlockedAtDesc(a: BlockedAgent, b: BlockedAgent): number {
@@ -64,7 +74,7 @@ export class BrowserLocalStorageBlockedAgentsStore implements BlockedAgentsStore
         (e): e is BlockedAgent =>
           typeof e === 'object' &&
           e !== null &&
-          isValidAgentId((e as { agentId?: unknown }).agentId) &&
+          isValidBlockedAgentId((e as { agentId?: unknown }).agentId) &&
           typeof (e as { blockedAt?: unknown }).blockedAt === 'string',
       );
       return [...valid].sort(sortByBlockedAtDesc);
@@ -79,7 +89,7 @@ export class BrowserLocalStorageBlockedAgentsStore implements BlockedAgentsStore
   }
 
   async add(agentId: string, reason?: string): Promise<void> {
-    if (!isValidAgentId(agentId)) {
+    if (!isValidBlockedAgentId(agentId)) {
       throw new Error(`Invalid agent id: ${JSON.stringify(agentId)}`);
     }
     const all = await this.list();
@@ -117,7 +127,7 @@ export class InMemoryBlockedAgentsStore implements BlockedAgentsStore {
   }
 
   async add(agentId: string, reason?: string): Promise<void> {
-    if (!isValidAgentId(agentId)) {
+    if (!isValidBlockedAgentId(agentId)) {
       throw new Error(`Invalid agent id: ${JSON.stringify(agentId)}`);
     }
     const entry: BlockedAgent = {

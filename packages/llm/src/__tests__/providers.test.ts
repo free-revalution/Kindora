@@ -97,14 +97,36 @@ describe('@kindora/llm — OpenAICompatibleProvider', () => {
     await expect(provider.chat(SAMPLE_MESSAGES)).rejects.toThrow(/model not found/i);
   });
 
-  it('throws Rate-limit on 429', async () => {
-    mockFetchOnce({ error: { message: 'slow down' } }, { ok: false, status: 429 });
+  it('throws Rate-limit on 429, after retrying with backoff', async () => {
+    // A 429 is a *retryable* failure (Phase E1), so the provider tries more
+    // than once. The old one-shot mock would run out of responses on the
+    // second attempt and the error would change to a network error; a
+    // persistent mock keeps every attempt a 429. The assertion is unchanged
+    // and two more were added.
+    //
+    // The mock builds a **new** Response per call: a Response body can only
+    // be read once, so a single reused instance would make the second attempt
+    // fail with "body is unusable" instead of the 429 we are testing.
+    const spy = vi.spyOn(globalThis, 'fetch').mockImplementation(
+      async () =>
+        new Response(JSON.stringify({ error: { message: 'slow down' } }), {
+          status: 429,
+          statusText: 'Too Many Requests',
+          headers: { 'Content-Type': 'application/json' },
+        }),
+    );
+    const delays: number[] = [];
     const provider = new OpenAICompatibleProvider({
       baseUrl: 'https://api.example.com/v1',
       model: 'x',
       apiKey: 'k',
+      sleep: async (ms: number) => {
+        delays.push(ms);
+      },
     });
     await expect(provider.chat(SAMPLE_MESSAGES)).rejects.toThrow(/rate limit/i);
+    expect(spy.mock.calls.length).toBe(3);
+    expect(delays).toEqual([500, 1000]);
   });
 });
 
@@ -149,14 +171,27 @@ describe('@kindora/llm — AnthropicProvider', () => {
     );
   });
 
-  it('maps 529 to overloaded error', async () => {
-    mockFetchOnce({ error: { message: 'overloaded' } }, { ok: false, status: 529 });
+  it('maps 529 to overloaded error, after retrying with backoff', async () => {
+    // 529 means "Anthropic is overloaded" — a temporary failure, so it is
+    // retried (Phase E1). Persistent mock so every attempt is a 529; the
+    // original assertion is unchanged. New Response per call, for the same
+    // reason as the 429 above.
+    const spy = vi.spyOn(globalThis, 'fetch').mockImplementation(
+      async () =>
+        new Response(JSON.stringify({ error: { message: 'overloaded' } }), {
+          status: 529,
+          statusText: 'Overloaded',
+          headers: { 'Content-Type': 'application/json' },
+        }),
+    );
     const provider = new AnthropicProvider({
       baseUrl: 'https://api.anthropic.com',
       model: 'claude-sonnet-4-5',
       apiKey: 'k',
+      sleep: async () => {},
     });
     await expect(provider.chat(SAMPLE_MESSAGES)).rejects.toThrow(/overloaded/i);
+    expect(spy.mock.calls.length).toBe(3);
   });
 });
 

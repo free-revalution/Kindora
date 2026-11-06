@@ -3,15 +3,20 @@
  *
  * Wires MatchOrchestrator + ConsentOrchestrator + ChatOrchestrator on
  * both sides of a LoopbackTransport pair and drives the entire
- * envelope sequence:
+ * envelope sequence.
  *
- *   hello → profile_exchange → match_request → match_response →
- *   permission_request → consent_accept → chat_message (×N)
+ * Phase B (2026-11-05) reordered that sequence — the human consent
+ * step now sits **between** the two match phases:
+ *
+ *   hello → profile_exchange (public card) → consent_accept →
+ *   match_request (authorised profile) → match_response →
+ *   chat_message (×N)
  *
  * Uses a stub LLM provider so the test is deterministic and never
  * touches the network. Verifies:
- *   - both sides get a MatchOutcome with their own + the peer's analysis
+ *   - both sides exchange only the public card before the consent
  *   - both sides reach accepted_both consent state
+ *   - both sides get a MatchOutcome with their own + the peer's analysis
  *   - chat messages flow in both directions and end up in the snapshots
  *   - consent_reject from one side closes the other side's session
  *   - block from one side closes the other side's session
@@ -19,7 +24,7 @@
  * This complements the per-orchestrator unit tests with a single
  * happy-path integration that exercises the full protocol surface.
  *
- * See 开发手册.md § 60.
+ * See 开发手册.md § 60, docs/修复.md § 五 B2.
  */
 import { describe, it, expect } from 'vitest';
 import type { ChatMessage, LLMProvider, LLMResponse } from '@kindora/llm';
@@ -27,6 +32,7 @@ import {
   DEFAULT_SOCIAL_BOUNDARIES,
   PROTOCOL_VERSION,
   type CompatibilitySignal,
+  type KsaMessage,
   type MatchAnalysis,
   type SocialProfile,
 } from '@kindora/protocol';
@@ -36,11 +42,7 @@ import {
   PairingSession,
   type PairingSessionOptions,
 } from '@kindora/transport';
-import {
-  buildCapabilities,
-  createAgentIdentity,
-  type AgentIdentity,
-} from '@kindora/agent';
+import { buildCapabilities, createAgentIdentity, type AgentIdentity } from '@kindora/agent';
 import {
   ChatOrchestrator,
   ConsentOrchestrator,
@@ -48,10 +50,7 @@ import {
   type MatchOrchestratorSelf,
 } from '../index';
 
-function buildProfile(
-  nickname: string,
-  overrides: Partial<SocialProfile> = {},
-): SocialProfile {
+function buildProfile(nickname: string, overrides: Partial<SocialProfile> = {}): SocialProfile {
   return {
     nickname,
     bio: `${nickname} bio`,
@@ -176,50 +175,52 @@ function makeOrchestratorSelf(
   };
 }
 
+/** Record every envelope a session puts on the wire. */
+function recordOutbound(session: PairingSession): KsaMessage[] {
+  const sent: KsaMessage[] = [];
+  const original = session.send.bind(session);
+  session.send = async (message: KsaMessage) => {
+    sent.push(message);
+    return original(message);
+  };
+  return sent;
+}
+
 describe('@kindora/matching — Integration (Agent A ↔ Agent B)', () => {
-  it('runs match + consent + chat end-to-end across two sessions', async () => {
+  it('runs identify + consent + match + chat end-to-end across two sessions', async () => {
     const setup = await pairUp();
+    const sentByA = recordOutbound(setup.sessionA);
     const orchA = new MatchOrchestrator(
-      makeOrchestratorSelf(
-        setup.identityA,
-        setup.displayNameA,
-        setup.profileA,
-        setup.llmA,
-      ),
+      makeOrchestratorSelf(setup.identityA, setup.displayNameA, setup.profileA, setup.llmA),
       '',
     );
     const orchB = new MatchOrchestrator(
-      makeOrchestratorSelf(
-        setup.identityB,
-        setup.displayNameB,
-        setup.profileB,
-        setup.llmB,
-      ),
+      makeOrchestratorSelf(setup.identityB, setup.displayNameB, setup.profileB, setup.llmB),
       '',
     );
 
-    // Kick off both matches in parallel — each side runs its own analyzeMatch.
-    const [outcomeA, outcomeB] = await Promise.all([
-      orchA.start(setup.sessionA),
-      orchB.start(setup.sessionB),
+    // ---- Phase 1: identify (public card only) ----
+    const [introA, introB] = await Promise.all([
+      orchA.identify(setup.sessionA),
+      orchB.identify(setup.sessionB),
     ]);
+    expect(introA.peerAgentId).toBe(setup.identityB.agentId);
+    expect(introB.peerAgentId).toBe(setup.identityA.agentId);
 
-    expect(outcomeA.localAnalysis.compatibilitySignal).toBe('strong');
-    expect(outcomeA.peerAnalysis?.compatibilitySignal).toBe('moderate');
-    expect(outcomeA.peerProfile?.nickname).toBe('Bob');
-    expect(outcomeB.localAnalysis.compatibilitySignal).toBe('moderate');
-    expect(outcomeB.peerAnalysis?.compatibilitySignal).toBe('strong');
+    // Before the consent, only the hello and the public card are on
+    // the wire — no authorised profile.
+    expect(sentByA.map((m) => m.type)).toEqual(['hello', 'profile_exchange']);
 
-    // Consent — both accept.
+    // ---- Phase B: the human consent step ----
     const consentA = new ConsentOrchestrator({
       selfAgentId: setup.identityA.agentId,
-      peerDisplayName: outcomeA.peerDisplayName,
-      peerAgentId: outcomeA.peerAgentId,
+      peerDisplayName: introA.peerDisplayName,
+      peerAgentId: introA.peerAgentId,
     });
     const consentB = new ConsentOrchestrator({
       selfAgentId: setup.identityB.agentId,
-      peerDisplayName: outcomeB.peerDisplayName,
-      peerAgentId: outcomeB.peerAgentId,
+      peerDisplayName: introB.peerDisplayName,
+      peerAgentId: introB.peerAgentId,
     });
 
     const finalA = consentA.start(setup.sessionA);
@@ -233,6 +234,27 @@ describe('@kindora/matching — Integration (Agent A ↔ Agent B)', () => {
     const [outA, outB] = await Promise.all([finalA, finalB]);
     expect(outA.state).toBe('accepted_both');
     expect(outB.state).toBe('accepted_both');
+
+    // ---- Phase 2: exchange the authorised profiles and analyse ----
+    const [outcomeA, outcomeB] = await Promise.all([
+      orchA.exchangeAndMatch(setup.sessionA, outA),
+      orchB.exchangeAndMatch(setup.sessionB, outB),
+    ]);
+
+    expect(outcomeA.localAnalysis.compatibilitySignal).toBe('strong');
+    expect(outcomeA.peerAnalysis?.compatibilitySignal).toBe('moderate');
+    expect(outcomeA.peerProfile?.nickname).toBe('Bob');
+    expect(outcomeB.localAnalysis.compatibilitySignal).toBe('moderate');
+    expect(outcomeB.peerAnalysis?.compatibilitySignal).toBe('strong');
+
+    // The authorised profile only went out after the consent.
+    expect(sentByA.map((m) => m.type)).toEqual([
+      'hello',
+      'profile_exchange',
+      'consent_accept',
+      'match_request',
+      'match_response',
+    ]);
 
     // Chat — start listeners on both sides.
     const chatA = new ChatOrchestrator({
@@ -258,59 +280,72 @@ describe('@kindora/matching — Integration (Agent A ↔ Agent B)', () => {
 
     const snapA = chatA.snapshot();
     const snapB = chatB.snapshot();
-    expect(snapA.entries.map((e) => e.text)).toEqual([
-      'Hello from Alice',
-      'Hi from Bob',
-    ]);
-    expect(snapB.entries.map((e) => e.text)).toEqual([
-      'Hello from Alice',
-      'Hi from Bob',
-    ]);
+    expect(snapA.entries.map((e) => e.text)).toEqual(['Hello from Alice', 'Hi from Bob']);
+    expect(snapB.entries.map((e) => e.text)).toEqual(['Hello from Alice', 'Hi from Bob']);
 
     // Clean shutdown — both sides must disconnect for both promises to resolve.
-    await Promise.all([
-      setup.sessionA.disconnect('done'),
-      setup.sessionB.disconnect('done'),
-    ]);
+    await Promise.all([setup.sessionA.disconnect('done'), setup.sessionB.disconnect('done')]);
     const [finalA2, finalB2] = await Promise.all([chatClosedA, chatClosedB]);
     expect(finalA2.state).toBe('closed');
     expect(finalB2.state).toBe('closed');
   });
 
-  it('consent_reject from one side terminates the other side cleanly', async () => {
+  it('the public card is all that crosses the wire before the consent', async () => {
     const setup = await pairUp();
+    const sentByA = recordOutbound(setup.sessionA);
+    const receivedByB: KsaMessage[] = [];
+    setup.sessionB.onMessage((m) => {
+      receivedByB.push(m);
+    });
+
     const orchA = new MatchOrchestrator(
-      makeOrchestratorSelf(
-        setup.identityA,
-        setup.displayNameA,
-        setup.profileA,
-        setup.llmA,
-      ),
+      makeOrchestratorSelf(setup.identityA, setup.displayNameA, setup.profileA, setup.llmA),
       '',
     );
     const orchB = new MatchOrchestrator(
-      makeOrchestratorSelf(
-        setup.identityB,
-        setup.displayNameB,
-        setup.profileB,
-        setup.llmB,
-      ),
+      makeOrchestratorSelf(setup.identityB, setup.displayNameB, setup.profileB, setup.llmB),
       '',
     );
-    const [outcomeA, outcomeB] = await Promise.all([
-      orchA.start(setup.sessionA),
-      orchB.start(setup.sessionB),
+
+    await Promise.all([orchA.identify(setup.sessionA), orchB.identify(setup.sessionB)]);
+
+    const card = receivedByB.find((m) => m.type === 'profile_exchange');
+    expect(card).toBeDefined();
+    const payload = card!.payload as { profile: SocialProfile };
+    // The default boundaries keep the bio / interests / activities
+    // private — only the intent and the style are on the card.
+    expect(payload.profile.bio).toBe('');
+    expect(payload.profile.interests).toEqual([]);
+    expect(payload.profile.currentActivities).toEqual([]);
+    expect(payload.profile.socialIntent).toEqual(['similar_interests']);
+    // And no authorised profile has been sent yet.
+    expect(sentByA.filter((m) => m.type === 'match_request')).toHaveLength(0);
+  });
+
+  it('consent_reject from one side terminates the other side cleanly', async () => {
+    const setup = await pairUp();
+    const orchA = new MatchOrchestrator(
+      makeOrchestratorSelf(setup.identityA, setup.displayNameA, setup.profileA, setup.llmA),
+      '',
+    );
+    const orchB = new MatchOrchestrator(
+      makeOrchestratorSelf(setup.identityB, setup.displayNameB, setup.profileB, setup.llmB),
+      '',
+    );
+    const [introA, introB] = await Promise.all([
+      orchA.identify(setup.sessionA),
+      orchB.identify(setup.sessionB),
     ]);
 
     const consentA = new ConsentOrchestrator({
       selfAgentId: setup.identityA.agentId,
-      peerDisplayName: outcomeA.peerDisplayName,
-      peerAgentId: outcomeA.peerAgentId,
+      peerDisplayName: introA.peerDisplayName,
+      peerAgentId: introA.peerAgentId,
     });
     const consentB = new ConsentOrchestrator({
       selfAgentId: setup.identityB.agentId,
-      peerDisplayName: outcomeB.peerDisplayName,
-      peerAgentId: outcomeB.peerAgentId,
+      peerDisplayName: introB.peerDisplayName,
+      peerAgentId: introB.peerAgentId,
     });
 
     const finalA = consentA.start(setup.sessionA);
@@ -334,26 +369,16 @@ describe('@kindora/matching — Integration (Agent A ↔ Agent B)', () => {
   it('block from one side terminates both sessions and adds to block list', async () => {
     const setup = await pairUp();
     const orchA = new MatchOrchestrator(
-      makeOrchestratorSelf(
-        setup.identityA,
-        setup.displayNameA,
-        setup.profileA,
-        setup.llmA,
-      ),
+      makeOrchestratorSelf(setup.identityA, setup.displayNameA, setup.profileA, setup.llmA),
       '',
     );
     const orchB = new MatchOrchestrator(
-      makeOrchestratorSelf(
-        setup.identityB,
-        setup.displayNameB,
-        setup.profileB,
-        setup.llmB,
-      ),
+      makeOrchestratorSelf(setup.identityB, setup.displayNameB, setup.profileB, setup.llmB),
       '',
     );
-    const [outcomeA] = await Promise.all([
-      orchA.start(setup.sessionA),
-      orchB.start(setup.sessionB),
+    const [introA] = await Promise.all([
+      orchA.identify(setup.sessionA),
+      orchB.identify(setup.sessionB),
     ]);
 
     const fakeBlockList = {
@@ -368,8 +393,8 @@ describe('@kindora/matching — Integration (Agent A ↔ Agent B)', () => {
 
     const consentA = new ConsentOrchestrator({
       selfAgentId: setup.identityA.agentId,
-      peerDisplayName: outcomeA.peerDisplayName,
-      peerAgentId: outcomeA.peerAgentId,
+      peerDisplayName: introA.peerDisplayName,
+      peerAgentId: introA.peerAgentId,
       options: { blockList: fakeBlockList },
     });
     const finalA = consentA.start(setup.sessionA);
@@ -377,9 +402,7 @@ describe('@kindora/matching — Integration (Agent A ↔ Agent B)', () => {
 
     const outA = await finalA;
     expect(outA.state).toBe('blocked');
-    expect(fakeBlockList.added).toEqual([
-      { id: outcomeA.peerAgentId, reason: 'spam' },
-    ]);
+    expect(fakeBlockList.added).toEqual([{ id: introA.peerAgentId, reason: 'spam' }]);
 
     await new Promise((r) => setTimeout(r, 20));
     // Pairing B hasn't started its own ConsentOrchestrator above, but if

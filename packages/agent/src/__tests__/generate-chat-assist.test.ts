@@ -38,7 +38,11 @@ function stubProvider(reply: string): LLMProvider & { calls: ChatMessage[][] } {
 const SELF_ID = '11111111-1111-4111-8111-aaaaaaaaaaaa';
 const PEER_ID = '22222222-2222-4222-8222-bbbbbbbbbbbb';
 
-function entry(s: { direction: 'sent' | 'received'; sender?: string; text: string }): ChatHistoryEntryLike {
+function entry(s: {
+  direction: 'sent' | 'received';
+  sender?: string;
+  text: string;
+}): ChatHistoryEntryLike {
   return {
     direction: s.direction,
     sender: s.sender ?? (s.direction === 'sent' ? SELF_ID : PEER_ID),

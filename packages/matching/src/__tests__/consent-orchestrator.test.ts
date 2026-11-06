@@ -1,10 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { createBlock, createConsentReject } from '@kindora/protocol';
 import { LoopbackHub, LoopbackTransport, PairingSession } from '@kindora/transport';
-import {
-  ConsentOrchestrator,
-  type BlockedAgentsLookup,
-} from '../consent-orchestrator';
+import { ConsentOrchestrator, type BlockedAgentsLookup } from '../consent-orchestrator';
 
 const ID_A = '11111111-2222-4333-8444-aaaaaaaaaaaa';
 const ID_B = '22222222-3333-4444-8555-bbbbbbbbbbbb';
@@ -188,9 +185,7 @@ describe('@kindora/matching — ConsentOrchestrator', () => {
     // Second click should be rejected — either because the local
     // decision is already taken, or because the state has already
     // finalised. Both are valid signals of "no more decisions".
-    await expect(orchA.decide(sessionA, 'accept')).rejects.toThrow(
-      /already (taken|finalised)/,
-    );
+    await expect(orchA.decide(sessionA, 'accept')).rejects.toThrow(/already (taken|finalised)/);
   });
 
   it('soft timeouts when local accepts but peer never replies', async () => {

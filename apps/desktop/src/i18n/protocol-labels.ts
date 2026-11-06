@@ -15,11 +15,7 @@
  * any string and give us none of the above.
  */
 
-import type {
-  CompatibilitySignal,
-  ConversationStyle,
-  SocialIntent,
-} from '@kindora/protocol';
+import type { CompatibilitySignal, ConversationStyle, SocialIntent } from '@kindora/protocol';
 import type { ChatAssistKind, ProfileValidationCode } from '@kindora/agent';
 import type { LlmUnavailableReason } from '../lib/llm-service';
 import type { TranslationKey } from './dictionaries/en';

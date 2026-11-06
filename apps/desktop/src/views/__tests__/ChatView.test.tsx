@@ -62,8 +62,20 @@ describe('apps/desktop — ChatView (Phase 9)', () => {
         selfDisplayName="Alex"
         snapshot={makeSnapshot({
           entries: [
-            { id: '1', direction: 'received', sender: 'peer', text: 'hi', timestamp: '2026-01-01T00:00:00.000Z' },
-            { id: '2', direction: 'sent', sender: 'self', text: 'hello', timestamp: '2026-01-01T00:01:00.000Z' },
+            {
+              id: '1',
+              direction: 'received',
+              sender: 'peer',
+              text: 'hi',
+              timestamp: '2026-01-01T00:00:00.000Z',
+            },
+            {
+              id: '2',
+              direction: 'sent',
+              sender: 'self',
+              text: 'hello',
+              timestamp: '2026-01-01T00:01:00.000Z',
+            },
           ],
         })}
         phase="open"
@@ -134,7 +146,11 @@ describe('apps/desktop — ChatView (Phase 10 — Ask My Agent panel)', () => {
         sending={false}
         maxTextLength={2000}
         error={undefined}
-        assistant={emptyAssist({ open: false, unavailable: true, unavailableReason: 'No LLM configured.' })}
+        assistant={emptyAssist({
+          open: false,
+          unavailable: true,
+          unavailableReason: 'No LLM configured.',
+        })}
         onDraftChange={() => undefined}
         onSend={() => undefined}
         onDisconnect={() => undefined}
@@ -215,8 +231,20 @@ describe('apps/desktop — ChatView (Phase 10 — Ask My Agent panel)', () => {
     const display = {
       summary: 'Here are some thoughts.',
       suggestions: [
-        { id: 'r0', kind: 'reply' as const, kindLabel: 'Reply', text: 'first reply', rationale: 'because' },
-        { id: 't1', kind: 'topic' as const, kindLabel: 'Topic', text: 'first topic', rationale: '' },
+        {
+          id: 'r0',
+          kind: 'reply' as const,
+          kindLabel: 'Reply',
+          text: 'first reply',
+          rationale: 'because',
+        },
+        {
+          id: 't1',
+          kind: 'topic' as const,
+          kindLabel: 'Topic',
+          text: 'first topic',
+          rationale: '',
+        },
       ],
     };
     render(
@@ -294,7 +322,13 @@ describe('apps/desktop — ChatView (Phase 10 — Ask My Agent panel)', () => {
     const display = {
       summary: '',
       suggestions: [
-        { id: 'r0', kind: 'reply' as const, kindLabel: 'Reply', text: 'the suggestion', rationale: '' },
+        {
+          id: 'r0',
+          kind: 'reply' as const,
+          kindLabel: 'Reply',
+          text: 'the suggestion',
+          rationale: '',
+        },
       ],
     };
     render(
@@ -350,14 +384,14 @@ describe('apps/desktop — LiveChatView (Phase 10 — Ask My Agent wiring)', () 
   it('opens the panel and runs ask() when the user submits a query', async () => {
     const reply = {
       summary: 'ok',
-      suggestions: [
-        { kind: 'reply' as const, text: 'hello there', rationale: 'because' },
-      ],
+      suggestions: [{ kind: 'reply' as const, text: 'hello there', rationale: 'because' }],
     };
-    const chatAssist = makeChatAssist(JSON.stringify({
-      summary: reply.summary,
-      suggestions: reply.suggestions,
-    }));
+    const chatAssist = makeChatAssist(
+      JSON.stringify({
+        summary: reply.summary,
+        suggestions: reply.suggestions,
+      }),
+    );
     const onSend = vi.fn();
     const onDisconnect = vi.fn();
     const onBlock = vi.fn();
@@ -398,10 +432,12 @@ describe('apps/desktop — LiveChatView (Phase 10 — Ask My Agent wiring)', () 
   });
 
   it('Use fills the composer draft without auto-sending', async () => {
-    const chatAssist = makeChatAssist(JSON.stringify({
-      summary: '',
-      suggestions: [{ kind: 'reply' as const, text: 'draft text', rationale: '' }],
-    }));
+    const chatAssist = makeChatAssist(
+      JSON.stringify({
+        summary: '',
+        suggestions: [{ kind: 'reply' as const, text: 'draft text', rationale: '' }],
+      }),
+    );
 
     render(
       <LiveChatView

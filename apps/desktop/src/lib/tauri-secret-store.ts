@@ -12,18 +12,7 @@
  */
 
 import type { SecretStore } from '@kindora/storage';
-
-interface TauriInvoke {
-  invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T>;
-}
-
-function getTauri(): TauriInvoke | null {
-  if (typeof window === 'undefined') return null;
-  const w = window as Window & { __TAURI_INTERNALS__?: { invoke?: (cmd: string, args?: Record<string, unknown>) => Promise<unknown> } };
-  const inv = w.__TAURI_INTERNALS__?.invoke;
-  if (typeof inv !== 'function') return null;
-  return { invoke: <T>(cmd: string, args?: Record<string, unknown>) => inv.call(w.__TAURI_INTERNALS__, cmd, args) as Promise<T> };
-}
+import { getTauriInvoke, type TauriInvoke } from './tauri-runtime';
 
 export const TAURI_SECRET_STORE_VERSION = '0.1.0';
 
@@ -32,7 +21,7 @@ export class TauriSecretStore implements SecretStore {
   readonly version: string = TAURI_SECRET_STORE_VERSION;
 
   constructor(tauri?: TauriInvoke) {
-    const t = tauri ?? getTauri();
+    const t = tauri ?? getTauriInvoke();
     if (!t) {
       throw new Error('TauriSecretStore: Tauri runtime not available.');
     }
@@ -54,5 +43,5 @@ export class TauriSecretStore implements SecretStore {
 
 /** True when the Tauri runtime exposes the secret commands. */
 export function isTauriSecretStoreAvailable(): boolean {
-  return getTauri() !== null;
+  return getTauriInvoke() !== null;
 }

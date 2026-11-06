@@ -13,6 +13,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   LanError,
+  LAN_ERROR_LIMIT_EXCEEDED_PREFIX,
   LAN_ERROR_NOT_CONNECTED_DISPLAY,
   LAN_ERROR_PEER_CLOSED_DISPLAY,
 } from '../lan-error';
@@ -111,5 +112,41 @@ describe('@kindora/transport — LanError', () => {
     const e = LanError.from(new Error(LAN_ERROR_NOT_CONNECTED_DISPLAY));
     expect(e.kind).toBe('not-connected');
     expect(e.isPeerClosed()).toBe(false);
+  });
+
+  // ---- Phase C / C1 + C2: the limit-exceeded contract ----
+
+  it('LAN_ERROR_LIMIT_EXCEEDED_PREFIX is the exact prefix the classifier matches', () => {
+    // The Rust side renders `LanError::LimitExceeded(detail)` as
+    // "peer exceeded limit: <detail>". The Rust unit test
+    // `limit_exceeded_display_matches_ipc_contract` pins the same
+    // string.
+    expect(LAN_ERROR_LIMIT_EXCEEDED_PREFIX).toBe('peer exceeded limit: ');
+    const e = LanError.from(new Error(`${LAN_ERROR_LIMIT_EXCEEDED_PREFIX}frame too big`));
+    expect(e.kind).toBe('limit-exceeded');
+    expect(e.isLimitExceeded()).toBe(true);
+  });
+
+  it('classifies a limit breach as limit-exceeded, NOT as peer-closed', () => {
+    // The two are easy to conflate — both mean "the link is over" —
+    // but C2 § 5 needs the specific reason, and the UI shows a
+    // different message for "you were sending too much" than for
+    // "the peer went away".
+    const e = LanError.from(new Error('peer exceeded limit: more than 50 messages per second'));
+    expect(e.kind).toBe('limit-exceeded');
+    expect(e.isLimitExceeded()).toBe(true);
+    // A limit breach is not a plain peer close...
+    expect(e.isPeerClosed()).toBe(false);
+    // ...and it must not be swallowed by the generic `invalid`
+    // branch, which also carries a colon-prefixed detail.
+    expect(e.kind).not.toBe('invalid');
+  });
+
+  it('does NOT classify a bare "peer exceeded limit:" without the trailing space', () => {
+    // The Rust Display string always has a space before the detail.
+    // Without the space the string is not one Rust can produce, so
+    // it must not be treated as a limit breach.
+    const e = LanError.from(new Error('peer exceeded limit:'));
+    expect(e.kind).toBe('unknown');
   });
 });

@@ -5,26 +5,26 @@ Rust processes, isolated from the main Tauri project.
 
 ## 1. Baseline & Toolchain (VERIFIED)
 
-| Item | Value |
-|---|---|
-| HEAD commit (pre-experiment) | `009f8fa37ccd04527809e5f33e874805f7b6bfde` |
+| Item                         | Value                                                                                                                                                                                                       |
+| ---------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| HEAD commit (pre-experiment) | `009f8fa37ccd04527809e5f33e874805f7b6bfde`                                                                                                                                                                  |
 | HEAD commit (this revision)  | `cc16314` (seventh round: PID-scoped cleanup — eliminate over-broad `pkill -KILL -P 1 sleep`; SHA in this row is the SHA of the parent of the commit that added the row — the actual HEAD is `git log -1`.) |
-| Branch | `main` |
-| rustc | 1.77.2 (25ef9e3d8 2024-04-09) |
-| cargo | 1.77.2 (e52e36006 2024-03-26) |
-| bash | 3.2.57(1)-release (arm64-apple-darwin24) |
-| OS | Darwin 24.6.0 (arm64, T8132) |
+| Branch                       | `main`                                                                                                                                                                                                      |
+| rustc                        | 1.77.2 (25ef9e3d8 2024-04-09)                                                                                                                                                                               |
+| cargo                        | 1.77.2 (e52e36006 2024-03-26)                                                                                                                                                                               |
+| bash                         | 3.2.57(1)-release (arm64-apple-darwin24)                                                                                                                                                                    |
+| OS                           | Darwin 24.6.0 (arm64, T8132)                                                                                                                                                                                |
 
 ## 2. Protected Files SHA-256 (VERIFIED, unchanged end-to-end)
 
-| File | SHA-256 |
-|---|---|
-| `apps/desktop/src-tauri/src/bin/lan_cross_process_host.rs` | `03cbe28e0834947fb8a89d34e2693d1b580e927b99731014b9dc25fa2eb43ed6` |
+| File                                                         | SHA-256                                                            |
+| ------------------------------------------------------------ | ------------------------------------------------------------------ |
+| `apps/desktop/src-tauri/src/bin/lan_cross_process_host.rs`   | `03cbe28e0834947fb8a89d34e2693d1b580e927b99731014b9dc25fa2eb43ed6` |
 | `apps/desktop/src-tauri/src/bin/lan_cross_process_joiner.rs` | `0a2638a5a6c96095f74b6199a667ed44d642085461a8086a28cbd8635ad19243` |
-| `apps/desktop/src-tauri/scripts/run_unicast_test.sh` | `6cae47a33437f6cb5fcb2b27367ff98a96393ca2a9b114fa5ca1a062c6b5f64d` |
-| `apps/desktop/src-tauri/Cargo.toml` | `2f48b07544a3c28b7ce1de4eb54346238f50569dccd058f46942298ad2426369` |
-| `apps/desktop/src-tauri/Cargo.lock` | `1385f069b6010bb39ccc95d126e455107ca62fc056264c1abe8612086e6cfd27` |
-| `docs/AUDIT_V0.1.md` | `79f8e1869d1e5647add7954003ce2bc1780c19effbeed41f4245685606e69b38` |
+| `apps/desktop/src-tauri/scripts/run_unicast_test.sh`         | `6cae47a33437f6cb5fcb2b27367ff98a96393ca2a9b114fa5ca1a062c6b5f64d` |
+| `apps/desktop/src-tauri/Cargo.toml`                          | `2f48b07544a3c28b7ce1de4eb54346238f50569dccd058f46942298ad2426369` |
+| `apps/desktop/src-tauri/Cargo.lock`                          | `1385f069b6010bb39ccc95d126e455107ca62fc056264c1abe8612086e6cfd27` |
+| `docs/AUDIT_V0.1.md`                                         | `79f8e1869d1e5647add7954003ce2bc1780c19effbeed41f4245685606e69b38` |
 
 Sizes & mtimes also re-verified post-run — see `T12` in § 7.
 
@@ -65,103 +65,103 @@ Sizes & mtimes also re-verified post-run — see `T12` in § 7.
   actual code at `f1ca266` identified two further isolation/
   correctness gaps in the Scenario 5 cleanup paths the seventh
   round had introduced.
-    - **Problem 1 (multi-level process trees)**: the seventh-round
-      `owned_pids` whitelist was built with `pgrep -P "$PID"` —
-      direct children only. That captured at most one level of
-      the process tree. A regression that replaced the
-      `exec sleep 30` fixture with a deeper tree (e.g.
-      `bash -c "bash -c sleep 30"`) would put deeper descendants
-      outside the `owned_pids` set, and the cleanup would either
-      miss them entirely or fall back to a broad pattern kill
-      (which the seventh round explicitly forbade).
-    - **Problem 2 (uniform ownership verification)**: the
-      seventh-round post-check 2 used `pgrep -P "$PID"` to find
-      residual direct children and killed every PID it returned —
-      without validating that those PIDs were in `owned_pids`. If
-      an unrelated process happened to be reparented to `$PID`
-      between reap and post-check, we would kill it by PID. The
-      ownership verification was inconsistent across cleanup
-      paths (pre-check used the whitelist; post-checks did not
-      uniformly).
-    - **Fix (this revision)**: four new helper functions
-      (`collect_descendants_pids`, `pid_is_alive`,
-      `pid_still_in_subtree`, `pid_safe_kill`, plus
-      `pid_safe_kill_owned` for the Gap 2 case where the orphan
-      is under PID 1 rather than still under `$PID`'s subtree).
-      Scenario 5 now:
-        1. Builds `owned_pids` via `collect_descendants_pids` —
-           a BFS over `pgrep -P` that captures the FULL subtree
-           at observation time (any depth). Contract is:
-           "every PID this scenario demonstrably created at
-           observation time is in the whitelist."
-        2. Pre-check FAIL cleanup uses `pid_safe_kill` for each
-           descendant (deepest-first by numeric-PID descending
-           sort) then `pid_safe_kill "$PID" "$PID"` then `wait`.
-           No `pkill -KILL -P 1 sleep` of any kind.
-        3. Post-check 1 cleanup uses `pid_safe_kill "$PID" "$PID"`
-           instead of bare `kill -KILL` — re-verifies aliveness
-           AND that the PID is still in its own subtree before
-           sending SIGKILL (PID-reuse mitigation).
-        4. Post-check 2 cleanup classifies each residual PID
-           as provable (in `owned_pids`) or unprovable. Provable
-           ones are killed via `pid_safe_kill` (deepest-first).
-           Unprovable ones are reported as residual with their
-           PIDs and the cleanup does NOT claim success. This is
-           the SAME ownership rule used everywhere else.
-        5. Post-check 3 (Gap 2) cleanup uses
-           `pid_safe_kill_owned "$o" "$owned_pids"` for provable
-           orphans — the orphan is now under PID 1 (not under
-           `$PID`'s subtree), so the proof of ownership is
-           whitelist membership (we observed the PID at capture
-           time) paired with the same aliveness guard. Unprovable
-           orphans are still reported as residual and left
-           untouched (per the seventh-round contract).
-    - PID-reuse mitigation (Round-8 baseline, Round-9
-      enhanced, Round-10 honest disclosure): in scenario 5,
-      every kill goes through one of
-      `pid_safe_kill_with_identity` (Round-9 primitive;
-      REPLACES the eighth-round `pid_safe_kill` for scenario
-      5 paths) or `pid_safe_kill_orphan` (Round-9 primitive;
-      REPLACES the eighth-round `pid_safe_kill_owned` for the
-      Gap 2 orphan-under-PID-1 path). Each applies up to
-      four guards:
-        1. PID membership in `identities_tsv` (whitelist
-           captured at T0).
-        2. Aliveness (`kill -0`).
-        3. `ps -o lstart=` string equality between observation
-           and kill time.
-        4. For non-orphan path: PID still in root's subtree.
-      What the lstart check VERIFIED to catch: different-
-      second PID reuse (verified by
-      `verify_precheck_deep_tree.sh` step 10 with a
-      fabricated wrong-second lstart ⇒ refusal ⇒ target
-      alive).
-      What the lstart check does NOT catch (Round-10 audit,
-      RISK_REMAINS):
-        - Same-second PID reuse — `ps -o lstart=` is
-          second-precision on macOS bash 3.2; two processes
-          spawned within the same wall-clock second yield
-          identical lstart strings (verified by step 10b).
-        - Check-then-kill race — between `kill -0` succeeding
-          and `kill -KILL` delivery, a same-second stranger
-          could in principle be inserted into the slot; no
-          shell-accessible atomic operation closes this on
-          macOS bash 3.2.
+  - **Problem 1 (multi-level process trees)**: the seventh-round
+    `owned_pids` whitelist was built with `pgrep -P "$PID"` —
+    direct children only. That captured at most one level of
+    the process tree. A regression that replaced the
+    `exec sleep 30` fixture with a deeper tree (e.g.
+    `bash -c "bash -c sleep 30"`) would put deeper descendants
+    outside the `owned_pids` set, and the cleanup would either
+    miss them entirely or fall back to a broad pattern kill
+    (which the seventh round explicitly forbade).
+  - **Problem 2 (uniform ownership verification)**: the
+    seventh-round post-check 2 used `pgrep -P "$PID"` to find
+    residual direct children and killed every PID it returned —
+    without validating that those PIDs were in `owned_pids`. If
+    an unrelated process happened to be reparented to `$PID`
+    between reap and post-check, we would kill it by PID. The
+    ownership verification was inconsistent across cleanup
+    paths (pre-check used the whitelist; post-checks did not
+    uniformly).
+  - **Fix (this revision)**: four new helper functions
+    (`collect_descendants_pids`, `pid_is_alive`,
+    `pid_still_in_subtree`, `pid_safe_kill`, plus
+    `pid_safe_kill_owned` for the Gap 2 case where the orphan
+    is under PID 1 rather than still under `$PID`'s subtree).
+    Scenario 5 now:
+    1. Builds `owned_pids` via `collect_descendants_pids` —
+       a BFS over `pgrep -P` that captures the FULL subtree
+       at observation time (any depth). Contract is:
+       "every PID this scenario demonstrably created at
+       observation time is in the whitelist."
+    2. Pre-check FAIL cleanup uses `pid_safe_kill` for each
+       descendant (deepest-first by numeric-PID descending
+       sort) then `pid_safe_kill "$PID" "$PID"` then `wait`.
+       No `pkill -KILL -P 1 sleep` of any kind.
+    3. Post-check 1 cleanup uses `pid_safe_kill "$PID" "$PID"`
+       instead of bare `kill -KILL` — re-verifies aliveness
+       AND that the PID is still in its own subtree before
+       sending SIGKILL (PID-reuse mitigation).
+    4. Post-check 2 cleanup classifies each residual PID
+       as provable (in `owned_pids`) or unprovable. Provable
+       ones are killed via `pid_safe_kill` (deepest-first).
+       Unprovable ones are reported as residual with their
+       PIDs and the cleanup does NOT claim success. This is
+       the SAME ownership rule used everywhere else.
+    5. Post-check 3 (Gap 2) cleanup uses
+       `pid_safe_kill_owned "$o" "$owned_pids"` for provable
+       orphans — the orphan is now under PID 1 (not under
+       `$PID`'s subtree), so the proof of ownership is
+       whitelist membership (we observed the PID at capture
+       time) paired with the same aliveness guard. Unprovable
+       orphans are still reported as residual and left
+       untouched (per the seventh-round contract).
+  - PID-reuse mitigation (Round-8 baseline, Round-9
+    enhanced, Round-10 honest disclosure): in scenario 5,
+    every kill goes through one of
+    `pid_safe_kill_with_identity` (Round-9 primitive;
+    REPLACES the eighth-round `pid_safe_kill` for scenario
+    5 paths) or `pid_safe_kill_orphan` (Round-9 primitive;
+    REPLACES the eighth-round `pid_safe_kill_owned` for the
+    Gap 2 orphan-under-PID-1 path). Each applies up to
+    four guards:
+    1. PID membership in `identities_tsv` (whitelist
+       captured at T0).
+    2. Aliveness (`kill -0`).
+    3. `ps -o lstart=` string equality between observation
+       and kill time.
+    4. For non-orphan path: PID still in root's subtree.
+       What the lstart check VERIFIED to catch: different-
+       second PID reuse (verified by
+       `verify_precheck_deep_tree.sh` step 10 with a
+       fabricated wrong-second lstart ⇒ refusal ⇒ target
+       alive).
+       What the lstart check does NOT catch (Round-10 audit,
+       RISK_REMAINS):
+    - Same-second PID reuse — `ps -o lstart=` is
+      second-precision on macOS bash 3.2; two processes
+      spawned within the same wall-clock second yield
+      identical lstart strings (verified by step 10b).
+    - Check-then-kill race — between `kill -0` succeeding
+      and `kill -KILL` delivery, a same-second stranger
+      could in principle be inserted into the slot; no
+      shell-accessible atomic operation closes this on
+      macOS bash 3.2.
       Harness policy in any ambiguous case: refuse to kill
       and report the PID as residual, not risk killing an
       unidentifiable stranger.
-    - Assertion count: **35** (unchanged from seventh round — no
-      assertion was removed or relaxed).
-    - New verification: `/tmp/verify_deep_tree_fix.sh` exercises
-      a 3-level fixture `bash → bash → sleep`, verifies that
-      `collect_descendants_pids` captures all descendants,
-      exercises the deepest-first PID-scoped cleanup, and
-      confirms no orphan sleep leaks under init while a
-      separately-planted unrelated init-sleep survives (see § 12).
-      The existing `verify_gap1_fix.sh`, `verify_gap2_fix.sh`,
-      and `verify_isolation_fix.sh` were updated to source the
-      same helpers from the harness so any future change to the
-      helpers is automatically exercised by the verifiers.
+  - Assertion count: **35** (unchanged from seventh round — no
+    assertion was removed or relaxed).
+  - New verification: `/tmp/verify_deep_tree_fix.sh` exercises
+    a 3-level fixture `bash → bash → sleep`, verifies that
+    `collect_descendants_pids` captures all descendants,
+    exercises the deepest-first PID-scoped cleanup, and
+    confirms no orphan sleep leaks under init while a
+    separately-planted unrelated init-sleep survives (see § 12).
+    The existing `verify_gap1_fix.sh`, `verify_gap2_fix.sh`,
+    and `verify_isolation_fix.sh` were updated to source the
+    same helpers from the harness so any future change to the
+    helpers is automatically exercised by the verifiers.
 - `experiments/phase21_experiment_a/tests/test_reap_pid_harness.sh` —
   **seventh-round fix**: ChatGPT's seventh-round review of the
   actual code at `8b1cbe4` identified that the sixth-round
@@ -174,33 +174,33 @@ Sizes & mtimes also re-verified post-run — see `T12` in § 7.
   whitelist at observation time (`$PID` + its direct children
   observed via `pgrep -P "$PID"`). Every kill below targets a
   PID from this whitelist — never init's children as a group.
-    - Pre-check FAIL cleanup (Gap 1 abort path): kill children
-      FIRST by PID (so they die before being reparented), then
-      kill `$PID`, then `wait`. No `pkill -P 1` of any kind.
-    - Post-condition 1 cleanup (PID still alive): `kill -KILL $PID`
-      only ($PID is in owned_pids — provably ours).
-    - Post-condition 2 cleanup (descendants remain): kill each
-      remaining child by PID (they were just observed as
-      children of $PID — provably our descendants).
-    - Post-condition 3 cleanup (Gap 2 detection): detect new
-      init-sleep PIDs via diff, then split into "provably ours"
-      (in owned_pids) vs "unprovable" (any other PID). Kill
-      ONLY the provable ones. Unprovable ones are left alone
-      and reported as residual — the requirement
-      "如果某种情况下无法安全清理，应明确报告失败及残留 PID，
-      不得宣称清理成功" is honored. The test contract TERM
-      → grace → KILL → rc=137 is unchanged. Gap 1 and Gap 2
-      detection are both preserved. Assertion count: **35**
-      (unchanged from sixth round — no assertion was removed
-      or relaxed). Gap 1's PID-scoped cleanup, Gap 2's PID-
-      scoped orphan cleanup, and the new isolation contract are
-      all independently verified by `verify_gap1_fix.sh`,
-      `verify_gap2_fix.sh`, and `verify_isolation_fix.sh`
-      (see § 12). The isolation verifier PLANTS an unrelated
-      sleep under PID 1 BEFORE running the reap harness, runs
-      the harness, and asserts (a) the harness still passes
-      35/35 and (b) the unrelated sleep is still alive after
-      the harness — proving the cleanup never reached it.
+  - Pre-check FAIL cleanup (Gap 1 abort path): kill children
+    FIRST by PID (so they die before being reparented), then
+    kill `$PID`, then `wait`. No `pkill -P 1` of any kind.
+  - Post-condition 1 cleanup (PID still alive): `kill -KILL $PID`
+    only ($PID is in owned_pids — provably ours).
+  - Post-condition 2 cleanup (descendants remain): kill each
+    remaining child by PID (they were just observed as
+    children of $PID — provably our descendants).
+  - Post-condition 3 cleanup (Gap 2 detection): detect new
+    init-sleep PIDs via diff, then split into "provably ours"
+    (in owned_pids) vs "unprovable" (any other PID). Kill
+    ONLY the provable ones. Unprovable ones are left alone
+    and reported as residual — the requirement
+    "如果某种情况下无法安全清理，应明确报告失败及残留 PID，
+    不得宣称清理成功" is honored. The test contract TERM
+    → grace → KILL → rc=137 is unchanged. Gap 1 and Gap 2
+    detection are both preserved. Assertion count: **35**
+    (unchanged from sixth round — no assertion was removed
+    or relaxed). Gap 1's PID-scoped cleanup, Gap 2's PID-
+    scoped orphan cleanup, and the new isolation contract are
+    all independently verified by `verify_gap1_fix.sh`,
+    `verify_gap2_fix.sh`, and `verify_isolation_fix.sh`
+    (see § 12). The isolation verifier PLANTS an unrelated
+    sleep under PID 1 BEFORE running the reap harness, runs
+    the harness, and asserts (a) the harness still passes
+    35/35 and (b) the unrelated sleep is still alive after
+    the harness — proving the cleanup never reached it.
 - `experiments/phase21_experiment_a/tests/test_reap_pid_harness.sh` —
   **sixth-round fix** (kept): ChatGPT reviewed the actual code at
   `cfb2f28` and identified two residual gaps in the Scenario 5
@@ -268,7 +268,7 @@ Sizes & mtimes also re-verified post-run — see `T12` in § 7.
 ### Modified (first revision, retained)
 
 - `experiments/phase21_experiment_a/Cargo.toml` — added `[[bin]]
-  host_ignore_term` in first revision.
+host_ignore_term` in first revision.
 - `experiments/phase21_experiment_a/scripts/run_unicast_test.sh` —
   first revision: fixed `$?` capture in `cleanup()`, added
   `CHILDREN_STARTED` guard.
@@ -293,16 +293,16 @@ matches. mtimes on originals remain at `Oct 11 08:54` (pre-experiment).
 
 ## 4. Phase A1 — Minimal Offline Build
 
-| Field | Value |
-|---|---|
-| Command | `cargo build --offline --manifest-path experiments/phase21_experiment_a/Cargo.toml` |
-| Exit code | 0 |
-| Build time | 0.43s |
-| Output | `Compiling kindora-phase21-experiment-a v0.0.1` → `Finished dev [unoptimized + debuginfo]` |
-| Cache check before | 11 crates (same as workspace pre-baseline) |
-| Cache check after | 11 crates — unchanged |
-| Resulting binary | `target/debug/kindora-phase21-experiment-a` (Mach-O arm64, 399 904 bytes) |
-| Network activity | None — `--offline` used; stderr has no `network`/`fetch`/`download` markers |
+| Field              | Value                                                                                      |
+| ------------------ | ------------------------------------------------------------------------------------------ |
+| Command            | `cargo build --offline --manifest-path experiments/phase21_experiment_a/Cargo.toml`        |
+| Exit code          | 0                                                                                          |
+| Build time         | 0.43s                                                                                      |
+| Output             | `Compiling kindora-phase21-experiment-a v0.0.1` → `Finished dev [unoptimized + debuginfo]` |
+| Cache check before | 11 crates (same as workspace pre-baseline)                                                 |
+| Cache check after  | 11 crates — unchanged                                                                      |
+| Resulting binary   | `target/debug/kindora-phase21-experiment-a` (Mach-O arm64, 399 904 bytes)                  |
+| Network activity   | None — `--offline` used; stderr has no `network`/`fetch`/`download` markers                |
 
 **Status: PASS**
 
@@ -314,14 +314,14 @@ removed because A2 introduced the real bins.)
 
 ### A2 Build
 
-| Field | Value |
-|---|---|
-| Command | `cargo build --offline --manifest-path experiments/phase21_experiment_a/Cargo.toml` |
-| Exit code | 0 |
-| Build time | 0.47s (initial) + 0.21s (post-fix) + 0.48s (fixtures) |
-| Binaries | `lan_cross_process_host` (580 248 bytes), `lan_cross_process_joiner` (577 016 bytes) |
-| Fixtures | `host_silent` (467 728), `joiner_silent` (467 888), `host_bad_protocol` (469 440), `host_sleep_forever` (463 216) |
-| Cache check | 11 crates before & after — no fetch |
+| Field       | Value                                                                                                             |
+| ----------- | ----------------------------------------------------------------------------------------------------------------- |
+| Command     | `cargo build --offline --manifest-path experiments/phase21_experiment_a/Cargo.toml`                               |
+| Exit code   | 0                                                                                                                 |
+| Build time  | 0.47s (initial) + 0.21s (post-fix) + 0.48s (fixtures)                                                             |
+| Binaries    | `lan_cross_process_host` (580 248 bytes), `lan_cross_process_joiner` (577 016 bytes)                              |
+| Fixtures    | `host_silent` (467 728), `joiner_silent` (467 888), `host_bad_protocol` (469 440), `host_sleep_forever` (463 216) |
+| Cache check | 11 crates before & after — no fetch                                                                               |
 
 ### Source copy integrity
 
@@ -348,6 +348,7 @@ While writing the parser, two issues surfaced and were fixed inside the
 ### Parser design (key=value, NOT JSON)
 
 Wire format:
+
 ```
 kind=<kind>
 agent_id=<uuid-v4>
@@ -411,7 +412,7 @@ wins. The complete rule list lives at
 
 ### `$?` capture bug fix (first revision, retained)
 
-The original `cleanup()` set `TRAP_REENTERED=1` *before* capturing
+The original `cleanup()` set `TRAP_REENTERED=1` _before_ capturing
 `trap_rc=$?`. Because the assignment's exit status is 0, `trap_rc` was
 always 0 — silently demoting real failure codes (20/30/child-non-zero)
 to host/joiner-fail codes (10/11) or to 0 in some configurations.
@@ -799,11 +800,12 @@ PASS=20 FAIL=0
 ```
 
 Each `iter=N` line records three things independently:
-  1. The script's process exit code.
-  2. Whether the most recent `/tmp/kindora-expA-host.*.log` contains
-     an exact `OK` line.
-  3. Whether the most recent `/tmp/kindora-expA-joiner.*.log` contains
-     an exact `OK` line.
+
+1. The script's process exit code.
+2. Whether the most recent `/tmp/kindora-expA-host.*.log` contains
+   an exact `OK` line.
+3. Whether the most recent `/tmp/kindora-expA-joiner.*.log` contains
+   an exact `OK` line.
 
 All three were verified on every iteration. The driver also captures
 the tail of both logs into `/tmp/stress20_v2_results.txt` on any
@@ -811,7 +813,7 @@ non-zero exit; no such capture was triggered.
 
 **Important honesty note (per third-round reviewer rule):**
 "20/20 success does not prove zero race exists." The race-fix
-removes the *trigger* (concurrent spawn before host is listening),
+removes the _trigger_ (concurrent spawn before host is listening),
 but a residual host-side race (e.g. an OS-level UDP queue full on the
 host side) is not empirically ruled out by this run. The T-stress
 status is therefore recorded as **PASS** (race trigger removed, 20/20
@@ -888,17 +890,17 @@ exercises reap_pid's first-wait contract via the actual code path
 (no `wait` is called before `reap_pid`), but does not assert on
 platform-specific `jobs` behaviour that bash 3.2 makes unobservable.
 
-| Scenario | What it proves (this revision) | Assertion count |
-|---|---|---|
-| 1 / host   | REAPED=1 short-circuit preserves sentinel HOST_REAP_RC=99; reap_pid never reaches `wait` | 2 |
-| 1b/joiner  | Same short-circuit guarantee on JOINER_REAP_RC=77 | 2 |
-| 2          | reap_pid completes wait on a zombie child → rc=0, REAPED=1 (no pre-`wait`); jobs snapshot recorded | 2 |
-| 3          | First reap → rc=0, REAPED=1; sentinel rc=55 survives second reap (no pre-`wait`) | 4 |
-| 4          | Active child TERM'd → rc=143, child reaped (ps no longer sees it) | 3 |
-| 5          | TERM-ignored → KILL → rc=137 (joiner-side variables); fixture uses `exec` so process tree is a single node; pre-reap asserts PID has no children (proves exec worked); post-reap asserts PID is dead AND has no children AND PID 1 (init) has no new sleep children adopted (proves no orphan leak — including the reparented-to-init case that `pgrep -P` cannot see) | 6 |
-| 6          | Empty PID leaves HOST_REAP_RC=88, HOST_REAPED=1 untouched | 2 |
-| 6b         | Empty PID leaves JOINER_REAP_RC='' , JOINER_REAPED=0 untouched | 2 |
-| 7          | Host-side and joiner-side variables are independent in both directions; no pre-`wait` (jobs snapshots recorded) | 12 |
+| Scenario  | What it proves (this revision)                                                                                                                                                                                                                                                                                                                                         | Assertion count |
+| --------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------- |
+| 1 / host  | REAPED=1 short-circuit preserves sentinel HOST_REAP_RC=99; reap_pid never reaches `wait`                                                                                                                                                                                                                                                                               | 2               |
+| 1b/joiner | Same short-circuit guarantee on JOINER_REAP_RC=77                                                                                                                                                                                                                                                                                                                      | 2               |
+| 2         | reap_pid completes wait on a zombie child → rc=0, REAPED=1 (no pre-`wait`); jobs snapshot recorded                                                                                                                                                                                                                                                                     | 2               |
+| 3         | First reap → rc=0, REAPED=1; sentinel rc=55 survives second reap (no pre-`wait`)                                                                                                                                                                                                                                                                                       | 4               |
+| 4         | Active child TERM'd → rc=143, child reaped (ps no longer sees it)                                                                                                                                                                                                                                                                                                      | 3               |
+| 5         | TERM-ignored → KILL → rc=137 (joiner-side variables); fixture uses `exec` so process tree is a single node; pre-reap asserts PID has no children (proves exec worked); post-reap asserts PID is dead AND has no children AND PID 1 (init) has no new sleep children adopted (proves no orphan leak — including the reparented-to-init case that `pgrep -P` cannot see) | 6               |
+| 6         | Empty PID leaves HOST_REAP_RC=88, HOST_REAPED=1 untouched                                                                                                                                                                                                                                                                                                              | 2               |
+| 6b        | Empty PID leaves JOINER_REAP_RC='' , JOINER_REAPED=0 untouched                                                                                                                                                                                                                                                                                                         | 2               |
+| 7         | Host-side and joiner-side variables are independent in both directions; no pre-`wait` (jobs snapshots recorded)                                                                                                                                                                                                                                                        | 12              |
 
 Total: 35 assertions.
 
@@ -984,13 +986,13 @@ $ ps -A -o pid,ppid,comm | awk '$2 == 33429 || ($2 == 1 && $3 == "sleep")'
 The fixture is now `bash -c "trap '' TERM; exec sleep 30"`. The
 `exec` replaces the bash process image with `sleep` itself, so:
 
-  - The PID returned by `$!` IS the sleep process (single-node tree).
-  - `trap '' TERM` is installed before `exec`, so the new sleep
-    process inherits the SIGTERM-ignore disposition (signal
-    dispositions are preserved across `execve`). The TERM → grace
-    → KILL escalation contract is unchanged.
-  - reap_pid's KILL now removes the only node in the tree; nothing
-    is reparented to init.
+- The PID returned by `$!` IS the sleep process (single-node tree).
+- `trap '' TERM` is installed before `exec`, so the new sleep
+  process inherits the SIGTERM-ignore disposition (signal
+  dispositions are preserved across `execve`). The TERM → grace
+  → KILL escalation contract is unchanged.
+- reap_pid's KILL now removes the only node in the tree; nothing
+  is reparented to init.
 
 Verification that the new fixture has no orphan leak:
 
@@ -1018,17 +1020,18 @@ form.
 
 **Sixth-round fix (two residual gaps in the Scenario 5 regression
 guard, flagged by ChatGPT in the cfb2f28 review)**: the fifth-round
-regression guard above proved that the *currently-installed* fixture
+regression guard above proved that the _currently-installed_ fixture
 has no orphan leak. But it left two structural gaps that would
 re-introduce a leak the moment the fixture regressed, silently:
 
 1. **Gap 1 — pre-check failure did not abort.** When
    `scenario5.pre_no_pid_children` failed, the harness logged `fail`
-   and *kept going* into `reap_pid`. If the fixture were ever
+   and _kept going_ into `reap_pid`. If the fixture were ever
    reverted to `bash -c "trap '' TERM; sleep 30"` (no `exec`), then
    `reap_pid` would KILL the outer bash, the inner sleep would be
    reparented to PID 1, and the harness would manufacture the exact
    orphan the test exists to prevent. Verified locally:
+
    ```text
    $ bash -c "trap '' TERM; sleep 30" &
    OUTER=35745
@@ -1038,6 +1041,7 @@ re-introduce a leak the moment the fixture regressed, silently:
    $ ps -A -o pid,ppid,comm | awk '$2 == 1 && $3 == "sleep"'
    35747   1 sleep                    # orphan, leaked under init
    ```
+
    The new Scenario 5 body is wrapped in a `run_scenario_5()` shell
    function. On pre-check failure the function runs the same
    safe-cleanup sequence the orphan-manufacturing case above
@@ -1048,6 +1052,7 @@ re-introduce a leak the moment the fixture regressed, silently:
    have been meaningless on a half-cleaned fixture). Subsequent
    scenarios still run because `return` (not `exit`) is used.
    Verified by `verify_gap1_fix.sh` (see § 12):
+
    ```text
    $ bash /tmp/verify_gap1_fix.sh
    Repro fixture: PID=37149 has children=[37151] (broken as intended)
@@ -1058,7 +1063,7 @@ re-introduce a leak the moment the fixture regressed, silently:
 
 2. **Gap 2 — post-check missed PID-1 reparenting.** The
    `scenario5.post_no_pid_children` assertion used `pgrep -P "$PID"`,
-   which only enumerates *direct children* of `$PID`. An orphan
+   which only enumerates _direct children_ of `$PID`. An orphan
    reparented to PID 1 is no longer a child of `$PID` and would
    never appear in the check. Verified locally:
    ```text
@@ -1115,29 +1120,29 @@ the test did not spawn.
 
 Specifically:
 
-  - **Pre-check FAIL cleanup (Gap 1 abort path):** iterate
-    `fixture_children`, `kill -KILL "$c"` for each (children die
-    before being reparented). Then `kill -KILL "$PID"`, then
-    `wait "$PID"`. No `pkill -P 1` of any kind. The original
-    `pkill -KILL -P 1 sleep` line was deleted.
-  - **Post-condition 1 cleanup (PID still alive):** just
-    `kill -KILL "$PID"` (it's in owned_pids — provably ours).
-    The original `pkill -KILL -P 1 sleep` line was deleted.
-  - **Post-condition 2 cleanup (descendants of $PID left):**
-    iterate `remaining_children` and `kill -KILL "$c"` for each
-    (they were observed as children of $PID — provably our
-    descendants, by PID). The original `pkill -KILL -P 1 sleep`
-    line was deleted.
-  - **Post-condition 3 cleanup (Gap 2 detection):** detect new
-    init-sleep PIDs via diff, then split each into "provably
-    ours" (in `owned_pids` whitelist) vs "unprovable" (any
-    other PID). Kill ONLY the provable ones, one PID at a time.
-    Any unprovable ones are left alone — they may belong to an
-    unrelated process that we cannot prove is ours. The
-    requirement "如果某种情况下无法安全清理，应明确报告失败及
-    残留 PID，不得宣称清理成功" is honored: the failure message
-    includes the residual PID(s) and explicitly states "leaving
-    residual, NOT claiming cleanup success".
+- **Pre-check FAIL cleanup (Gap 1 abort path):** iterate
+  `fixture_children`, `kill -KILL "$c"` for each (children die
+  before being reparented). Then `kill -KILL "$PID"`, then
+  `wait "$PID"`. No `pkill -P 1` of any kind. The original
+  `pkill -KILL -P 1 sleep` line was deleted.
+- **Post-condition 1 cleanup (PID still alive):** just
+  `kill -KILL "$PID"` (it's in owned_pids — provably ours).
+  The original `pkill -KILL -P 1 sleep` line was deleted.
+- **Post-condition 2 cleanup (descendants of $PID left):**
+  iterate `remaining_children` and `kill -KILL "$c"` for each
+  (they were observed as children of $PID — provably our
+  descendants, by PID). The original `pkill -KILL -P 1 sleep`
+  line was deleted.
+- **Post-condition 3 cleanup (Gap 2 detection):** detect new
+  init-sleep PIDs via diff, then split each into "provably
+  ours" (in `owned_pids` whitelist) vs "unprovable" (any
+  other PID). Kill ONLY the provable ones, one PID at a time.
+  Any unprovable ones are left alone — they may belong to an
+  unrelated process that we cannot prove is ours. The
+  requirement "如果某种情况下无法安全清理，应明确报告失败及
+  残留 PID，不得宣称清理成功" is honored: the failure message
+  includes the residual PID(s) and explicitly states "leaving
+  residual, NOT claiming cleanup success".
 
 Verified by three independent scripts (see § 12):
 
@@ -1145,6 +1150,7 @@ Verified by three independent scripts (see § 12):
    runs the scenario 5 safe-cleanup sequence against a broken
    (non-exec) fixture. Asserts (a) no init-orphan was leaked,
    (b) the unrelated sleep is still alive after cleanup:
+
    ```text
    $ bash /tmp/verify_gap1_fix.sh
    Planted unrelated init-sleep PID=44744 (PPID=1)
@@ -1161,6 +1167,7 @@ Verified by three independent scripts (see § 12):
    reparented to init), then runs the same PID-scoped cleanup.
    Asserts (a) the orphan is detected, (b) the provable orphan
    is killed, (c) the unrelated sleep is still alive:
+
    ```text
    $ bash /tmp/verify_gap2_fix.sh
    Planted unrelated init-sleep PID=44775 (PPID=1)
@@ -1227,46 +1234,46 @@ of `f1ca266` identified two further isolation/correctness gaps:
 **Fix (this revision)** introduces the recursive descent
 primitives and rewires every cleanup path through them:
 
-  - **New helpers** (added at the top of `test_reap_pid_harness.sh`
-    after the `cleanup_children` trap):
-      - `collect_descendants_pids <root_pid>` — BFS over
-        `pgrep -P`, returns space-separated ALL descendants at
-        any depth (root_pid itself NOT in output).
-      - `pid_is_alive <pid>` — `kill -0` probe.
-      - `pid_still_in_subtree <pid> <root_pid>` — walks the
-        parent chain via `ps -A -o pid,ppid` to verify the
-        PID's PPID chain still leads to `root_pid`. Returns 1
-        for PID 1, init's PID, or any PID that's not in the
-        subtree (cycle-safe via a `seen` set).
-      - `pid_safe_kill <pid> <root_pid>` — single sanctioned
-        primitive: alive + still-in-subtree guards, then
-        `kill -KILL`. Used wherever the PID SHOULD still be
-        in our subtree at kill time.
-      - `pid_safe_kill_owned <pid> <whitelist_string>` — variant
-        for the Gap 2 case: orphan is now under PID 1, NOT
-        under our fixture's subtree. Ownership proof is
-        whitelist membership (we observed the PID at capture
-        time) plus the same aliveness guard. Same uniform
-        rule applied via a different proof.
-  - **Pre-check FAIL cleanup**: collect via `collect_descendants_pids`,
-    then iterate `owned_pids` deepest-first (PID-descending sort)
-    through `pid_safe_kill`, then `pid_safe_kill "$PID" "$PID"`,
-    then `wait`. No `pkill -KILL -P 1 sleep` of any kind.
-  - **Post-condition 1 cleanup**: `pid_safe_kill "$PID" "$PID"`
-    instead of bare `kill -KILL` — re-verifies aliveness AND
-    subtree membership.
-  - **Post-condition 2 cleanup**: classify each residual PID as
-    provable (in `owned_pids`) or unprovable. Provable ones killed
-    deepest-first via `pid_safe_kill`. Unprovable ones reported
-    as residual with their PIDs, and cleanup does NOT claim
-    success. This is the same whitelist-based ownership proof
-    the pre-check uses.
-  - **Post-condition 3 (Gap 2) cleanup**: classify each new
-    init-sleep PID as provable (in `owned_pids` at observation
-    time) or unprovable. Provable ones killed via
-    `pid_safe_kill_owned` (whitelist + alive, not subtree,
-    because they're under init now). Unprovable ones reported
-    as residual with their PIDs, NOT killed.
+- **New helpers** (added at the top of `test_reap_pid_harness.sh`
+  after the `cleanup_children` trap):
+  - `collect_descendants_pids <root_pid>` — BFS over
+    `pgrep -P`, returns space-separated ALL descendants at
+    any depth (root_pid itself NOT in output).
+  - `pid_is_alive <pid>` — `kill -0` probe.
+  - `pid_still_in_subtree <pid> <root_pid>` — walks the
+    parent chain via `ps -A -o pid,ppid` to verify the
+    PID's PPID chain still leads to `root_pid`. Returns 1
+    for PID 1, init's PID, or any PID that's not in the
+    subtree (cycle-safe via a `seen` set).
+  - `pid_safe_kill <pid> <root_pid>` — single sanctioned
+    primitive: alive + still-in-subtree guards, then
+    `kill -KILL`. Used wherever the PID SHOULD still be
+    in our subtree at kill time.
+  - `pid_safe_kill_owned <pid> <whitelist_string>` — variant
+    for the Gap 2 case: orphan is now under PID 1, NOT
+    under our fixture's subtree. Ownership proof is
+    whitelist membership (we observed the PID at capture
+    time) plus the same aliveness guard. Same uniform
+    rule applied via a different proof.
+- **Pre-check FAIL cleanup**: collect via `collect_descendants_pids`,
+  then iterate `owned_pids` deepest-first (PID-descending sort)
+  through `pid_safe_kill`, then `pid_safe_kill "$PID" "$PID"`,
+  then `wait`. No `pkill -KILL -P 1 sleep` of any kind.
+- **Post-condition 1 cleanup**: `pid_safe_kill "$PID" "$PID"`
+  instead of bare `kill -KILL` — re-verifies aliveness AND
+  subtree membership.
+- **Post-condition 2 cleanup**: classify each residual PID as
+  provable (in `owned_pids`) or unprovable. Provable ones killed
+  deepest-first via `pid_safe_kill`. Unprovable ones reported
+  as residual with their PIDs, and cleanup does NOT claim
+  success. This is the same whitelist-based ownership proof
+  the pre-check uses.
+- **Post-condition 3 (Gap 2) cleanup**: classify each new
+  init-sleep PID as provable (in `owned_pids` at observation
+  time) or unprovable. Provable ones killed via
+  `pid_safe_kill_owned` (whitelist + alive, not subtree,
+  because they're under init now). Unprovable ones reported
+  as residual with their PIDs, NOT killed.
 
 PID-reuse mitigation (eighth-round): every kill goes
 through one of `pid_safe_kill` or `pid_safe_kill_owned`, both
@@ -1326,8 +1333,8 @@ every cleanup path)** — ChatGPT's ninth-round review of
    PID numbers are assigned by the kernel in arbitrary order
    (a child can have a smaller PID than its parent — PID ≠
    depth). On a fixture `outer(PID=900) → middle(PID=800) →
-   sleep(PID=950)`, sorting by PID number would yield `sleep →
-   outer → middle`, which is **wrong**: killing outer before
+sleep(PID=950)`, sorting by PID number would yield `sleep →
+outer → middle`, which is **wrong**: killing outer before
    middle would reparent the inner sleep to PID 1 before we
    had a chance to kill it. The cleanup happened to pass on
    the small fixtures used earlier because their PID numbers
@@ -1350,144 +1357,144 @@ every cleanup path)** — ChatGPT's ninth-round review of
 **Fix (this revision)** introduces depth-correct ordering and
 a process-identity guard:
 
-  - **New helpers** (added after the eighth-round helpers in
-    `test_reap_pid_harness.sh`):
-    - `pid_get_lstart <pid>` — reads `ps -o lstart=` and
-      strips surrounding whitespace. Returns empty if the PID
-      is gone or `ps` errors. `lstart` is the kernel-reported
-      process start time as an absolute string formatted via
-      strftime `%c` (`Sun Oct 11 16:01:25 2026`). **Precision
-      is one second on macOS** — `ps` does not expose any
-      sub-second field; two processes spawned within the same
-      wall-clock second yield identical lstart strings
-      (empirically verified in step 10b of
-      `verify_precheck_deep_tree.sh`).
-    - `identity_lookup_lstart <tsv> <pid>` — finds the
-      lstart for `pid` in a `<pid>\t<lstart>` TSV produced
-      by `record_identities`. Returns empty if not present.
-    - `collect_descendants_with_depth <root_pid>` — BFS over
-      `pgrep -P`, but outputs lines of `<depth>\t<pid>` so
-      the **real tree depth** is part of the output, not a
-      property of the PID number. `root_pid` itself NOT in
-      output. The depth field is computed from BFS level,
-      not inferred from PID.
-    - `record_identities <root_pid>` — runs `pid_get_lstart`
-      for root and every descendant, outputs
-      `<pid>\t<lstart>` lines.
-    - `pid_safe_kill_with_identity <pid> <root_pid>
-      <identities_tsv> [depth] [KILL_LOG_FILE]` — the
-      fourth-round's `pid_safe_kill` plus a fourth guard:
-      (1) `pid` is in `identities_tsv` (we observed it at
-      capture time), (2) `kill -0` succeeds (still alive),
-      (3) current `ps -o lstart=` for `pid` matches the
-      recorded lstart exactly (catches **different-second**
-      PID reuse — see Round-10 disclosure below for what
-      this does NOT catch), (4) if `root_pid` is alive,
-      `pid_still_in_subtree` confirms `pid` is still under
-      `root_pid`. Any guard failing → refuse to kill,
-      log `reason=...` line to `KILL_LOG_FILE` if set,
-      return non-zero. **Never kills unless all four guards
-      pass.**
-    - `pid_safe_kill_orphan <pid> <identities_tsv>` —
-      variant for orphans under PID 1 (subtree check
-      inapplicable). Same guards (1)–(3); guard (4) is
-      skipped because the orphan's parent is now PID 1, not
-      our root. The lstart check is the ONLY ownership proof
-      available for orphans.
+- **New helpers** (added after the eighth-round helpers in
+  `test_reap_pid_harness.sh`):
+  - `pid_get_lstart <pid>` — reads `ps -o lstart=` and
+    strips surrounding whitespace. Returns empty if the PID
+    is gone or `ps` errors. `lstart` is the kernel-reported
+    process start time as an absolute string formatted via
+    strftime `%c` (`Sun Oct 11 16:01:25 2026`). **Precision
+    is one second on macOS** — `ps` does not expose any
+    sub-second field; two processes spawned within the same
+    wall-clock second yield identical lstart strings
+    (empirically verified in step 10b of
+    `verify_precheck_deep_tree.sh`).
+  - `identity_lookup_lstart <tsv> <pid>` — finds the
+    lstart for `pid` in a `<pid>\t<lstart>` TSV produced
+    by `record_identities`. Returns empty if not present.
+  - `collect_descendants_with_depth <root_pid>` — BFS over
+    `pgrep -P`, but outputs lines of `<depth>\t<pid>` so
+    the **real tree depth** is part of the output, not a
+    property of the PID number. `root_pid` itself NOT in
+    output. The depth field is computed from BFS level,
+    not inferred from PID.
+  - `record_identities <root_pid>` — runs `pid_get_lstart`
+    for root and every descendant, outputs
+    `<pid>\t<lstart>` lines.
+  - `pid_safe_kill_with_identity <pid> <root_pid>
+<identities_tsv> [depth] [KILL_LOG_FILE]` — the
+    fourth-round's `pid_safe_kill` plus a fourth guard:
+    (1) `pid` is in `identities_tsv` (we observed it at
+    capture time), (2) `kill -0` succeeds (still alive),
+    (3) current `ps -o lstart=` for `pid` matches the
+    recorded lstart exactly (catches **different-second**
+    PID reuse — see Round-10 disclosure below for what
+    this does NOT catch), (4) if `root_pid` is alive,
+    `pid_still_in_subtree` confirms `pid` is still under
+    `root_pid`. Any guard failing → refuse to kill,
+    log `reason=...` line to `KILL_LOG_FILE` if set,
+    return non-zero. **Never kills unless all four guards
+    pass.**
+  - `pid_safe_kill_orphan <pid> <identities_tsv>` —
+    variant for orphans under PID 1 (subtree check
+    inapplicable). Same guards (1)–(3); guard (4) is
+    skipped because the orphan's parent is now PID 1, not
+    our root. The lstart check is the ONLY ownership proof
+    available for orphans.
 
-  - **Why PID number is NOT a depth proxy**: PIDs are
-    allocated monotonically (mostly) but a parent process
-    and its child have no constraint relating PID magnitude
-    to tree depth. A `bash -c "..."` chain can produce a
-    child whose PID is smaller than its parent. Killing in
-    PID-descending order would kill a leaf while its parents
-    are still alive, then kill a parent while its (now
-    reparented to init) grandchildren are an init-orphan.
-    The correct ordering is **tree depth descending**, which
-    is what `collect_descendants_with_depth` produces.
-  - **Re-verification on parent-child change**: each kill
-    re-runs the four guards; if `pid_still_in_subtree`
-    returns false (an unrelated process got reparented to
-    our root between capture and kill), the kill is refused
-    even if the target is alive and in `identities_tsv`.
-  - **Pre-check FAIL cleanup**: now driven by
-    `collect_descendants_with_depth`, sorted by
-    `sort -k1,1nr -k2,2n` (depth descending, PID ascending
-    within the same depth). Each iteration goes through
-    `pid_safe_kill_with_identity` with the observed
-    `identities_tsv`. The root is killed LAST (depth 0
-    handled after the loop). `wait` follows.
-  - **Post-check 1**: `pid_safe_kill_with_identity "$PID"
-    "$PID" "$IDENTITIES" 0`.
-  - **Post-check 2** (depth-ordered residual cleanup):
-    `collect_descendants_with_depth "$PID"` → depth-sorted
-    → each PID through `pid_safe_kill_with_identity`.
-    Unprovable residuals are still reported, not killed.
-  - **Post-check 3 (Gap 2)** (orphan cleanup): each
-    provable orphan PID through `pid_safe_kill_orphan` —
-    uses identities_tsv + alive + lstart match. Subtree
-    check is correctly omitted because the orphan's parent
-    is PID 1, not our root.
+- **Why PID number is NOT a depth proxy**: PIDs are
+  allocated monotonically (mostly) but a parent process
+  and its child have no constraint relating PID magnitude
+  to tree depth. A `bash -c "..."` chain can produce a
+  child whose PID is smaller than its parent. Killing in
+  PID-descending order would kill a leaf while its parents
+  are still alive, then kill a parent while its (now
+  reparented to init) grandchildren are an init-orphan.
+  The correct ordering is **tree depth descending**, which
+  is what `collect_descendants_with_depth` produces.
+- **Re-verification on parent-child change**: each kill
+  re-runs the four guards; if `pid_still_in_subtree`
+  returns false (an unrelated process got reparented to
+  our root between capture and kill), the kill is refused
+  even if the target is alive and in `identities_tsv`.
+- **Pre-check FAIL cleanup**: now driven by
+  `collect_descendants_with_depth`, sorted by
+  `sort -k1,1nr -k2,2n` (depth descending, PID ascending
+  within the same depth). Each iteration goes through
+  `pid_safe_kill_with_identity` with the observed
+  `identities_tsv`. The root is killed LAST (depth 0
+  handled after the loop). `wait` follows.
+- **Post-check 1**: `pid_safe_kill_with_identity "$PID"
+"$PID" "$IDENTITIES" 0`.
+- **Post-check 2** (depth-ordered residual cleanup):
+  `collect_descendants_with_depth "$PID"` → depth-sorted
+  → each PID through `pid_safe_kill_with_identity`.
+  Unprovable residuals are still reported, not killed.
+- **Post-check 3 (Gap 2)** (orphan cleanup): each
+  provable orphan PID through `pid_safe_kill_orphan` —
+  uses identities_tsv + alive + lstart match. Subtree
+  check is correctly omitted because the orphan's parent
+  is PID 1, not our root.
 
 **Honest disclosure of the remaining race window**:
 
 The PID-reuse guard is a **best-effort** identity check, not a
 proof. It is composed of:
 
-  1. PID membership in `identities_tsv` (whitelist).
-  2. Aliveness (`kill -0`).
-  3. `ps -o lstart=` string equality between observation and
-     kill time.
+1. PID membership in `identities_tsv` (whitelist).
+2. Aliveness (`kill -0`).
+3. `ps -o lstart=` string equality between observation and
+   kill time.
 
 What this **IS** verified to do:
 
-  - Refuses to kill a target whose lstart differs from the
-    recorded one. Verified by `verify_precheck_deep_tree.sh`
-    step 10 (fabricated wrong lstart ⇒ refusal ⇒ target alive).
-  - Refuses to kill a target that is no longer in the root's
-    subtree (when root is still alive).
+- Refuses to kill a target whose lstart differs from the
+  recorded one. Verified by `verify_precheck_deep_tree.sh`
+  step 10 (fabricated wrong lstart ⇒ refusal ⇒ target alive).
+- Refuses to kill a target that is no longer in the root's
+  subtree (when root is still alive).
 
 What this **is NOT** verified to do, and what the harness
 therefore **cannot claim**:
 
-  - `lstart` is **second-precision** on macOS bash 3.2 — the
-    format is `Sun Oct 11 16:01:25 2026` via strftime `%c`,
-    and macOS `ps` does not expose any sub-second field for
-    process start time. Two processes spawned within the
-    same wall-clock second yield **identical** lstart strings
-    (empirically verified: `verify_precheck_deep_tree.sh`
-    step 10b). Therefore:
-      - **Same-second PID reuse is NOT distinguishable** by
-        the lstart check. The harness cannot prove a stranger
-        holding the slot from the same second as the original
-        would be rejected.
-      - Only **different-second** PID reuse is detectable.
-  - The check-then-kill race (between `kill -0` succeeding
-    and `kill -KILL` being delivered) is **not** closed. macOS
-    does not provide a shell-accessible process-creation lock
-    that could atomically verify identity and kill. A
-    same-second stranger could in principle be inserted into
-    the slot between the aliveness check and the kill
-    delivery; the harness cannot prove this cannot happen.
-  - `ps -o lstart=` **format drift** between observation and
-    kill is a theoretical concern. We have not observed it on
-    macOS bash 3.2, but cannot prove the kernel will never
-    produce a different string for the same logical time.
-  - **No higher-precision identity mechanism was found on
-    macOS bash 3.2** that the harness could use without
-    introducing external dependencies. Investigated and
-    rejected (Round-10 audit):
-      - `/proc/<pid>/stat` — does not exist.
-      - `ps -o etimes` — keyword not found (only `etime`,
-        which is `MM:SS` second-precision).
-      - `sysctl kern.proc.<pid>.start` — no such OID.
-      - `lsof -p <pid>` — no process-creation timestamp field.
-      - All other `ps` keywords enumerated from `ps` error
-        message — none provides sub-second identity.
-  - For **orphans under PID 1** (Gap 2 path), the subtree
-    check is inapplicable, so the lstart check is the **only**
-    ownership proof available. The same-second race above is
-    directly applicable here.
+- `lstart` is **second-precision** on macOS bash 3.2 — the
+  format is `Sun Oct 11 16:01:25 2026` via strftime `%c`,
+  and macOS `ps` does not expose any sub-second field for
+  process start time. Two processes spawned within the
+  same wall-clock second yield **identical** lstart strings
+  (empirically verified: `verify_precheck_deep_tree.sh`
+  step 10b). Therefore:
+  - **Same-second PID reuse is NOT distinguishable** by
+    the lstart check. The harness cannot prove a stranger
+    holding the slot from the same second as the original
+    would be rejected.
+  - Only **different-second** PID reuse is detectable.
+- The check-then-kill race (between `kill -0` succeeding
+  and `kill -KILL` being delivered) is **not** closed. macOS
+  does not provide a shell-accessible process-creation lock
+  that could atomically verify identity and kill. A
+  same-second stranger could in principle be inserted into
+  the slot between the aliveness check and the kill
+  delivery; the harness cannot prove this cannot happen.
+- `ps -o lstart=` **format drift** between observation and
+  kill is a theoretical concern. We have not observed it on
+  macOS bash 3.2, but cannot prove the kernel will never
+  produce a different string for the same logical time.
+- **No higher-precision identity mechanism was found on
+  macOS bash 3.2** that the harness could use without
+  introducing external dependencies. Investigated and
+  rejected (Round-10 audit):
+  - `/proc/<pid>/stat` — does not exist.
+  - `ps -o etimes` — keyword not found (only `etime`,
+    which is `MM:SS` second-precision).
+  - `sysctl kern.proc.<pid>.start` — no such OID.
+  - `lsof -p <pid>` — no process-creation timestamp field.
+  - All other `ps` keywords enumerated from `ps` error
+    message — none provides sub-second identity.
+- For **orphans under PID 1** (Gap 2 path), the subtree
+  check is inapplicable, so the lstart check is the **only**
+  ownership proof available. The same-second race above is
+  directly applicable here.
 
 The harness's policy in the residual race is: **refuse to
 kill and report the PID as residual**, not to risk killing
@@ -1590,16 +1597,16 @@ race the lstart check cannot.
 
 **Environment**:
 
-  - macOS 15.8.1 (24G212) on Apple Silicon (arm64).
-  - Darwin kernel 24.6.0.
-  - Bash 3.2.57(1)-release (arm64-apple-darwin24).
-  - `ps` from macOS base (BSD-style), not procps/Linux `ps`.
+- macOS 15.8.1 (24G212) on Apple Silicon (arm64).
+- Darwin kernel 24.6.0.
+- Bash 3.2.57(1)-release (arm64-apple-darwin24).
+- `ps` from macOS base (BSD-style), not procps/Linux `ps`.
 
 **Question 1: what is the actual precision of `ps -o lstart=`?**
 
 Man page: `lstart` is "the exact time the command started,
 using the `%c' format described in strftime(3)". `strftime(3)`
-`%c` is the national representation (e.g. `Sun Oct 11
+`%c`is the national representation (e.g.`Sun Oct 11
 16:01:25 2026` on macOS en-US) — **no sub-second field**.
 
 Empirical verification (now in-tree via `test_lstart_precision.sh`;
@@ -1617,26 +1624,26 @@ Sun Oct 11 15:54:49 2026     (etime = 00:04)
 was added in Round-11 so the same-second collision property
 is reproducible from the repo (not from `/tmp`). It:
 
-  - Records the runtime environment (uname, bash, ps path).
-  - Calls `ps -o lstart=` three times on the same PID;
-    asserts the string is stable (Round-9 / Round-10 audit
-    stability property).
-  - Spawns 40 `sleep 8` background processes (safe pattern:
-    `&` + `disown`, no `( sleep N &)` subshell — bash 3.2
-    hangs that on macOS), reads each PID's lstart, and
-    counts how many distinct second-tokens appear.
-  - If fewer distinct seconds than PIDs are observed, the
-    same-second collision is empirically demonstrated
-    (`PASS`).
-  - If every spawn crossed a second boundary (no collision),
-    it explicitly reports `NOT_VERIFIED` rather than PASS —
-    the harness does NOT assume sub-second precision on
-    macOS bash 3.2 without observation.
-  - Cleanup only kills PIDs whose current `lstart` matches
-    the recorded spawn-time `lstart`. Any PID whose lstart
-    drifted is reported as `REPORTED_RESIDUAL` and left
-    alive — same identity policy as
-    `pid_safe_kill_with_identity`.
+- Records the runtime environment (uname, bash, ps path).
+- Calls `ps -o lstart=` three times on the same PID;
+  asserts the string is stable (Round-9 / Round-10 audit
+  stability property).
+- Spawns 40 `sleep 8` background processes (safe pattern:
+  `&` + `disown`, no `( sleep N &)` subshell — bash 3.2
+  hangs that on macOS), reads each PID's lstart, and
+  counts how many distinct second-tokens appear.
+- If fewer distinct seconds than PIDs are observed, the
+  same-second collision is empirically demonstrated
+  (`PASS`).
+- If every spawn crossed a second boundary (no collision),
+  it explicitly reports `NOT_VERIFIED` rather than PASS —
+  the harness does NOT assume sub-second precision on
+  macOS bash 3.2 without observation.
+- Cleanup only kills PIDs whose current `lstart` matches
+  the recorded spawn-time `lstart`. Any PID whose lstart
+  drifted is reported as `REPORTED_RESIDUAL` and left
+  alive — same identity policy as
+  `pid_safe_kill_with_identity`.
 
 ```text
 $ bash experiments/phase21_experiment_a/tests/test_lstart_precision.sh
@@ -1690,8 +1697,8 @@ PASS: lstart is second-precision on macOS (same-second collision demonstrated)
         by lstart; the harness documents this residual race
 ```
 
-**Therefore**: lstart catches *different-second* PID reuse,
-and **does NOT** catch *same-second* PID reuse. Round 9's
+**Therefore**: lstart catches _different-second_ PID reuse,
+and **does NOT** catch _same-second_ PID reuse. Round 9's
 report claimed the lstart check "detects PID reuse" without
 qualifying the second-precision limitation; Round 10 corrects
 this. The verification step 10 (fabricated wrong-second
@@ -1703,15 +1710,15 @@ macOS bash 3.2 provide sub-second process identity?**
 
 Investigated and rejected:
 
-| Candidate | Available? | Sub-second? |
-|---|---|---|
-| `/proc/<pid>/stat` (Linux) | NO — `/proc` does not exist on macOS | n/a |
-| `ps -o etimes` (Linux procps) | NO — `ps: etimes: keyword not found`; macOS `ps` only has `etime` (MM:SS) | NO |
-| `sysctl kern.proc.<pid>.start` | NO — `sysctl: couldn't find oid` | n/a |
-| `sysctl -a \| grep kern.proc` | Only `kern.procname` and `kern.proc_rsr_in_progress` (unrelated to process identity) | n/a |
-| `lsof -p <pid>` | YES, but exposes FD/comm/state — no creation timestamp | n/a |
-| Other `ps` keywords | Full enumeration from `ps` error message — none provides sub-second identity | NO |
-| `getpidinfo` / `sysctlbyname("kern.proc.<pid>")` from C | Available, but would require a binary outside the bash harness | YES, but **out of scope** for this round (introduces external dependency) |
+| Candidate                                               | Available?                                                                           | Sub-second?                                                               |
+| ------------------------------------------------------- | ------------------------------------------------------------------------------------ | ------------------------------------------------------------------------- |
+| `/proc/<pid>/stat` (Linux)                              | NO — `/proc` does not exist on macOS                                                 | n/a                                                                       |
+| `ps -o etimes` (Linux procps)                           | NO — `ps: etimes: keyword not found`; macOS `ps` only has `etime` (MM:SS)            | NO                                                                        |
+| `sysctl kern.proc.<pid>.start`                          | NO — `sysctl: couldn't find oid`                                                     | n/a                                                                       |
+| `sysctl -a \| grep kern.proc`                           | Only `kern.procname` and `kern.proc_rsr_in_progress` (unrelated to process identity) | n/a                                                                       |
+| `lsof -p <pid>`                                         | YES, but exposes FD/comm/state — no creation timestamp                               | n/a                                                                       |
+| Other `ps` keywords                                     | Full enumeration from `ps` error message — none provides sub-second identity         | NO                                                                        |
+| `getpidinfo` / `sysctlbyname("kern.proc.<pid>")` from C | Available, but would require a binary outside the bash harness                       | YES, but **out of scope** for this round (introduces external dependency) |
 
 No mechanism was found that the bash harness could call to
 produce a stable, sub-second, same-second-colliding-free
@@ -1747,7 +1754,7 @@ the test runs in this round. We cannot prove the kernel
 will never produce a different string for the same logical
 time, but we have not observed it. The harness treats
 format drift as a hypothetical concern, with a refusal-on-mismatch
-policy that biases toward *not* killing a real target (safe
+policy that biases toward _not_ killing a real target (safe
 failure mode).
 
 **Code change decision (Round-10 task spec, section 4)**:
@@ -1768,37 +1775,37 @@ criteria. Therefore per the explicit instruction "如果找不到
 满足条件的机制,本轮可以只修改报告和注释", this round modifies
 only the harness comments and the report:
 
-  - `test_reap_pid_harness.sh`: comments on `pid_get_lstart`,
-    `pid_safe_kill_with_identity`, `pid_safe_kill_orphan`
-    document the second-precision limit, the same-second
-    race, and the check-then-kill race.
-  - `REPORT.md`: this Round-10 audit section; corrections
-    to the Ninth-round "Honest disclosure" section;
-    correction to the Gap-8 table row wording.
-  - `verify_precheck_deep_tree.sh`: added step 10b that
-    empirically demonstrates the second-precision /
-    same-second-collision property.
+- `test_reap_pid_harness.sh`: comments on `pid_get_lstart`,
+  `pid_safe_kill_with_identity`, `pid_safe_kill_orphan`
+  document the second-precision limit, the same-second
+  race, and the check-then-kill race.
+- `REPORT.md`: this Round-10 audit section; corrections
+  to the Ninth-round "Honest disclosure" section;
+  correction to the Gap-8 table row wording.
+- `verify_precheck_deep_tree.sh`: added step 10b that
+  empirically demonstrates the second-precision /
+  same-second-collision property.
 
 **Verdict on PID-reuse guard** (corrected from Round 9):
 
-  - `PASS`: PID-reuse guard refuses to kill a target whose
-    lstart differs from the recorded one (different-second
-    case). Verified by step 10.
-  - `RISK_REMAINS`: same-second PID reuse is not
-    distinguishable by lstart. Documented, not eliminated.
-  - `RISK_REMAINS`: the check-then-kill race is not provably
-    closed. Documented, not eliminated.
-  - `RISK_REMAINS`: lstart format drift is a theoretical
-    concern. Not observed, not eliminated.
+- `PASS`: PID-reuse guard refuses to kill a target whose
+  lstart differs from the recorded one (different-second
+  case). Verified by step 10.
+- `RISK_REMAINS`: same-second PID reuse is not
+  distinguishable by lstart. Documented, not eliminated.
+- `RISK_REMAINS`: the check-then-kill race is not provably
+  closed. Documented, not eliminated.
+- `RISK_REMAINS`: lstart format drift is a theoretical
+  concern. Not observed, not eliminated.
 
 ## 7c. Regression sub-tests for the `$?`-capture fix (first revision, retained)
 
-| Name | Input | Expected | Actual | Verdict |
-|---|---|---|---|---|
-| regression-30  | `exit 30` (precond fail, no children) | 30 | **30** | PASS — was demoted to 0 under the old bug |
-| regression-20  | `exit 20` (build fail, no children) | 20 | **20** | PASS |
-| regression-0   | `exit 0`  (happy path, no children) | 0  | **0**  | PASS |
-| regression-child-fail | host_reap=7, joiner_reap=7, exit 0 | 10 (host fail) | **10** | PASS |
+| Name                  | Input                                 | Expected       | Actual | Verdict                                   |
+| --------------------- | ------------------------------------- | -------------- | ------ | ----------------------------------------- |
+| regression-30         | `exit 30` (precond fail, no children) | 30             | **30** | PASS — was demoted to 0 under the old bug |
+| regression-20         | `exit 20` (build fail, no children)   | 20             | **20** | PASS                                      |
+| regression-0          | `exit 0` (happy path, no children)    | 0              | **0**  | PASS                                      |
+| regression-child-fail | host_reap=7, joiner_reap=7, exit 0    | 10 (host fail) | **10** | PASS                                      |
 
 These regression tests are reproducible by re-running the harness
 defined in this section; they are deliberately minimal so they isolate
@@ -1820,17 +1827,17 @@ match the baseline in § 2. **No originals were touched.**
 
 ## 10. Known Issues & NOT_VERIFIED Items
 
-| Item | Reason | Workaround in this experiment |
-|---|---|---|
-| macOS bash 3.2 does not run INT trap on external `kill -INT` | Known bash 3.2 / macOS TTY driver quirk | SIGTERM path verified instead |
-| Foreground Ctrl-C behavior | Requires interactive terminal; not automatable | Out of scope for automated verification |
-| `--offline` does not by itself prove "no network" | Cargo could still touch the registry index | Cache diff before/after used as auxiliary evidence; cargo exited 0 with no `error:`; `--offline` flag used; stderr has no network markers |
-| `kill -0` on zombie PID | Cannot reliably distinguish alive vs zombie on macOS | `wait` return used as sole evidence of reclamation; `kill -0` only used for best-effort probe |
-| `jobs -l` only keeps the most recent `Done` background job on macOS bash 3.2 | Earlier-terminated background children are unobservable via `jobs -l` even when no `wait` has run | reap_pid harness records `jobs -l` as `[diag]` diagnostic output rather than hard assertion; the test still proves the contract via the code path (no pre-`wait`) |
-| bash 3.2 second `wait` returns 0 (not 127) for previously reaped child | Platform behaviour; means `reap_pid`'s return code alone cannot prove it was the first waiter | Test asserts on `rc_var` / `REAPED` side-effects, not on `wait`'s exit code |
-| KILL of an outer `bash -c "..." &` leaves the inner `sleep` orphaned (reparented to PID 1, init) | macOS does not propagate SIGKILL to forked-but-not-reaped children | Scenario 5 fixture now uses `bash -c "...; exec sleep 30"` so the process tree has one node; pre/post assertions verify no orphan is created. Sixth round added: (a) pre-check FAIL now aborts the scenario without calling `reap_pid`, and safe-cleans the spawned subtree so the harness cannot manufacture an orphan even if the fixture regresses; (b) post-check now diffs the init-sleep set before vs after `reap_pid` to catch reparented-to-init orphans that `pgrep -P` cannot see. Both gaps independently verified by `verify_gap1_fix.sh` and `verify_gap2_fix.sh`. Seventh round added PID-scoped isolation: every kill is now restricted to PIDs in the scenario's `owned_pids` whitelist ($PID + its observed children); broad-pattern `pkill -KILL -P 1 sleep` was removed. Independent isolation contract verified by `verify_isolation_fix.sh`: an unrelated init-sleep planted BEFORE the harness survives the harness (35/35 PASS). Eighth round added (a) recursive descendant capture via `collect_descendants_pids` so the whitelist is correct for any depth the fixture spawns (not just direct children), and (b) uniform ownership verification across ALL cleanup paths: pre-check FAIL, post-check 1/2/3 all classify residuals as provable/unprovable and kill only provable ones; unprovable ones are reported with PIDs and the cleanup does NOT claim success. Two new helpers (`pid_safe_kill` and `pid_safe_kill_owned`) consolidate the PID-reuse guards (`kill -0` aliveness + either subtree or whitelist ownership) so every kill goes through the same primitive. New verification `verify_deep_tree_fix.sh` exercises a 3-level `bash → bash → sleep` fixture and confirms the recursive whitelist + deepest-first cleanup + isolation contract all hold simultaneously. Ninth round added (a) **depth-correct ordering**: `collect_descendants_with_depth` + `sort -k1,1nr -k2,2n` (real BFS depth, not PID number, since PID number ≠ tree depth and a parent can have a larger PID than its child) so the pre-check FAIL cleanup is genuinely deepest-first and never kills a parent before its descendants; and (b) **PID-reuse guard via lstart identity**: `record_identities` captures `ps -o lstart=` for every PID in the subtree at observation time; `pid_safe_kill_with_identity` and `pid_safe_kill_orphan` (for orphans under PID 1 where subtree check is inapplicable) refuse to kill unless the current `lstart` matches the recorded one — so a **different-second** PID-reused, unrelated process cannot be misidentified as our target. New verification `verify_precheck_deep_tree.sh` exercises a long-running 3-level fixture, asserts the kill order from `KILL_LOG_FILE` line numbers, and asserts the PID-reuse guard refuses to kill when lstart mismatches (different-second case). **Round 10 audit** verified empirically that `ps -o lstart=` is second-precision on macOS bash 3.2 and that two processes spawned within the same wall-clock second have **identical** lstart strings; the harness therefore cannot distinguish same-second PID reuse by lstart. The Round-10 audit also investigated and rejected alternative identity mechanisms (`/proc`, `etimes`, `sysctl kern.proc.<pid>.start`, `lsof`, full `ps` keyword enumeration) — none provides sub-second identity in this environment. The check-then-kill race (between `kill -0` succeeding and `kill -KILL` delivery) is documented in `§ 7b` "Round-10 audit" as `RISK_REMAINS`. The harness's policy is to refuse to kill in any ambiguous case and report the PID as residual, not to risk killing an unidentifiable stranger. |
-| `ps -o lstart=` is second-precision on macOS bash 3.2 | strftime `%c` format yields no sub-second component; macOS `ps` has no etimes/etimens field; no /proc on macOS | `verify_precheck_deep_tree.sh` step 10b empirically demonstrates the precision and the same-second collision. Different-second PID reuse is detectable (verified step 10). Same-second PID reuse is `RISK_REMAINS`; harness refuses to kill in that case rather than risk killing a stranger. |
-| Check-then-kill race between `kill -0` success and `kill -KILL` delivery | macOS does not provide a shell-accessible atomic "verify identity + kill" operation | `RISK_REMAINS`; harness's policy is to refuse + report residual. Eliminating this race would need a kernel-held process-creation token via sysctl-by-name or a C helper — neither adopted in this project. |
+| Item                                                                                             | Reason                                                                                                         | Workaround in this experiment                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| ------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| macOS bash 3.2 does not run INT trap on external `kill -INT`                                     | Known bash 3.2 / macOS TTY driver quirk                                                                        | SIGTERM path verified instead                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| Foreground Ctrl-C behavior                                                                       | Requires interactive terminal; not automatable                                                                 | Out of scope for automated verification                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| `--offline` does not by itself prove "no network"                                                | Cargo could still touch the registry index                                                                     | Cache diff before/after used as auxiliary evidence; cargo exited 0 with no `error:`; `--offline` flag used; stderr has no network markers                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `kill -0` on zombie PID                                                                          | Cannot reliably distinguish alive vs zombie on macOS                                                           | `wait` return used as sole evidence of reclamation; `kill -0` only used for best-effort probe                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `jobs -l` only keeps the most recent `Done` background job on macOS bash 3.2                     | Earlier-terminated background children are unobservable via `jobs -l` even when no `wait` has run              | reap_pid harness records `jobs -l` as `[diag]` diagnostic output rather than hard assertion; the test still proves the contract via the code path (no pre-`wait`)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| bash 3.2 second `wait` returns 0 (not 127) for previously reaped child                           | Platform behaviour; means `reap_pid`'s return code alone cannot prove it was the first waiter                  | Test asserts on `rc_var` / `REAPED` side-effects, not on `wait`'s exit code                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| KILL of an outer `bash -c "..." &` leaves the inner `sleep` orphaned (reparented to PID 1, init) | macOS does not propagate SIGKILL to forked-but-not-reaped children                                             | Scenario 5 fixture now uses `bash -c "...; exec sleep 30"` so the process tree has one node; pre/post assertions verify no orphan is created. Sixth round added: (a) pre-check FAIL now aborts the scenario without calling `reap_pid`, and safe-cleans the spawned subtree so the harness cannot manufacture an orphan even if the fixture regresses; (b) post-check now diffs the init-sleep set before vs after `reap_pid` to catch reparented-to-init orphans that `pgrep -P` cannot see. Both gaps independently verified by `verify_gap1_fix.sh` and `verify_gap2_fix.sh`. Seventh round added PID-scoped isolation: every kill is now restricted to PIDs in the scenario's `owned_pids` whitelist ($PID + its observed children); broad-pattern `pkill -KILL -P 1 sleep` was removed. Independent isolation contract verified by `verify_isolation_fix.sh`: an unrelated init-sleep planted BEFORE the harness survives the harness (35/35 PASS). Eighth round added (a) recursive descendant capture via `collect_descendants_pids` so the whitelist is correct for any depth the fixture spawns (not just direct children), and (b) uniform ownership verification across ALL cleanup paths: pre-check FAIL, post-check 1/2/3 all classify residuals as provable/unprovable and kill only provable ones; unprovable ones are reported with PIDs and the cleanup does NOT claim success. Two new helpers (`pid_safe_kill` and `pid_safe_kill_owned`) consolidate the PID-reuse guards (`kill -0` aliveness + either subtree or whitelist ownership) so every kill goes through the same primitive. New verification `verify_deep_tree_fix.sh` exercises a 3-level `bash → bash → sleep` fixture and confirms the recursive whitelist + deepest-first cleanup + isolation contract all hold simultaneously. Ninth round added (a) **depth-correct ordering**: `collect_descendants_with_depth` + `sort -k1,1nr -k2,2n` (real BFS depth, not PID number, since PID number ≠ tree depth and a parent can have a larger PID than its child) so the pre-check FAIL cleanup is genuinely deepest-first and never kills a parent before its descendants; and (b) **PID-reuse guard via lstart identity**: `record_identities` captures `ps -o lstart=` for every PID in the subtree at observation time; `pid_safe_kill_with_identity` and `pid_safe_kill_orphan` (for orphans under PID 1 where subtree check is inapplicable) refuse to kill unless the current `lstart` matches the recorded one — so a **different-second** PID-reused, unrelated process cannot be misidentified as our target. New verification `verify_precheck_deep_tree.sh` exercises a long-running 3-level fixture, asserts the kill order from `KILL_LOG_FILE` line numbers, and asserts the PID-reuse guard refuses to kill when lstart mismatches (different-second case). **Round 10 audit** verified empirically that `ps -o lstart=` is second-precision on macOS bash 3.2 and that two processes spawned within the same wall-clock second have **identical** lstart strings; the harness therefore cannot distinguish same-second PID reuse by lstart. The Round-10 audit also investigated and rejected alternative identity mechanisms (`/proc`, `etimes`, `sysctl kern.proc.<pid>.start`, `lsof`, full `ps` keyword enumeration) — none provides sub-second identity in this environment. The check-then-kill race (between `kill -0` succeeding and `kill -KILL` delivery) is documented in `§ 7b` "Round-10 audit" as `RISK_REMAINS`. The harness's policy is to refuse to kill in any ambiguous case and report the PID as residual, not to risk killing an unidentifiable stranger. |
+| `ps -o lstart=` is second-precision on macOS bash 3.2                                            | strftime `%c` format yields no sub-second component; macOS `ps` has no etimes/etimens field; no /proc on macOS | `verify_precheck_deep_tree.sh` step 10b empirically demonstrates the precision and the same-second collision. Different-second PID reuse is detectable (verified step 10). Same-second PID reuse is `RISK_REMAINS`; harness refuses to kill in that case rather than risk killing a stranger.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| Check-then-kill race between `kill -0` success and `kill -KILL` delivery                         | macOS does not provide a shell-accessible atomic "verify identity + kill" operation                            | `RISK_REMAINS`; harness's policy is to refuse + report residual. Eliminating this race would need a kernel-held process-creation token via sysctl-by-name or a C helper — neither adopted in this project.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 
 ## 11. Overall Conclusion
 
@@ -1878,34 +1885,34 @@ in that case rather than risk killing a stranger), AND
 `kill -0` and `kill -KILL` delivery (also `RISK_REMAINS`,
 unclosable without an external dependency).
 
-| Bucket | Result |
-|---|---|
-| A1 minimal offline build | PASS |
-| A2 isolated project build (incl. host_ignore_term) | PASS |
-| Parser unit tests (17/17) | PASS |
-| Normal handshake (T1, T9) | PASS (exit=0) |
-| Host / joiner internal timeout (T2, T3) | PASS (exit=10) |
-| Port-occupancy handling (T4, T5) | PASS (T4=11 host+joiner both fail, T5=10 host times out) |
-| Protocol-error handling (T6) | PASS (exit=11) |
-| Bash syntax 3.2 (T10) | PASS |
-| Bash SIGTERM cleanup (T7b) | PASS (exit=130) |
-| Watchdog TERM→KILL escalation (T8, host_ignore_term) | PASS (host_reap=137) |
-| Build failure (T-build) | PASS (exit=20, trap_rc=20, no children) |
-| Precond fail — missing host (T-precond-host) | PASS (exit=30, trap_rc=30) |
-| Precond fail — missing joiner (T-precond-joiner) | PASS (exit=30) |
-| **Stress: 20x normal handshake (T-stress)** | **PASS (20/20 rc=0, hostOK + joinerOK both verified per iteration; failure evidence recording active but no failures occurred)** |
-| Cleanup `$?`-capture fix (regression-30/20/0/child-fail) | PASS |
-| **decide_priority() unit tests (18/18)** | **PASS** |
-| **reap_pid() idempotency unit tests (35/35)** | **PASS (scenarios 2/3/7 fixed: no pre-`wait`; jobs snapshots are diagnostic-only on bash 3.2; scenario 5 fixture uses `exec`; sixth-round hardening: pre-check FAIL aborts safely, post-check diffs init-sleep set to catch reparented orphans)** |
-| **Scenario 5 Gap 1 — pre-check FAIL safe-cleanup** | **PASS** (`verify_gap1_fix.sh`: broken fixture → safe cleanup → no init-orphan sleep PIDs; unrelated init-sleep survives) |
-| **Scenario 5 Gap 2 — reparented-to-init detection** | **PASS** (`verify_gap2_fix.sh`: simulated reparent → diff catches new sleep PID under init; provable orphan killed; unrelated init-sleep survives) |
-| **Scenario 5 Gap 3 — test isolation (no broad-pattern kills)** | **PASS** (`verify_isolation_fix.sh`: unrelated init-sleep planted BEFORE reap harness; harness passes 35/35; unrelated sleep survives; init has exactly 1 sleep (= planted one); explicit cleanup succeeds) |
-| **Scenario 5 Gap 4 — multi-level fixture (deep-tree)** | **PASS** (`verify_deep_tree_fix.sh`: 3-level `bash → bash → sleep` fixture; `collect_descendants_pids` captures all 3 levels; deepest-first PID-scoped cleanup kills all 3 levels; no orphan sleep leaks under init; unrelated init-sleep survives; `pid_still_in_subtree` correctly rejects unrelated PID; final init-sleep count = 0) |
+| Bucket                                                                       | Result                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| ---------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| A1 minimal offline build                                                     | PASS                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| A2 isolated project build (incl. host_ignore_term)                           | PASS                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| Parser unit tests (17/17)                                                    | PASS                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| Normal handshake (T1, T9)                                                    | PASS (exit=0)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| Host / joiner internal timeout (T2, T3)                                      | PASS (exit=10)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| Port-occupancy handling (T4, T5)                                             | PASS (T4=11 host+joiner both fail, T5=10 host times out)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| Protocol-error handling (T6)                                                 | PASS (exit=11)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| Bash syntax 3.2 (T10)                                                        | PASS                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| Bash SIGTERM cleanup (T7b)                                                   | PASS (exit=130)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| Watchdog TERM→KILL escalation (T8, host_ignore_term)                         | PASS (host_reap=137)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| Build failure (T-build)                                                      | PASS (exit=20, trap_rc=20, no children)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| Precond fail — missing host (T-precond-host)                                 | PASS (exit=30, trap_rc=30)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| Precond fail — missing joiner (T-precond-joiner)                             | PASS (exit=30)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| **Stress: 20x normal handshake (T-stress)**                                  | **PASS (20/20 rc=0, hostOK + joinerOK both verified per iteration; failure evidence recording active but no failures occurred)**                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| Cleanup `$?`-capture fix (regression-30/20/0/child-fail)                     | PASS                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| **decide_priority() unit tests (18/18)**                                     | **PASS**                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| **reap_pid() idempotency unit tests (35/35)**                                | **PASS (scenarios 2/3/7 fixed: no pre-`wait`; jobs snapshots are diagnostic-only on bash 3.2; scenario 5 fixture uses `exec`; sixth-round hardening: pre-check FAIL aborts safely, post-check diffs init-sleep set to catch reparented orphans)**                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| **Scenario 5 Gap 1 — pre-check FAIL safe-cleanup**                           | **PASS** (`verify_gap1_fix.sh`: broken fixture → safe cleanup → no init-orphan sleep PIDs; unrelated init-sleep survives)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| **Scenario 5 Gap 2 — reparented-to-init detection**                          | **PASS** (`verify_gap2_fix.sh`: simulated reparent → diff catches new sleep PID under init; provable orphan killed; unrelated init-sleep survives)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| **Scenario 5 Gap 3 — test isolation (no broad-pattern kills)**               | **PASS** (`verify_isolation_fix.sh`: unrelated init-sleep planted BEFORE reap harness; harness passes 35/35; unrelated sleep survives; init has exactly 1 sleep (= planted one); explicit cleanup succeeds)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| **Scenario 5 Gap 4 — multi-level fixture (deep-tree)**                       | **PASS** (`verify_deep_tree_fix.sh`: 3-level `bash → bash → sleep` fixture; `collect_descendants_pids` captures all 3 levels; deepest-first PID-scoped cleanup kills all 3 levels; no orphan sleep leaks under init; unrelated init-sleep survives; `pid_still_in_subtree` correctly rejects unrelated PID; final init-sleep count = 0)                                                                                                                                                                                                                                                                                                                                                                                                   |
 | **Scenario 5 Gap 5 — depth-correct + PID-reuse-safe pre-check FAIL cleanup** | **PASS** (`verify_precheck_deep_tree.sh`: 3-level fixture where outer and middle are long-running; `collect_descendants_with_depth` correctly tags middle=depth 1, inner=depth 2; `record_identities` captures lstart for every PID; cleanup is killed by **real depth** descending, not PID number; PID-reuse guard refuses to kill when lstart mismatches (different-second case); step 10b empirically demonstrates lstart is second-precision on macOS bash 3.2 and that two processes started within the same second collide — see Round-10 audit for what this does NOT cover (same-second reuse; check-then-kill race); unrelated init-sleep survives; final init-sleep count = 0). See § 7b "Ninth-round fix" + "Round-10 audit". |
-| **Round-11 in-tree lstart precision verifier** | **PASS** (`tests/test_lstart_precision.sh`: spawned 40 background sleep processes on this host; all 40 share the same `Sun Oct 11 16:12:33 2026` lstart string; cleanup policy kills only PIDs whose lstart still matches the recorded value — same identity rule as `pid_safe_kill_with_identity`). See § 7b "Round-11 in-tree lstart precision verifier". |
-| Source-file integrity (T12) | PASS (every check) |
-| Bash SIGINT (background, T7a) | NOT_VERIFIED (re-confirmed: `kill -INT <pid>` does not fire bash INT trap on macOS bash 3.2 in non-tty; see T7a section) |
-| Foreground Ctrl-C (T7c) | NOT_VERIFIED (cannot be automated; manual reproduction steps in T7c section) |
+| **Round-11 in-tree lstart precision verifier**                               | **PASS** (`tests/test_lstart_precision.sh`: spawned 40 background sleep processes on this host; all 40 share the same `Sun Oct 11 16:12:33 2026` lstart string; cleanup policy kills only PIDs whose lstart still matches the recorded value — same identity rule as `pid_safe_kill_with_identity`). See § 7b "Round-11 in-tree lstart precision verifier".                                                                                                                                                                                                                                                                                                                                                                               |
+| Source-file integrity (T12)                                                  | PASS (every check)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| Bash SIGINT (background, T7a)                                                | NOT_VERIFIED (re-confirmed: `kill -INT <pid>` does not fire bash INT trap on macOS bash 3.2 in non-tty; see T7a section)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| Foreground Ctrl-C (T7c)                                                      | NOT_VERIFIED (cannot be automated; manual reproduction steps in T7c section)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 
 The two NOT_VERIFIED items remain environment limitations, not
 script bugs. The SIGTERM path proves the same cleanup and exit-code

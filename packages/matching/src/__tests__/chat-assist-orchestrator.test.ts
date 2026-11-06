@@ -5,10 +5,7 @@ import type {
   ChatAssistReply,
   ChatAssistSuggestion,
 } from '../chat-assist-orchestrator';
-import {
-  ChatAssistOrchestrator,
-  summariseChatAssist,
-} from '../chat-assist-orchestrator';
+import { ChatAssistOrchestrator, summariseChatAssist } from '../chat-assist-orchestrator';
 import type { MatchAnalysis, SocialProfile } from '@kindora/protocol';
 import { DEFAULT_SOCIAL_BOUNDARIES } from '@kindora/protocol';
 

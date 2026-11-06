@@ -25,9 +25,10 @@
 import type { ChatMessage, LLMOptions, LLMProvider } from '@kindora/llm';
 import type { MatchAnalysis, SocialProfile } from '@kindora/protocol';
 import {
-  buildChatAssistContext,
+  buildChatAssistContextDetailed,
   type BuildChatAssistContextOptions,
   type ChatHistoryEntryLike,
+  type UntrustedNotice,
 } from './context-builder';
 import { computeHeuristics } from './heuristics';
 import {
@@ -75,6 +76,13 @@ export interface GenerateChatAssistResult {
   readonly degradationNote: string | null;
   /** True iff we short-circuited BEFORE calling the LLM (boundary block). */
   readonly boundaryBlocked: boolean;
+  /**
+   * What happened to the untrusted (peer-derived) parts of the prompt.
+   *
+   * Phase F2 — the caller is told when peer content was truncated,
+   * redacted, or dropped.
+   */
+  readonly notices: readonly UntrustedNotice[];
 }
 
 /**
@@ -98,7 +106,8 @@ export async function generateChatAssist(
   // without paying for an LLM call.
   const hints = computeHeuristics(input.selfProfile, input.peerProfile);
   if (hints.blockingIssues.length > 0) {
-    const messages = buildChatAssistContext(input, contextOptions);
+    const built = buildChatAssistContextDetailed(input, contextOptions);
+    const messages = built.messages;
     const tokens = estimateTotal(messages);
     return {
       reply: { summary: '', suggestions: Object.freeze([]) },
@@ -108,10 +117,12 @@ export async function generateChatAssist(
       degraded: true,
       degradationNote: 'boundary-block: ' + hints.blockingIssues.join('; '),
       boundaryBlocked: true,
+      notices: built.notices,
     };
   }
 
-  const messages = buildChatAssistContext(input, contextOptions);
+  const built = buildChatAssistContextDetailed(input, contextOptions);
+  const messages = built.messages;
   const tokens = estimateTotal(messages);
 
   const llmOptions: LLMOptions = {
@@ -132,6 +143,7 @@ export async function generateChatAssist(
     degraded: parsed.degraded,
     degradationNote: parsed.note,
     boundaryBlocked: false,
+    notices: built.notices,
   };
 }
 

@@ -1,5 +1,12 @@
 # Kindora V0.1 — Phase 14 Audit Addendum (LAN end-to-end loop)
 
+> **This is a point-in-time audit record** (2026-10-15). It describes the
+> repository as it stood then. **The private-key-at-rest finding it documents
+> has since been fixed** — the agent's identity key now lives in the OS
+> keychain (a Rust-side signer is still outstanding). See
+> [REMEDIATION_PROGRESS.md](REMEDIATION_PROGRESS.md) for the current state, and
+> [SECURITY.md](../SECURITY.md) for the up-to-date limitations.
+
 **Audit date:** 2026-10-15
 **Auditor:** Claude (miniMax-M3 via Claude Code)
 **Scope:** Phase 14 follow-up to `docs/AUDIT_V0.1.md`. Verifies that the LAN
@@ -131,6 +138,21 @@ connection (it stops listening after the first accept, V0.1
 single-peer invariant). The pairing code is **not** re-validated on
 the TCP stream.
 
+> **Phase C update (2026-11-03):** the parenthetical above is now
+> outdated. The Rust accept loop no longer exits after the first
+> accept — the single-peer invariant is enforced by a connection cap
+> (`MAX_CONNECTIONS = 1`) so a peer that disconnects frees its slot
+> and a new peer can connect (Phase C / C3). **The finding itself is
+> unchanged and still open:** the pairing code is still not
+> re-validated on the TCP stream, so an attacker who can sniff the
+> announce datagram can still dial the host's TCP port before the
+> legitimate joiner does. The V0.1 mitigation below (the human
+> verifying the host's display name and the 6-character code) is
+> unchanged — but note that Phase A / A3 replaced that random code
+> with the host's **identity fingerprint**, which strengthens the
+> mitigation (the code is now derived from the host's public key
+> rather than being an arbitrary shared string).
+
 **V0.1 risk:** if an attacker can sniff the announce datagram and
 replay it within the discovery window (2.5s default), they can dial
 the host's TCP port before the legitimate joiner does. The host
@@ -146,6 +168,7 @@ This is documented as a V0.1 limitation in `lan.rs` and
 `lan-transport.ts`.
 
 **Hardening (deferred to V0.2 per "don't expand scope"):**
+
 - Sign the announce with the host's `privateKey`; require the
   joiner to verify the signature against the host's `publicKey`
   before dialing.
@@ -171,6 +194,7 @@ envelopes, so an attacker can impersonate the agent on any
 insecure transport (LAN, future WebRTC, etc.).
 
 **Minimum V0.1 fix (deferred per "don't expand scope"):**
+
 1. Move `privateKey` out of the `BrowserLocalStorageProfileStore` and
    into the OS keychain via the existing `TauriSecretStore`
    (`apps/desktop/src/lib/tauri-secret-store.ts`).
@@ -189,7 +213,20 @@ touches the protocol identity model (`@kindora/agent`'s
 `createAgentIdentity` shape) and the wire-signing path
 (`@kindora/agent`'s `signEnvelope`). Out of scope for Phase 14.
 
-**Status:** **NOT_IMPLEMENTED, documented for the next pass.**
+**Status:** **IMPLEMENTED (2026-11-05).** The minimum V0.1 fix described above
+**has landed**: the agent's identity key now lives in the **OS keychain**
+(`agent.identity.p256`), the browser-side store refuses to write a private key
+to `localStorage` when the record says the key lives in the keychain, and a
+legacy plaintext record is migrated on load. The private key is imported into
+WebCrypto as **non-extractable**, so it cannot be exported again after the
+import.
+
+> **What is still open:** there is **no Rust-side signer**. The webview asks
+> Rust for the key, imports it into WebCrypto and signs there, so the key
+> _does_ cross the Rust→JS boundary in cleartext to get there. That is
+> [SECURITY.md](../SECURITY.md) limitation #1, tracked as a Phase A follow-up.
+> The dev-mode browser path still keeps the key in `localStorage` — also a
+> documented limitation.
 
 ### 3.3 API key in OS keychain (was the original P1 ask)
 
@@ -234,26 +271,27 @@ workflow was rewritten to:
 
 15 tests, all running on real UDP + real TCP loopback:
 
-| # | Test | What it proves |
-|---|------|----------------|
-| 1 | `host_linked_flips_true_after_joiner_connects` | The host's `host_linked()` returns `true` after the joiner dials. |
-| 2 | `bidirectional_envelope_exchange` | Host and joiner can send and receive `hello` envelopes through the production `LanState`. |
-| 3 | `host_linked_becomes_false_after_stop` | `host_stop()` correctly tears down the host state. |
-| 4 | `host_stop_before_peer_works` | The host can be stopped before any peer ever connects; a fresh `host_start` then succeeds. |
-| 5 | `host_double_start_is_rejected` | Calling `host_start` twice returns `AlreadyRunning("host")`. |
-| 6 | `join_with_no_host_returns_empty` | `discover` returns `[]` when no host is broadcasting. |
-| 7 | `discover_filters_by_code` | `discover("CODEAA")` returns only hosts whose announce matches `CODEAA`. |
-| 8 | `multiple_envelopes_preserve_order` | The host can send 5 envelopes in order; the joiner receives them in order (FIFO). |
-| 9 | `host_refuses_unknown_code_during_discovery` | A host with code `REALCD` does not respond to a joiner looking for `FAKECD`. |
-| 10 | `host_poll_returns_empty_when_no_peer` | `host_poll()` returns `[]` when no link is established. |
-| 11 | `host_send_without_link_returns_not_connected` | `host_send` returns `NotConnected` when no link is established. |
-| 12 | `join_double_connect_is_rejected` | Calling `join_connect` twice returns `AlreadyRunning("join")`. |
-| 13 | `join_poll_after_disconnect_returns_error` | `join_poll` returns `NotConnected` after `join_disconnect`. |
-| 14 | `host_status_reflects_code` | `host_status` returns the same `code` and `tcp_port` that were passed to `host_start`. |
-| 15 | `host_status_empty_after_stop` | `host_status` returns `None` after `host_stop`. |
+| #   | Test                                           | What it proves                                                                             |
+| --- | ---------------------------------------------- | ------------------------------------------------------------------------------------------ |
+| 1   | `host_linked_flips_true_after_joiner_connects` | The host's `host_linked()` returns `true` after the joiner dials.                          |
+| 2   | `bidirectional_envelope_exchange`              | Host and joiner can send and receive `hello` envelopes through the production `LanState`.  |
+| 3   | `host_linked_becomes_false_after_stop`         | `host_stop()` correctly tears down the host state.                                         |
+| 4   | `host_stop_before_peer_works`                  | The host can be stopped before any peer ever connects; a fresh `host_start` then succeeds. |
+| 5   | `host_double_start_is_rejected`                | Calling `host_start` twice returns `AlreadyRunning("host")`.                               |
+| 6   | `join_with_no_host_returns_empty`              | `discover` returns `[]` when no host is broadcasting.                                      |
+| 7   | `discover_filters_by_code`                     | `discover("CODEAA")` returns only hosts whose announce matches `CODEAA`.                   |
+| 8   | `multiple_envelopes_preserve_order`            | The host can send 5 envelopes in order; the joiner receives them in order (FIFO).          |
+| 9   | `host_refuses_unknown_code_during_discovery`   | A host with code `REALCD` does not respond to a joiner looking for `FAKECD`.               |
+| 10  | `host_poll_returns_empty_when_no_peer`         | `host_poll()` returns `[]` when no link is established.                                    |
+| 11  | `host_send_without_link_returns_not_connected` | `host_send` returns `NotConnected` when no link is established.                            |
+| 12  | `join_double_connect_is_rejected`              | Calling `join_connect` twice returns `AlreadyRunning("join")`.                             |
+| 13  | `join_poll_after_disconnect_returns_error`     | `join_poll` returns `NotConnected` after `join_disconnect`.                                |
+| 14  | `host_status_reflects_code`                    | `host_status` returns the same `code` and `tcp_port` that were passed to `host_start`.     |
+| 15  | `host_status_empty_after_stop`                 | `host_status` returns `None` after `host_stop`.                                            |
 
 Test infrastructure knobs (test-only, default production values are
 preserved):
+
 - `LanState::set_broadcast_addr(addr)` — overrides the
   `join_discover` destination (default `255.255.255.255`).
 - `LanState::set_udp_bind_addr(addr)` — overrides the host's
@@ -289,16 +327,38 @@ brief asked for.
 - No privateKey-in-keychain migration (see § 3.2 — deferred per
   the brief's "don't expand scope" guard).
 
+> **Update (2026-11-06):** two of those four have since moved. The
+> **SQLite business database** and the **chat transcript** landed (Phase D), and
+> the **private-key-in-keychain** migration landed too (see § 3.2). The
+> **WebRTC DataChannel** is still not implemented — the interface and the
+> signalling contract are fixed, but there is no DataChannel. The **live LLM
+> smoke test** is still missing, and it is still the reason the provider
+> adapters' request format is unverified against a real API.
+
 ---
 
 ## 6. Status summary
 
-| Item | Previous | Current |
-|------|----------|---------|
-| LAN TCP link handoff | **BROKEN** (link lost) | **VERIFIED** (15 Rust E2E tests + JS shim tests) |
-| Protocol session lifecycle | **BROKEN** (used `_setState` cast) | **VERIFIED** (drives `PairingSession` public API end-to-end) |
-| Pairing code re-validation on TCP | **NOT_IMPLEMENTED** | **PARTIAL** (filtered at discovery only; V0.1 accepted) |
-| `privateKey` at rest | **NOT_REVIEWED** | **NOT_IMPLEMENTED** (in WebView localStorage; fix deferred) |
-| API key in OS keychain | **VERIFIED** | **VERIFIED** (6 shim tests + keyring crate) |
-| CI Rust compile check | **SWALLOWED** (`\|\| true`) | **VERIFIED** (real PASS/FAIL) |
-| Cross-process LAN test | **VERIFIED** (UDP only) | **VERIFIED** (UDP + new Rust E2E for TCP envelopes) |
+The **Previous** and **Current** columns below are as of **2026-10-15**, when
+this audit was written. The third column carries the state as of **2026-11-06**,
+so that a reader who lands on this page does not mistake a two-week-old
+finding for a live one.
+
+| Item                              | Previous                           | Current (2026-10-15)                                         | Current (2026-11-06)                                                                                                                                                                                               |
+| --------------------------------- | ---------------------------------- | ------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| LAN TCP link handoff              | **BROKEN** (link lost)             | **VERIFIED** (15 Rust E2E tests + JS shim tests)             | **VERIFIED** — the suite grew to **18** `lan_e2e` tests                                                                                                                                                            |
+| Protocol session lifecycle        | **BROKEN** (used `_setState` cast) | **VERIFIED** (drives `PairingSession` public API end-to-end) | **VERIFIED** — and it now also negotiates the **session key** over ephemeral ECDH                                                                                                                                  |
+| Pairing code re-validation on TCP | **NOT_IMPLEMENTED**                | **PARTIAL** (filtered at discovery only; V0.1 accepted)      | **PARTIAL** — still filtered at discovery only. Phase A/A3 replaced the random code with the host's **identity fingerprint**, which strengthens the mitigation but does not re-validate the code on the TCP stream |
+| `privateKey` at rest              | **NOT_REVIEWED**                   | **NOT_IMPLEMENTED** (in WebView localStorage; fix deferred)  | **IMPLEMENTED** — the key lives in the **OS keychain**; the _Rust-side signer_ (`agent_sign`) is still outstanding                                                                                                 |
+| API key in OS keychain            | **VERIFIED**                       | **VERIFIED** (6 shim tests + keyring crate)                  | **VERIFIED**                                                                                                                                                                                                       |
+| CI Rust compile check             | **SWALLOWED** (`\|\| true`)        | **VERIFIED** (real PASS/FAIL)                                | **VERIFIED** — and CI now runs **ten** blocking checks (see the CI job in `.github/workflows/ci.yml`)                                                                                                              |
+| Cross-process LAN test            | **VERIFIED** (UDP only)            | **VERIFIED** (UDP + new Rust E2E for TCP envelopes)          | **VERIFIED**                                                                                                                                                                                                       |
+
+> **The counts in § 5 are point-in-time too.** The TypeScript workspace suite
+> that reported **460** tests on 2026-10-15 reports **1035** across seven suites
+> on 2026-11-06, and the Rust side reports **48** across four suites. The
+> current numbers live in [DEVELOPMENT_STATUS.md](DEVELOPMENT_STATUS.md).
+
+> **Two things are still not verified, and this audit did not cover them:** the
+> **live LLM provider** path (every test mocks `fetch`), and the **real
+> two-device GUI** acceptance. Neither is a claim this document makes.

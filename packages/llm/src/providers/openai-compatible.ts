@@ -1,15 +1,20 @@
 /**
  * OpenAI-compatible chat provider.
  *
- * Covers OpenAI, DeepSeek, Qwen, Doubao, and any provider that follows
- * the OpenAI Chat Completions shape.
+ * Covers OpenAI, DeepSeek, Qwen, Doubao, MiniMax, and any provider that
+ * follows the OpenAI Chat Completions shape.
  *
- * See 开发手册.md § 10.
+ * The transport is shared with every other provider (`../http`): one error
+ * model, one timeout policy, one cancellation rule, one retry policy.
+ *
+ * See 开发手册.md § 10 and `docs/修复.md` § 八 E1.
  */
 
 import type { ChatMessage, LLMOptions, LLMProvider, LLMResponse } from '../index';
+import { LLMError } from '../errors';
+import { sendJson, resolvePolicy, type LLMRequestOptions } from '../http';
 
-export interface OpenAICompatibleConfig {
+export interface OpenAICompatibleConfig extends LLMRequestOptions {
   /** e.g. "https://api.openai.com/v1" */
   readonly baseUrl: string;
   /** e.g. "gpt-4o-mini", "deepseek-chat", "qwen-turbo". */
@@ -52,23 +57,26 @@ export class OpenAICompatibleProvider implements LLMProvider {
       headers['Authorization'] = `Bearer ${this.config.apiKey}`;
     }
 
-    const res = await fetch(url, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify(body),
-      signal: options.signal,
+    const policy = resolvePolicy(this.config, {
+      timeoutMs: options.timeoutMs,
+      maxRetries: options.maxRetries,
     });
 
-    const payload = (await res.json().catch(() => ({}))) as OpenAIChatResponse;
-
-    if (!res.ok) {
-      throw mapHttpError(res.status, payload?.error?.message ?? res.statusText);
-    }
+    const { payload } = await sendJson<OpenAIChatResponse>(
+      {
+        url,
+        headers,
+        body: JSON.stringify(body),
+        signal: options.signal,
+        secrets: [this.config.apiKey],
+      },
+      policy,
+    );
 
     const choice = payload.choices?.[0];
     const content = choice?.message?.content ?? '';
     if (!content) {
-      throw new Error('OpenAI-compatible response had no message content.');
+      throw new LLMError('INVALID_RESPONSE', 'OpenAI-compatible response had no message content.');
     }
 
     return Object.freeze({
@@ -88,13 +96,4 @@ export class OpenAICompatibleProvider implements LLMProvider {
 function joinUrl(base: string, path: string): string {
   const trimmed = base.replace(/\/+$/, '');
   return `${trimmed}/${path.replace(/^\/+/, '')}`;
-}
-
-function mapHttpError(status: number, fallbackMessage: string): Error {
-  if (status === 401) return new Error(`Invalid API key (401): ${fallbackMessage}`);
-  if (status === 404)
-    return new Error(`Model not found or wrong base URL (404): ${fallbackMessage}`);
-  if (status === 429) return new Error(`Rate limit exceeded (429): ${fallbackMessage}`);
-  if (status >= 500) return new Error(`Server error (${status}): ${fallbackMessage}`);
-  return new Error(`LLM request failed (${status}): ${fallbackMessage}`);
 }

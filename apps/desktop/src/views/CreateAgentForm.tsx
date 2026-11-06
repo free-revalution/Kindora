@@ -8,8 +8,8 @@
 import { useState, type FormEvent } from 'react';
 import {
   CONVERSATION_STYLES,
-  DEFAULT_SOCIAL_BOUNDARIES,
   SOCIAL_INTENTS,
+  resolveBoundaries,
   type ConversationStyle,
   type SocialBoundaries,
   type SocialIntent,
@@ -53,6 +53,78 @@ export interface CreateAgentFormProps {
   onCancel?: () => void;
 }
 
+/**
+ * One privacy switch.
+ *
+ * `flag` is the `SocialBoundaries` key it toggles; the two translation
+ * keys carry the label and the explanation. The table is the UI's
+ * mirror of the protocol's `PROFILE_FIELD_RULES` — the same set of
+ * flags, grouped the way a user thinks about them.
+ */
+interface BoundarySwitch {
+  readonly flag: keyof SocialBoundaries;
+  readonly labelKey: TranslationKey;
+  readonly hintKey: TranslationKey;
+}
+
+/** Permissions for the conversation itself. */
+const BEHAVIOUR_SWITCHES: readonly BoundarySwitch[] = [
+  {
+    flag: 'allowAgentConversation',
+    labelKey: 'privacy.allowAgentConversation',
+    hintKey: 'privacy.allowAgentConversationHint',
+  },
+  {
+    flag: 'allowContactExchange',
+    labelKey: 'privacy.allowContactExchange',
+    hintKey: 'privacy.allowContactExchangeHint',
+  },
+  {
+    flag: 'allowOfflineMeeting',
+    labelKey: 'privacy.allowOfflineMeeting',
+    hintKey: 'privacy.allowOfflineMeetingHint',
+  },
+  {
+    flag: 'allowProjectDetails',
+    labelKey: 'privacy.allowProjectDetails',
+    hintKey: 'privacy.allowProjectDetailsHint',
+  },
+];
+
+/** Which parts of the profile are visible to the other agent. */
+const FIELD_SWITCHES: readonly BoundarySwitch[] = [
+  {
+    flag: 'allowBio',
+    labelKey: 'privacy.allowBio',
+    hintKey: 'privacy.allowBioHint',
+  },
+  {
+    flag: 'allowInterests',
+    labelKey: 'privacy.allowInterests',
+    hintKey: 'privacy.allowInterestsHint',
+  },
+  {
+    flag: 'allowCurrentActivity',
+    labelKey: 'privacy.allowCurrentActivity',
+    hintKey: 'privacy.allowCurrentActivityHint',
+  },
+  {
+    flag: 'allowAvatar',
+    labelKey: 'privacy.allowAvatar',
+    hintKey: 'privacy.allowAvatarHint',
+  },
+  {
+    flag: 'allowSocialIntent',
+    labelKey: 'privacy.allowSocialIntent',
+    hintKey: 'privacy.allowSocialIntentHint',
+  },
+  {
+    flag: 'allowConversationStyle',
+    labelKey: 'privacy.allowConversationStyle',
+    hintKey: 'privacy.allowConversationStyleHint',
+  },
+];
+
 export function CreateAgentForm({
   initialProfile,
   variant,
@@ -74,8 +146,12 @@ export function CreateAgentForm({
   const [conversationStyle, setConversationStyle] = useState<ConversationStyle[]>(
     initialProfile?.conversationStyle ?? [],
   );
-  const [boundaries] = useState<SocialBoundaries>(
-    initialProfile?.boundaries ?? { ...DEFAULT_SOCIAL_BOUNDARIES },
+  // Phase B / B1 — the privacy switches are editable and persisted with
+  // the profile. `resolveBoundaries` fills in the flags a record
+  // written before Phase B did not carry, so the form always starts
+  // from a complete set.
+  const [boundaries, setBoundaries] = useState<SocialBoundaries>(
+    resolveBoundaries(initialProfile?.boundaries),
   );
   const [submitting, setSubmitting] = useState(false);
 
@@ -146,6 +222,10 @@ export function CreateAgentForm({
     );
   }
 
+  function toggleBoundary(flag: keyof SocialBoundaries) {
+    setBoundaries((current) => ({ ...current, [flag]: current[flag] !== true }));
+  }
+
   async function handleSubmit(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
     if (!canSubmit) return;
@@ -199,7 +279,11 @@ export function CreateAgentForm({
       >
         <div className="flex flex-wrap gap-2">
           {interests.map((i) => (
-            <Chip key={i} onRemove={() => removeInterest(i)} removeLabel={t('agent.removeItem', { value: i })}>
+            <Chip
+              key={i}
+              onRemove={() => removeInterest(i)}
+              removeLabel={t('agent.removeItem', { value: i })}
+            >
               {i}
             </Chip>
           ))}
@@ -254,7 +338,11 @@ export function CreateAgentForm({
       >
         <div className="flex flex-wrap gap-2">
           {currentActivities.map((a) => (
-            <Chip key={a} onRemove={() => removeActivity(a)} removeLabel={t('agent.removeItem', { value: a })}>
+            <Chip
+              key={a}
+              onRemove={() => removeActivity(a)}
+              removeLabel={t('agent.removeItem', { value: a })}
+            >
               {a}
             </Chip>
           ))}
@@ -318,6 +406,58 @@ export function CreateAgentForm({
         </div>
       </Field>
 
+      {/* Phase B / B1 — the privacy switches. They are part of the
+          profile, so they are saved with it: an edit to a switch is
+          saved when the form is submitted. */}
+      <section className="kindora-card flex flex-col gap-5">
+        <div>
+          <h2 className="text-kindora-500 dark:text-kindora-400 text-xs uppercase tracking-wide">
+            {t('privacy.title')}
+          </h2>
+          <p className="text-kindora-600 dark:text-kindora-300 mt-2 text-sm leading-relaxed">
+            {t('privacy.intro')}
+          </p>
+        </div>
+
+        <div className="flex flex-col gap-2">
+          <h3 className="text-sm font-medium">{t('privacy.behaviourTitle')}</h3>
+          <p className="text-kindora-500 dark:text-kindora-400 text-xs">
+            {t('privacy.behaviourIntro')}
+          </p>
+          <div className="mt-1 flex flex-col">
+            {BEHAVIOUR_SWITCHES.map((s) => (
+              <BoundaryRow
+                key={s.flag}
+                flag={s.flag}
+                checked={boundaries[s.flag] === true}
+                onChange={() => toggleBoundary(s.flag)}
+                label={t(s.labelKey)}
+                hint={t(s.hintKey)}
+              />
+            ))}
+          </div>
+        </div>
+
+        <div className="flex flex-col gap-2">
+          <h3 className="text-sm font-medium">{t('privacy.fieldsTitle')}</h3>
+          <p className="text-kindora-500 dark:text-kindora-400 text-xs">
+            {t('privacy.fieldsIntro')}
+          </p>
+          <div className="mt-1 flex flex-col">
+            {FIELD_SWITCHES.map((s) => (
+              <BoundaryRow
+                key={s.flag}
+                flag={s.flag}
+                checked={boundaries[s.flag] === true}
+                onChange={() => toggleBoundary(s.flag)}
+                label={t(s.labelKey)}
+                hint={t(s.hintKey)}
+              />
+            ))}
+          </div>
+        </div>
+      </section>
+
       <div className="border-kindora-100 dark:border-kindora-800 flex items-center justify-between border-t pt-6">
         {onCancel ? (
           <button
@@ -332,7 +472,9 @@ export function CreateAgentForm({
           <span />
         )}
         <button type="submit" className="kindora-button px-8" disabled={!canSubmit}>
-          {submitting ? t('common.saving') : t(variant === 'edit' ? 'agent.saveSubmit' : 'agent.createSubmit')}
+          {submitting
+            ? t('common.saving')
+            : t(variant === 'edit' ? 'agent.saveSubmit' : 'agent.createSubmit')}
         </button>
       </div>
     </form>
@@ -443,5 +585,60 @@ function Toggle({
     >
       {children}
     </button>
+  );
+}
+
+/**
+ * One privacy switch: a checkbox, the field name, and what turning it
+ * on actually means.
+ *
+ * The state badge says "Shared" / "Private" rather than "on" / "off" —
+ * the switch is about what leaves the device, not about a feature
+ * being enabled.
+ */
+function BoundaryRow({
+  flag,
+  checked,
+  onChange,
+  label,
+  hint,
+}: {
+  flag: keyof SocialBoundaries;
+  checked: boolean;
+  onChange: () => void;
+  label: string;
+  hint: string;
+}) {
+  const t = useTranslate();
+  return (
+    <label
+      className="hover:bg-kindora-50 dark:hover:bg-kindora-800 flex cursor-pointer items-start gap-3 rounded-lg px-3 py-2"
+      data-testid={`boundary-row-${flag}`}
+    >
+      <input
+        type="checkbox"
+        checked={checked}
+        onChange={onChange}
+        className="kindora-checkbox mt-0.5"
+        data-testid={`boundary-${flag}`}
+      />
+      <span className="flex flex-col gap-1">
+        <span className="flex items-center gap-2">
+          <span className="text-sm">{label}</span>
+          <span
+            className={
+              checked
+                ? 'text-xs text-emerald-700 dark:text-emerald-400'
+                : 'text-kindora-500 dark:text-kindora-400 text-xs'
+            }
+          >
+            {t(checked ? 'privacy.visible' : 'privacy.hidden')}
+          </span>
+        </span>
+        <span className="text-kindora-500 dark:text-kindora-400 text-xs leading-relaxed">
+          {hint}
+        </span>
+      </span>
+    </label>
   );
 }

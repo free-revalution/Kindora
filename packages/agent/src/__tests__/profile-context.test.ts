@@ -38,6 +38,40 @@ describe('@kindora/agent — renderProfileContext', () => {
     expect(out).toContain('current activity:   yes');
   });
 
+  it('renders the field-level disclosure gates (Phase B / B1)', () => {
+    // The model must be able to tell "the user wrote no bio" from
+    // "the bio was withheld" — otherwise the analysis invents a story
+    // about a field the user deliberately kept private.
+    const out = renderProfileContext({
+      ...SAMPLE,
+      boundaries: {
+        ...SAMPLE.boundaries,
+        allowBio: true,
+        allowInterests: true,
+        allowAvatar: false,
+        allowSocialIntent: true,
+        allowConversationStyle: false,
+      },
+    });
+    expect(out).toMatch(/^\s+bio:\s+yes$/m);
+    expect(out).toMatch(/^\s+interests:\s+yes$/m);
+    expect(out).toMatch(/^\s+avatar:\s+no$/m);
+    expect(out).toMatch(/^\s+social intent:\s+yes$/m);
+    expect(out).toMatch(/^\s+conversation style:\s+no$/m);
+  });
+
+  it('falls back to the protocol defaults for a record written before the field gates existed', () => {
+    // A profile saved before Phase B carries only the five behavioural
+    // flags. The renderer must still produce a complete set — the LLM
+    // is never left guessing what `undefined` meant.
+    const out = renderProfileContext(SAMPLE);
+    expect(out).toMatch(/^\s+bio:\s+no$/m);
+    expect(out).toMatch(/^\s+interests:\s+yes$/m);
+    expect(out).toMatch(/^\s+avatar:\s+no$/m);
+    expect(out).toMatch(/^\s+social intent:\s+yes$/m);
+    expect(out).toMatch(/^\s+conversation style:\s+yes$/m);
+  });
+
   it('renders displayName when supplied', () => {
     const out = renderProfileContext(SAMPLE, { displayName: 'Alex Doe' });
     expect(out).toContain('displayName: Alex Doe');

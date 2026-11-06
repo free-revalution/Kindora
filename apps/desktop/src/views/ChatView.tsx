@@ -33,6 +33,8 @@ import {
   type ChatAssistDisplay,
   type ChatAssistDisplaySuggestion,
   type ChatAssistHandle,
+  type ChatMessageSource,
+  type ChatMessageStatus,
 } from '@kindora/matching';
 import type { ChatSnapshot } from '@kindora/matching';
 import { CHAT_ASSIST_KIND_KEYS, useI18n, useTranslate, LOCALES } from '../i18n';
@@ -90,7 +92,11 @@ export function ChatView({
   const isClosed = snapshot.state === 'closed';
   const trimmed = draft.trim();
   const canSend =
-    phase === 'open' && !isClosed && !sending && trimmed.length > 0 && trimmed.length <= maxTextLength;
+    phase === 'open' &&
+    !isClosed &&
+    !sending &&
+    trimmed.length > 0 &&
+    trimmed.length <= maxTextLength;
   const textTooLong = trimmed.length > maxTextLength;
 
   return (
@@ -100,9 +106,7 @@ export function ChatView({
           <p className="text-kindora-500 dark:text-kindora-400 text-xs uppercase tracking-wide">
             {t('chat.eyebrow')}
           </p>
-          <h1 className="mt-1 text-3xl font-semibold tracking-tight">
-            {peerDisplayName}
-          </h1>
+          <h1 className="mt-1 text-3xl font-semibold tracking-tight">{peerDisplayName}</h1>
           <p className="text-kindora-500 dark:text-kindora-400 mt-1 text-sm">
             {t('chat.you', { name: selfDisplayName })}
           </p>
@@ -122,7 +126,7 @@ export function ChatView({
           className="kindora-card flex flex-col gap-2 border border-rose-300 dark:border-rose-700"
           data-testid="chat-blocked-local"
         >
-          <h2 className="text-rose-600 dark:text-rose-400 text-xs uppercase tracking-wide">
+          <h2 className="text-xs uppercase tracking-wide text-rose-600 dark:text-rose-400">
             {t('chat.blockedLocal')}
           </h2>
           <p className="text-sm leading-relaxed">
@@ -136,7 +140,7 @@ export function ChatView({
           className="kindora-card flex flex-col gap-2 border border-rose-300 dark:border-rose-700"
           data-testid="chat-blocked-peer"
         >
-          <h2 className="text-rose-600 dark:text-rose-400 text-xs uppercase tracking-wide">
+          <h2 className="text-xs uppercase tracking-wide text-rose-600 dark:text-rose-400">
             {t('chat.blockedByPeer')}
           </h2>
           <p className="text-sm leading-relaxed">
@@ -147,9 +151,7 @@ export function ChatView({
 
       {isClosed && snapshot.closeReason === 'peer-disconnect' && (
         <section className="kindora-card flex flex-col gap-2" data-testid="chat-peer-left">
-          <p className="text-sm leading-relaxed">
-            {t('chat.peerLeft', { peer: peerDisplayName })}
-          </p>
+          <p className="text-sm leading-relaxed">{t('chat.peerLeft', { peer: peerDisplayName })}</p>
         </section>
       )}
 
@@ -173,6 +175,8 @@ export function ChatView({
             text={entry.text}
             timestamp={entry.timestamp}
             peerDisplayName={peerDisplayName}
+            status={entry.status}
+            source={entry.source}
           />
         ))}
       </section>
@@ -182,7 +186,7 @@ export function ChatView({
           className="kindora-card flex flex-col gap-2 border border-rose-300 dark:border-rose-700"
           data-testid="chat-error"
         >
-          <p className="text-rose-600 dark:text-rose-400 text-sm">{error}</p>
+          <p className="text-sm text-rose-600 dark:text-rose-400">{error}</p>
         </section>
       )}
 
@@ -219,9 +223,7 @@ export function ChatView({
           value={draft}
           onChange={(e) => onDraftChange(e.target.value)}
           placeholder={
-            isClosed
-              ? t('chat.inputClosed')
-              : t('chat.inputOpen', { peer: peerDisplayName })
+            isClosed ? t('chat.inputClosed') : t('chat.inputOpen', { peer: peerDisplayName })
           }
           disabled={isClosed || sending}
           maxLength={maxTextLength * 2 /* allow typing past, validate below */}
@@ -259,9 +261,7 @@ export function ChatView({
         >
           {t(snapshot.blockedByLocal ? 'chat.alreadyBlocked' : 'chat.block')}
         </button>
-        <p className="text-kindora-500 dark:text-kindora-400 text-xs">
-          {t('chat.aiNeverSends')}
-        </p>
+        <p className="text-kindora-500 dark:text-kindora-400 text-xs">{t('chat.aiNeverSends')}</p>
       </footer>
     </main>
   );
@@ -276,11 +276,17 @@ function ChatBubble({
   text,
   timestamp,
   peerDisplayName,
+  status,
+  source,
 }: {
   direction: 'sent' | 'received';
   text: string;
   timestamp: string;
   peerDisplayName: string;
+  /** Phase D / D2 — the delivery state, when the orchestrator reports one. */
+  status?: ChatMessageStatus;
+  /** Phase D / D2 — who composed the text. */
+  source?: ChatMessageSource;
 }) {
   const { t, locale } = useI18n();
   const isSent = direction === 'sent';
@@ -294,15 +300,34 @@ function ChatBubble({
       className={`flex flex-col gap-1 ${align}`}
       data-testid="chat-bubble"
       data-direction={direction}
+      data-status={status ?? 'unknown'}
     >
       <p className="text-kindora-500 dark:text-kindora-400 text-xs">
-        {label} · {formatTime(timestamp, LOCALES[locale].htmlLang)}
+        {label}
+        {source === 'agent' ? ` · ${t('chat.fromAgent')}` : ''} ·{' '}
+        {formatTime(timestamp, LOCALES[locale].htmlLang)}
       </p>
       <p
         className={`max-w-[80%] whitespace-pre-wrap break-words rounded-2xl border px-3 py-2 text-sm leading-relaxed ${bubbleClass}`}
       >
         {text}
       </p>
+      {status === 'PENDING' && (
+        <p
+          className="text-kindora-500 dark:text-kindora-400 text-xs italic"
+          data-testid="chat-status-pending"
+        >
+          {t('chat.statusPending')}
+        </p>
+      )}
+      {status === 'FAILED' && (
+        <p
+          className="text-xs italic text-rose-600 dark:text-rose-400"
+          data-testid="chat-status-failed"
+        >
+          {t('chat.statusFailed')}
+        </p>
+      )}
     </div>
   );
 }
@@ -372,7 +397,10 @@ function ChatAssistPanel({
   // Closed panel: show a single button.
   if (!state.open) {
     return (
-      <section className="kindora-card flex flex-wrap items-center justify-between gap-2" data-testid="chat-assist-closed">
+      <section
+        className="kindora-card flex flex-wrap items-center justify-between gap-2"
+        data-testid="chat-assist-closed"
+      >
         <p className="text-kindora-500 dark:text-kindora-400 text-sm">
           {t('chat.assist.closedPrompt')}
         </p>
@@ -467,10 +495,10 @@ function ChatAssistPanel({
 
       {state.error && (
         <section
-          className="flex flex-col gap-1 border border-rose-300 dark:border-rose-700 rounded-md p-2"
+          className="flex flex-col gap-1 rounded-md border border-rose-300 p-2 dark:border-rose-700"
           data-testid="chat-assist-error"
         >
-          <p className="text-rose-600 dark:text-rose-400 text-xs">{state.error}</p>
+          <p className="text-xs text-rose-600 dark:text-rose-400">{state.error}</p>
         </section>
       )}
 
@@ -483,14 +511,17 @@ function ChatAssistPanel({
         </p>
       )}
 
-      {!state.busy && state.display && visibleSuggestions.length === 0 && state.display.suggestions.length === 0 && (
-        <p
-          className="text-kindora-500 dark:text-kindora-400 text-sm italic"
-          data-testid="chat-assist-empty"
-        >
-          {state.display.summary || t('chat.assist.noSuggestions')}
-        </p>
-      )}
+      {!state.busy &&
+        state.display &&
+        visibleSuggestions.length === 0 &&
+        state.display.suggestions.length === 0 && (
+          <p
+            className="text-kindora-500 dark:text-kindora-400 text-sm italic"
+            data-testid="chat-assist-empty"
+          >
+            {state.display.summary || t('chat.assist.noSuggestions')}
+          </p>
+        )}
 
       {visibleSuggestions.length > 0 && (
         <section
@@ -655,6 +686,14 @@ export interface LiveChatViewProps {
   readonly run: () => Promise<ChatSnapshot>;
   /** Initial draft — typically the chosen icebreaker message. */
   readonly initialDraft?: string;
+  /**
+   * Phase D / D2 — who wrote the initial draft.
+   *
+   * The icebreaker is written by the LLM, so it is `agent`; an empty
+   * draft is `human`. The source is recorded with the message when
+   * the user sends it.
+   */
+  readonly initialDraftSource?: ChatMessageSource;
   /** Max text length — forwarded to the input. */
   readonly maxTextLength: number;
   /**
@@ -666,8 +705,13 @@ export interface LiveChatViewProps {
   /**
    * Called when the user submits a non-empty message. The parent is
    * responsible for routing it through the orchestrator's send().
+   *
+   * Phase D / D2 — the second argument says who wrote the text:
+   * `human` for something the user typed, `agent` for a suggestion
+   * the user adopted from the assistant panel. The parent records it
+   * with the message.
    */
-  readonly onSend: (text: string) => Promise<void> | void;
+  readonly onSend: (text: string, source?: ChatMessageSource) => Promise<void> | void;
   /** Called when the user clicks Disconnect. */
   readonly onDisconnect: () => Promise<void> | void;
   /** Called when the user clicks Block. */
@@ -687,6 +731,7 @@ export function LiveChatView({
   selfDisplayName,
   run,
   initialDraft,
+  initialDraftSource,
   maxTextLength,
   subscribe,
   onSend,
@@ -698,6 +743,14 @@ export function LiveChatView({
   const t = useTranslate();
   const [snapshot, setSnapshot] = useState<ChatSnapshot | undefined>(undefined);
   const [draft, setDraft] = useState(initialDraft ?? '');
+  /**
+   * Phase D / D2 — who wrote the current draft.
+   *
+   * `agent` while the draft is an untouched assistant suggestion (or
+   * the LLM-written icebreaker); `human` as soon as the user types
+   * something themselves.
+   */
+  const [draftSource, setDraftSource] = useState<ChatMessageSource>(initialDraftSource ?? 'human');
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | undefined>(undefined);
 
@@ -764,11 +817,12 @@ export function LiveChatView({
     setSending(true);
     setError(undefined);
     try {
-      await onSendRef.current(text);
+      await onSendRef.current(text, draftSource);
       // After a successful send, optimistically clear the draft.
       // The actual entry arrives via the snapshot subscription and
       // re-renders the history.
       setDraft('');
+      setDraftSource('human');
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -780,7 +834,10 @@ export function LiveChatView({
 
   function applySuggestion(text: string): void {
     // Use → fills the composer draft (per § 32 the AI never auto-sends).
+    // The text was written by the agent, so the message is recorded as
+    // agent-sourced when the user sends it.
     setDraft(text);
+    setDraftSource('agent');
   }
 
   async function runAssist(rawQuery: string): Promise<void> {
@@ -848,7 +905,12 @@ export function LiveChatView({
       maxTextLength={maxTextLength}
       error={error}
       assistant={assistant}
-      onDraftChange={setDraft}
+      onDraftChange={(next) => {
+        setDraft(next);
+        // The user wrote it now — whatever the draft was before, the
+        // text is theirs from here on.
+        setDraftSource('human');
+      }}
       onSend={handleSend}
       onDisconnect={() => void onDisconnectRef.current()}
       onBlock={() => void onBlockRef.current()}

@@ -22,11 +22,16 @@
 import type { ChatMessage, LLMOptions, LLMProvider } from '@kindora/llm';
 import type { MatchAnalysis, SocialProfile } from '@kindora/protocol';
 import {
-  buildIcebreakerContext,
+  buildIcebreakerContextDetailed,
   type BuildIcebreakerContextOptions,
+  type UntrustedNotice,
 } from './context-builder';
 import { computeHeuristics } from './heuristics';
-import { MAX_ICEBREAKER_TOPICS, parseIcebreakerTopics, type ParseIcebreakerResult } from './output-parser';
+import {
+  MAX_ICEBREAKER_TOPICS,
+  parseIcebreakerTopics,
+  type ParseIcebreakerResult,
+} from './output-parser';
 
 export interface GenerateIcebreakerConfig {
   readonly maxIcebreakerTokens: number;
@@ -81,6 +86,13 @@ export interface GenerateIcebreakerResult {
    * offer Regenerate — the boundary is permanent.
    */
   readonly boundaryBlocked: boolean;
+  /**
+   * What happened to the untrusted (peer-derived) parts of the prompt.
+   *
+   * Phase F2 — the caller is told when peer content was truncated,
+   * redacted, or dropped.
+   */
+  readonly notices: readonly UntrustedNotice[];
 }
 
 /**
@@ -104,7 +116,8 @@ export async function generateIcebreaker(
   // without paying for an LLM call.
   const hints = computeHeuristics(input.selfProfile, input.peerProfile);
   if (hints.blockingIssues.length > 0) {
-    const messages = buildIcebreakerContext(input, contextOptions);
+    const built = buildIcebreakerContextDetailed(input, contextOptions);
+    const messages = built.messages;
     const tokens = estimateTotal(messages);
     return {
       topics: Object.freeze([]),
@@ -114,6 +127,7 @@ export async function generateIcebreaker(
       degraded: true,
       degradationNote: 'boundary-block: ' + hints.blockingIssues.join('; '),
       boundaryBlocked: true,
+      notices: built.notices,
     };
   }
 
@@ -121,7 +135,8 @@ export async function generateIcebreaker(
   // model has nothing to ground starters in. Refuse gracefully rather
   // than letting it hallucinate generic openers.
   if (isThinProfile(input.selfProfile) && isThinProfile(input.peerProfile)) {
-    const messages = buildIcebreakerContext(input, contextOptions);
+    const built = buildIcebreakerContextDetailed(input, contextOptions);
+    const messages = built.messages;
     const tokens = estimateTotal(messages);
     return {
       topics: Object.freeze([]),
@@ -131,10 +146,12 @@ export async function generateIcebreaker(
       degraded: true,
       degradationNote: 'thin-profile: not enough profile data to ground icebreakers',
       boundaryBlocked: false,
+      notices: built.notices,
     };
   }
 
-  const messages = buildIcebreakerContext(input, contextOptions);
+  const built = buildIcebreakerContextDetailed(input, contextOptions);
+  const messages = built.messages;
   const tokens = estimateTotal(messages);
 
   const llmOptions: LLMOptions = {
@@ -155,6 +172,7 @@ export async function generateIcebreaker(
     degraded: parsed.degraded,
     degradationNote: parsed.note,
     boundaryBlocked: false,
+    notices: built.notices,
   };
 }
 

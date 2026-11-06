@@ -23,6 +23,11 @@
     @apply bg-kindora-600 hover:bg-kindora-700 focus:ring-kindora-400 inline-flex items-center justify-center rounded-xl px-4 py-2 text-sm font-medium text-white transition focus:outline-none focus:ring-2 disabled:cursor-not-allowed disabled:opacity-50;
   }
 
+  /* Phase A / A1 — "your key is not in a secure store" banner. */
+  .kindora-warning {
+    @apply rounded-2xl border border-amber-500/40 bg-amber-50/70 p-6 text-amber-900 dark:border-amber-500/30 dark:bg-amber-950/30 dark:text-amber-200;
+  }
+
   .kindora-button-ghost {
     @apply border-kindora-200 text-kindora-700 hover:bg-kindora-50 dark:border-kindora-700 dark:text-kindora-100 dark:hover:bg-kindora-800 inline-flex items-center justify-center rounded-xl border px-4 py-2 text-sm font-medium transition;
   }

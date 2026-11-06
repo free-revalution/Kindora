@@ -9,19 +9,25 @@
  */
 
 import type { LLMConfig, LLMProvider, LLMProviderKind } from '@kindora/llm';
-import { createProvider } from '@kindora/llm';
+import { createProvider, isLLMError, type LLMErrorCode } from '@kindora/llm';
 import {
   BrowserLocalStorageEncryptedSecretStore,
-  BrowserLocalStorageSettingsStore,
   type SecretStore,
   type SettingsStore,
 } from '@kindora/storage';
 import { TauriSecretStore, isTauriSecretStoreAvailable } from './tauri-secret-store';
+import { runtimeSettingsStore } from './runtime-stores';
 
 const SETTINGS_KEY = 'llmConfig';
 const secretKeyFor = (provider: LLMProviderKind): string => `llm:${provider}:api-key`;
 
-const _settings: SettingsStore = new BrowserLocalStorageSettingsStore();
+/**
+ * Phase D / D1 — the LLM configuration lives in the local business
+ * database in the desktop app, and in localStorage in the browser dev
+ * server. The API key is *not* part of this: it stays in the OS keychain
+ * (or the browser-local encrypted store).
+ */
+const _settings: SettingsStore = runtimeSettingsStore();
 
 // V0.1: prefer the TauriSecretStore (OS keychain) when running in a
 // Tauri webview. Fall back to the browser-local encrypted store for
@@ -218,6 +224,47 @@ export async function loadLlmStatus(): Promise<LlmStatus> {
   return { ready: true };
 }
 
+/**
+ * How long the "Test Connection" button waits before giving up.
+ *
+ * The package default is 60 s, which is right for a real analysis call but
+ * far too long for a button the user is staring at. 20 s is long enough for
+ * a healthy provider and short enough that a hung one does not feel broken.
+ */
+const TEST_CONNECTION_TIMEOUT_MS = 20_000;
+
+/**
+ * A failure the UI can act on.
+ *
+ * The provider layer already produces one error model (`LLMError` with a
+ * `code`); this hands that model to the view layer, which turns the code
+ * into a sentence in the user's language.
+ */
+export interface LlmFailure {
+  /** The unified error code, when the failure came from the LLM layer. */
+  readonly code?: LLMErrorCode;
+  /** The provider's own wording. Never contains the API key. */
+  readonly message: string;
+}
+
+/**
+ * Describe a failed LLM call.
+ *
+ * The `code` is the part a view should branch on; `message` is the
+ * provider's own text, for the technical detail. Neither ever contains the
+ * API key — the provider layer redacts it before the error is built
+ * (Phase E1).
+ */
+export function describeLlmFailure(err: unknown): LlmFailure {
+  if (isLLMError(err)) {
+    return { code: err.code, message: err.message };
+  }
+  if (err instanceof Error) {
+    return { message: err.message };
+  }
+  return { message: String(err) };
+}
+
 export async function testConnection(cfg: StoredLLMConfig, apiKey?: string): Promise<string> {
   const provider = createProvider({
     ...cfg,
@@ -231,7 +278,14 @@ export async function testConnection(cfg: StoredLLMConfig, apiKey?: string): Pro
       },
       { role: 'user', content: 'ping' },
     ],
-    { maxTokens: 8, temperature: 0 },
+    {
+      maxTokens: 8,
+      temperature: 0,
+      timeoutMs: TEST_CONNECTION_TIMEOUT_MS,
+      // A connectivity test should report the *first* real error, not hide
+      // it behind two silent retries.
+      maxRetries: 0,
+    },
   );
   return reply.content;
 }

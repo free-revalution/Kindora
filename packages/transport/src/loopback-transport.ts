@@ -12,13 +12,42 @@
  *
  * See 开发手册.md § 18 Mode A, § 19.
  */
-import { decodeEnvelope, encodeEnvelope, type KsaMessage } from '@kindora/protocol';
+import { canonicalize, decodeEnvelope, encodeEnvelope, type KsaMessage } from '@kindora/protocol';
 import type { CloseHandler, MessageHandler, PeerInfo, Transport } from './index';
+import {
+  isSessionFrame,
+  openFrame,
+  sealEnvelope,
+  type SessionCipher,
+  type SessionFrame,
+} from './session-crypto';
+
+/**
+ * Phase A / A3 — how many encrypted frames may wait for the session
+ * cipher before the oldest ones are dropped.
+ *
+ * The cipher is installed asynchronously (the session has to verify
+ * the peer's `hello` first), but the transport decodes frames as they
+ * arrive. A frame that lands in that window cannot be decrypted yet.
+ * We queue it rather than drop it — dropping would silently lose the
+ * peer's first encrypted message. The cap keeps a peer that never
+ * completes the handshake from growing the queue without bound.
+ */
+const MAX_PENDING_ENCRYPTED_FRAMES = 32;
 
 interface Endpoint {
   readonly id: string;
   readonly messageHandlers: Set<MessageHandler>;
   connected: boolean;
+  /**
+   * Phase A / A3 — the owning transport's frame decoder.
+   *
+   * The hub deliberately does **not** decode: it forwards the raw wire
+   * string and lets the receiving transport decrypt and parse it. That
+   * keeps the decryption key inside the transport that owns it and
+   * keeps the hub a pure bus.
+   */
+  decodeFrame: (raw: string) => Promise<KsaMessage | null>;
 }
 
 /**
@@ -34,7 +63,15 @@ export class LoopbackHub {
   private readonly rooms = new Map<string, Set<string>>();
 
   register(id: string): Endpoint {
-    const ep: Endpoint = { id, messageHandlers: new Set(), connected: false };
+    const ep: Endpoint = {
+      id,
+      messageHandlers: new Set(),
+      connected: false,
+      // Replaced by the owning transport as soon as it constructs
+      // itself. The default drops the frame rather than throwing, so a
+      // hub that is used without a transport cannot crash.
+      decodeFrame: async () => null,
+    };
     this.endpoints.set(id, ep);
     return ep;
   }
@@ -73,17 +110,23 @@ export class LoopbackHub {
     return null;
   }
 
-  /** Deliver a serialised envelope from one endpoint to its paired peer. */
-  deliver(fromId: string, rawJson: string): boolean {
+  /**
+   * Deliver a raw wire frame from one endpoint to its paired peer.
+   *
+   * The hub forwards the raw string; the receiving endpoint's own
+   * transport decrypts and parses it (Phase A / A3).
+   */
+  async deliver(fromId: string, rawJson: string): Promise<boolean> {
     const from = this.endpoints.get(fromId);
     if (!from || !from.connected) return false;
     // The hub does not know the peer id — broadcast to every other
     // connected endpoint. (For the V0.1 use case, a hub has at most
     // two connected endpoints.)
-    const decoded = decodeEnvelope(rawJson) as KsaMessage;
     for (const [id, ep] of this.endpoints) {
       if (id === fromId) continue;
       if (!ep.connected) continue;
+      const decoded = await ep.decodeFrame(rawJson);
+      if (!decoded) continue;
       for (const h of ep.messageHandlers) h(decoded);
     }
     return true;
@@ -107,9 +150,17 @@ export interface LoopbackTransportOptions {
  */
 export class LoopbackTransport implements Transport {
   private readonly endpoint: Endpoint;
+  /** Phase A / A3 — the session cipher, once the session key is agreed. */
+  private cipher: SessionCipher | null = null;
+  /**
+   * Phase A / A3 — encrypted frames that arrived before the cipher
+   * was installed. See `MAX_PENDING_ENCRYPTED_FRAMES`.
+   */
+  private pendingFrames: SessionFrame[] = [];
 
   constructor(private readonly options: LoopbackTransportOptions) {
     this.endpoint = options.hub.register(options.endpointId);
+    this.endpoint.decodeFrame = (raw: string) => this.decodeWire(raw);
   }
 
   async connect(peer: PeerInfo): Promise<void> {
@@ -130,10 +181,86 @@ export class LoopbackTransport implements Transport {
     if (!this.endpoint.connected) {
       throw new Error('LoopbackTransport: send before connect.');
     }
-    const ok = this.options.hub.deliver(this.endpoint.id, encodeEnvelope(message));
+    // Phase A / A3: with a session cipher installed the payload is
+    // encrypted; the header and the signature stay in the clear.
+    const wire = this.cipher
+      ? canonicalize(await sealEnvelope(message, this.cipher))
+      : encodeEnvelope(message);
+    const ok = await this.options.hub.deliver(this.endpoint.id, wire);
     if (!ok) {
       throw new Error('LoopbackTransport: no peer to deliver to.');
     }
+  }
+
+  /**
+   * Phase A / A3 — install (or clear) the session cipher.
+   *
+   * Installing a cipher also flushes any encrypted frame that arrived
+   * while the handshake was still in flight.
+   */
+  setSessionCipher(cipher: SessionCipher | null): void {
+    this.cipher = cipher;
+    if (cipher) {
+      void this.flushPendingFrames();
+    }
+  }
+
+  /**
+   * Phase A / A3 — decrypt the frames that were waiting for the cipher.
+   *
+   * A frame that fails to authenticate is dropped: it is either
+   * corrupt or was tampered with on the wire.
+   */
+  private async flushPendingFrames(): Promise<void> {
+    if (this.pendingFrames.length === 0) return;
+    const cipher = this.cipher;
+    if (!cipher) return;
+    const pending = this.pendingFrames;
+    this.pendingFrames = [];
+    for (const frame of pending) {
+      let decoded: KsaMessage | null = null;
+      try {
+        decoded = await openFrame(frame, cipher);
+      } catch (err) {
+        console.warn('[loopback] a queued session frame failed to decrypt:', err);
+      }
+      if (!decoded) continue;
+      for (const h of this.endpoint.messageHandlers) h(decoded);
+    }
+  }
+
+  /**
+   * Phase A / A3 — turn a raw wire frame into an envelope.
+   *
+   * An encrypted frame is decrypted with the session cipher; a plain
+   * envelope is parsed as before. A frame that arrives without a
+   * cipher is **queued**, not dropped: the cipher is installed
+   * asynchronously once the peer's `hello` has been verified, and a
+   * frame that lands in that window is legitimate.
+   */
+  private async decodeWire(raw: string): Promise<KsaMessage | null> {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      return null;
+    }
+    if (isSessionFrame(parsed)) {
+      if (!this.cipher) {
+        if (this.pendingFrames.length >= MAX_PENDING_ENCRYPTED_FRAMES) {
+          this.pendingFrames.shift();
+        }
+        this.pendingFrames.push(parsed);
+        return null;
+      }
+      try {
+        return await openFrame(parsed, this.cipher);
+      } catch (err) {
+        console.warn('[loopback] could not decrypt an inbound session frame:', err);
+        return null;
+      }
+    }
+    return decodeEnvelope(raw);
   }
 
   onMessage(handler: MessageHandler): () => void {
@@ -165,7 +292,9 @@ export class LoopbackTransport implements Transport {
       queueMicrotask(() => {
         if (this.closedByPeer) {
           try {
-            handler();
+            // The loopback path only simulates a plain peer drop —
+            // there is no wire to violate a limit on.
+            handler('peer-closed');
           } catch {
             // ignore — mirroring LanTransport's per-handler try/catch
           }
@@ -191,7 +320,7 @@ export class LoopbackTransport implements Transport {
     const handlers = Array.from(this.closeHandlers);
     for (const h of handlers) {
       try {
-        h();
+        h('peer-closed');
       } catch {
         // ignore — mirroring LanTransport's per-handler try/catch
       }
@@ -204,6 +333,10 @@ export class LoopbackTransport implements Transport {
     // Local disconnect does NOT fire onClose (mirrors LanTransport).
     this.closeHandlers.clear();
     this.options.hub.unregister(this.endpoint.id);
+    // Phase A / A3: tear the session key down with the link.
+    this.cipher?.destroy();
+    this.cipher = null;
+    this.pendingFrames = [];
   }
 
   /** Test-only: has this endpoint been paired? */

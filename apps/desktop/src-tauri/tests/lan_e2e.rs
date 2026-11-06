@@ -110,7 +110,10 @@ async fn host_linked_flips_true_after_joiner_connects() {
         .await
         .expect("host_start");
     assert_eq!(info.code, code);
-    assert!(!state.host_linked().await, "should not be linked before peer");
+    assert!(
+        !state.host_linked().await,
+        "should not be linked before peer"
+    );
 
     // Spawn a joiner that discovers and dials.
     let join_state = state.clone();
@@ -147,15 +150,25 @@ async fn bidirectional_envelope_exchange() {
         .expect("host_start");
 
     // Joiner
-    let peers = state.join_discover(code.clone(), 3000).await.expect("discover");
+    let peers = state
+        .join_discover(code.clone(), 3000)
+        .await
+        .expect("discover");
     let peer = peers.first().expect("at least one peer").clone();
-    state.join_connect(peer.ip.clone(), peer.port).await.expect("join_connect");
+    state
+        .join_connect(peer.ip.clone(), peer.port)
+        .await
+        .expect("join_connect");
 
     wait_linked(&state, Duration::from_secs(5)).await;
 
     // Host sends an envelope.
-    let host_msg = r#"{"type":"hello","sender":"agent-host","payload":{"displayName":"HostDisplay"}}"#;
-    state.host_send(host_msg.to_string()).await.expect("host_send");
+    let host_msg =
+        r#"{"type":"hello","sender":"agent-host","payload":{"displayName":"HostDisplay"}}"#;
+    state
+        .host_send(host_msg.to_string())
+        .await
+        .expect("host_send");
 
     // Joiner should receive it.
     let got_joiner = wait_envelope(&state, HostOrJoin::Join, Duration::from_secs(2)).await;
@@ -166,8 +179,12 @@ async fn bidirectional_envelope_exchange() {
     );
 
     // Joiner sends an envelope.
-    let joiner_msg = r#"{"type":"hello","sender":"agent-joiner","payload":{"displayName":"JoinerDisplay"}}"#;
-    state.join_send(joiner_msg.to_string()).await.expect("join_send");
+    let joiner_msg =
+        r#"{"type":"hello","sender":"agent-joiner","payload":{"displayName":"JoinerDisplay"}}"#;
+    state
+        .join_send(joiner_msg.to_string())
+        .await
+        .expect("join_send");
 
     // Host should receive it.
     let got_host = wait_envelope(&state, HostOrJoin::Host, Duration::from_secs(2)).await;
@@ -377,7 +394,11 @@ async fn discover_filters_by_code() {
         .join_discover("CODEAA".into(), 1500)
         .await
         .expect("discover A");
-    assert_eq!(got_a.len(), 1, "discover for CODEAA should match exactly one host");
+    assert_eq!(
+        got_a.len(),
+        1,
+        "discover for CODEAA should match exactly one host"
+    );
     assert_eq!(got_a[0].agent_id, "agent-a");
 
     // Joiner looking for "CODEBB" should only see host B.
@@ -385,7 +406,11 @@ async fn discover_filters_by_code() {
         .join_discover("CODEBB".into(), 1500)
         .await
         .expect("discover B");
-    assert_eq!(got_b.len(), 1, "discover for CODEBB should match exactly one host");
+    assert_eq!(
+        got_b.len(),
+        1,
+        "discover for CODEBB should match exactly one host"
+    );
     assert_eq!(got_b[0].agent_id, "agent-b");
 
     // Joiner looking for an unknown code should see nothing.
@@ -393,7 +418,10 @@ async fn discover_filters_by_code() {
         .join_discover("ZZZZZZ".into(), 800)
         .await
         .expect("discover none");
-    assert!(got_none.is_empty(), "discover for unknown code should be empty");
+    assert!(
+        got_none.is_empty(),
+        "discover for unknown code should be empty"
+    );
 
     state_a.host_stop().await.expect("stop a");
     state_b.host_stop().await.expect("stop b");
@@ -409,7 +437,10 @@ async fn multiple_envelopes_preserve_order() {
         .await
         .expect("host_start");
 
-    let peers = state.join_discover(code.clone(), 3000).await.expect("discover");
+    let peers = state
+        .join_discover(code.clone(), 3000)
+        .await
+        .expect("discover");
     state
         .join_connect(peers[0].ip.clone(), peers[0].port)
         .await
@@ -567,7 +598,11 @@ async fn host_status_reflects_code() {
         .host_start("STAT00".into(), "agent-host".into(), "H".into())
         .await
         .expect("host_start");
-    let status = state.host_status().await.expect("host_status").expect("some");
+    let status = state
+        .host_status()
+        .await
+        .expect("host_status")
+        .expect("some");
     assert_eq!(status.code, info.code);
     assert_eq!(status.tcp_port, info.tcp_port);
     state.host_stop().await.expect("host_stop");

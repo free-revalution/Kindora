@@ -168,12 +168,18 @@ fn is_uuid_v4(s: &str) -> bool {
     if parts.len() != 5 {
         return false;
     }
-    if parts[0].len() != 8 || parts[1].len() != 4 || parts[2].len() != 4
-        || parts[3].len() != 4 || parts[4].len() != 12
+    if parts[0].len() != 8
+        || parts[1].len() != 4
+        || parts[2].len() != 4
+        || parts[3].len() != 4
+        || parts[4].len() != 12
     {
         return false;
     }
-    let all_hex = format!("{}{}{}{}{}", parts[0], parts[1], parts[2], parts[3], parts[4]);
+    let all_hex = format!(
+        "{}{}{}{}{}",
+        parts[0], parts[1], parts[2], parts[3], parts[4]
+    );
     if !all_hex.chars().all(|c| c.is_ascii_hexdigit()) {
         return false;
     }

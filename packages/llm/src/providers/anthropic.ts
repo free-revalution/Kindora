@@ -5,12 +5,17 @@
  * Required headers: x-api-key, anthropic-version, content-type.
  * Note: the system prompt is a top-level field, not a message.
  *
- * See 开发手册.md § 10.
+ * The transport is shared with every other provider (`../http`): one error
+ * model, one timeout policy, one cancellation rule, one retry policy.
+ *
+ * See 开发手册.md § 10 and `docs/修复.md` § 八 E1.
  */
 
 import type { ChatMessage, LLMOptions, LLMProvider, LLMResponse } from '../index';
+import { LLMError } from '../errors';
+import { sendJson, resolvePolicy, type LLMRequestOptions } from '../http';
 
-export interface AnthropicConfig {
+export interface AnthropicConfig extends LLMRequestOptions {
   /** e.g. "https://api.anthropic.com". */
   readonly baseUrl: string;
   /** e.g. "claude-sonnet-4-5". */
@@ -45,7 +50,10 @@ export class AnthropicProvider implements LLMProvider {
       .map((m) => ({ role: m.role, content: m.content }));
 
     if (conversation.length === 0) {
-      throw new Error('Anthropic requires at least one user/assistant message.');
+      throw new LLMError(
+        'PROVIDER_ERROR',
+        'Anthropic requires at least one user/assistant message.',
+      );
     }
 
     const url = joinUrl(this.config.baseUrl, 'v1/messages');
@@ -58,22 +66,25 @@ export class AnthropicProvider implements LLMProvider {
       ...(options.stop ? { stop_sequences: [...options.stop] } : {}),
     };
 
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': this.config.apiKey,
-        'anthropic-version': ANTHROPIC_VERSION,
-      },
-      body: JSON.stringify(body),
-      signal: options.signal,
+    const policy = resolvePolicy(this.config, {
+      timeoutMs: options.timeoutMs,
+      maxRetries: options.maxRetries,
     });
 
-    const payload = (await res.json().catch(() => ({}))) as AnthropicResponse;
-
-    if (!res.ok) {
-      throw mapHttpError(res.status, payload?.error?.message ?? res.statusText);
-    }
+    const { payload } = await sendJson<AnthropicResponse>(
+      {
+        url,
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': this.config.apiKey,
+          'anthropic-version': ANTHROPIC_VERSION,
+        },
+        body: JSON.stringify(body),
+        signal: options.signal,
+        secrets: [this.config.apiKey],
+      },
+      policy,
+    );
 
     const text = (payload.content ?? [])
       .filter((block) => block.type === 'text' || block.text !== undefined)
@@ -81,7 +92,7 @@ export class AnthropicProvider implements LLMProvider {
       .join('');
 
     if (!text) {
-      throw new Error('Anthropic response had no text content.');
+      throw new LLMError('INVALID_RESPONSE', 'Anthropic response had no text content.');
     }
 
     return Object.freeze({
@@ -100,14 +111,4 @@ export class AnthropicProvider implements LLMProvider {
 function joinUrl(base: string, path: string): string {
   const trimmed = base.replace(/\/+$/, '');
   return `${trimmed}/${path.replace(/^\/+/, '')}`;
-}
-
-function mapHttpError(status: number, fallbackMessage: string): Error {
-  if (status === 401) return new Error(`Invalid API key (401): ${fallbackMessage}`);
-  if (status === 404)
-    return new Error(`Model not found or wrong base URL (404): ${fallbackMessage}`);
-  if (status === 429) return new Error(`Rate limit exceeded (429): ${fallbackMessage}`);
-  if (status === 529) return new Error(`Anthropic overloaded (529): ${fallbackMessage}`);
-  if (status >= 500) return new Error(`Server error (${status}): ${fallbackMessage}`);
-  return new Error(`LLM request failed (${status}): ${fallbackMessage}`);
 }

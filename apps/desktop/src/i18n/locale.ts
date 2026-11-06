@@ -11,9 +11,15 @@
  * `t(key)`, and the Settings picker renders `SUPPORTED_LOCALES` directly.
  */
 
-import { BrowserLocalStorageSettingsStore } from '@kindora/storage';
-import { en, type Dictionary, type TranslationKey, type TranslationParams } from './dictionaries/en';
+import {
+  en,
+  type Dictionary,
+  type TranslationKey,
+  type TranslationParams,
+} from './dictionaries/en';
 import { zh } from './dictionaries/zh';
+import { ensureLegacyMigration } from '../lib/database';
+import { runtimeSettingsStore } from '../lib/runtime-stores';
 
 export type { Dictionary, TranslationKey, TranslationParams };
 
@@ -70,7 +76,11 @@ export function isLocale(value: unknown): value is Locale {
 }
 
 const LOCALE_KEY = 'uiLocale';
-const settings = new BrowserLocalStorageSettingsStore();
+/**
+ * Phase D / D1 — the locale lives in the local business database in
+ * the desktop app, and in localStorage in the browser dev server.
+ */
+const settings = runtimeSettingsStore();
 
 /**
  * Read the persisted locale.
@@ -78,13 +88,19 @@ const settings = new BrowserLocalStorageSettingsStore();
  * Returns `null` when nothing is stored (first run) or when the stored value is
  * not a locale we still ship — a user who had `ja` selected and then ran a build
  * without it falls back to the default rather than seeing raw keys.
+ *
+ * Phase D / D1 — the legacy migration runs first, so a locale that an
+ * older version kept in localStorage is found in the database and the
+ * user's choice does not look like it was lost.
  */
 export async function loadLocale(): Promise<Locale | null> {
   try {
+    await ensureLegacyMigration();
     const stored = await settings.get<unknown>(LOCALE_KEY);
     return isLocale(stored) ? stored : null;
   } catch {
-    // No localStorage (some embedded runtimes). Not worth failing startup over.
+    // No localStorage (some embedded runtimes), or the database could
+    // not be opened. Not worth failing startup over.
     return null;
   }
 }
@@ -109,11 +125,7 @@ const PLACEHOLDER = /\{(\w+)\}/g;
  * a much worse failure than visible English, so the chain is worth the three
  * lines.
  */
-export function translate(
-  locale: Locale,
-  key: TranslationKey,
-  params?: TranslationParams,
-): string {
+export function translate(locale: Locale, key: TranslationKey, params?: TranslationParams): string {
   const template = LOCALES[locale].dictionary[key] ?? en[key] ?? key;
   if (!params) return template;
   return template.replace(PLACEHOLDER, (match, name: string) => {

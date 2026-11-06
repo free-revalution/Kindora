@@ -21,22 +21,22 @@ them will be discussed rather than merged.
 - **Privacy First.** Exchange only the minimum needed for matching, and only
   what the user's boundaries allow.
 - **MVP First.** Do not add features that do not help validate the core
-  hypothesis: *can personal AI agents help people discover meaningful human
-  connections?*
+  hypothesis: _can personal AI agents help people discover meaningful human
+  connections?_
 
 ---
 
 ## Ways to contribute
 
-| If you want to… | Start here |
-| --- | --- |
-| Report a bug | [Bug report template](.github/ISSUE_TEMPLATE/bug_report.yml) |
-| Propose a feature | [Feature request template](.github/ISSUE_TEMPLATE/feature_request.yml) |
-| Propose an architecture change | [Technical proposal template](.github/ISSUE_TEMPLATE/technical_proposal.yml) |
-| Discuss direction | [GitHub Discussions](https://github.com/free-revalution/Kindora/discussions) |
-| Fix a typo or clarify the docs | Edit the file and open a PR |
-| Add a language | See [Adding a language](#adding-a-language) below |
-| Write code | Claim a [`good first issue`](https://github.com/free-revalution/Kindora/labels/good%20first%20issue) |
+| If you want to…                | Start here                                                                                           |
+| ------------------------------ | ---------------------------------------------------------------------------------------------------- |
+| Report a bug                   | [Bug report template](.github/ISSUE_TEMPLATE/bug_report.yml)                                         |
+| Propose a feature              | [Feature request template](.github/ISSUE_TEMPLATE/feature_request.yml)                               |
+| Propose an architecture change | [Technical proposal template](.github/ISSUE_TEMPLATE/technical_proposal.yml)                         |
+| Discuss direction              | [GitHub Discussions](https://github.com/free-revalution/Kindora/discussions)                         |
+| Fix a typo or clarify the docs | Edit the file and open a PR                                                                          |
+| Add a language                 | See [Adding a language](#adding-a-language) below                                                    |
+| Write code                     | Claim a [`good first issue`](https://github.com/free-revalution/Kindora/labels/good%20first%20issue) |
 
 A well-explained bug report is as valuable as a patch. If you can describe the
 expected result, the actual result, and the exact steps to reproduce, you have
@@ -48,11 +48,11 @@ already done most of the work.
 
 ### Prerequisites
 
-| Tool | Version | Notes |
-| --- | --- | --- |
-| Node.js | ≥ 20 | from the root `package.json` `engines` |
-| pnpm | 10 | `packageManager: pnpm@10.32.1` |
-| Rust | **stable** | pinned by `rust-toolchain.toml` in the repo root |
+| Tool    | Version    | Notes                                            |
+| ------- | ---------- | ------------------------------------------------ |
+| Node.js | ≥ 20       | from the root `package.json` `engines`           |
+| pnpm    | 10         | `packageManager: pnpm@10.32.1`                   |
+| Rust    | **stable** | pinned by `rust-toolchain.toml` in the repo root |
 
 Linux additionally needs `libwebkit2gtk-4.1-dev`, `libgtk-3-dev`,
 `librsvg2-dev`, `patchelf`, `build-essential`, `libssl-dev`. On macOS install
@@ -73,7 +73,7 @@ pnpm -C apps/desktop tauri:dev
 ```
 
 > Run this **from the repository root**. `pnpm dev` at the root only starts a
-> Vite dev server (`127.0.0.1:1420`) and does *not* open a desktop window.
+> Vite dev server (`127.0.0.1:1420`) and does _not_ open a desktop window.
 > Running `pnpm -C apps/desktop tauri:dev` from inside `apps/desktop` fails
 > with `ENOENT ... /apps/desktop/apps/desktop`.
 
@@ -134,9 +134,9 @@ export it from `src/index.ts` — a consumer imports the TypeScript directly.
    Out-of-scope ideas are welcome as a
    [technical proposal](.github/ISSUE_TEMPLATE/technical_proposal.yml) — they
    are just not welcome as a patch.
-6. **Follow the existing style.** Prettier and ESLint own formatting:
+5. **Follow the existing style.** Prettier and ESLint own formatting:
    `pnpm format` rewrites, `pnpm format:check` verifies.
-7. **Never commit an API key, a `.env` file, a real profile, or a log that
+6. **Never commit an API key, a `.env` file, a real profile, or a log that
    contains one.** The CI will not catch this for you.
 
 ### Commit messages

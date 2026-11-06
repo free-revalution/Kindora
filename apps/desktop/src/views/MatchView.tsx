@@ -20,7 +20,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type { MatchOutcome } from '@kindora/matching';
 import { summariseAnalysis } from '@kindora/matching';
-import { COMPATIBILITY_SIGNAL_KEYS, useTranslate } from '../i18n';
+import { COMPATIBILITY_SIGNAL_KEYS, useTranslate, type TranslationKey } from '../i18n';
 
 export type MatchPhase = 'connecting' | 'exchanging' | 'analysing' | 'done' | 'error';
 
@@ -40,12 +40,10 @@ export interface MatchViewProps {
 export function MatchView({ title, phase, outcome, error, onDisconnect }: MatchViewProps) {
   const t = useTranslate();
   if (phase === 'error') {
-    return (
-      <ErrorView message={error ?? t('match.errorFallback')} onDisconnect={onDisconnect} />
-    );
+    return <ErrorView message={error ?? t('match.errorFallback')} onDisconnect={onDisconnect} />;
   }
   if (phase !== 'done' || !outcome) {
-    return <ProgressView phase={phase} onDisconnect={onDisconnect} />;
+    return <ProgressView message={progressMessage(t, phase)} onDisconnect={onDisconnect} />;
   }
 
   const local = summariseAnalysis(outcome.localAnalysis);
@@ -154,7 +152,9 @@ function SignalCard({
       <p className="text-kindora-500 dark:text-kindora-400 text-xs uppercase tracking-wide">
         {label}
       </p>
-      <p className={`inline-flex w-fit items-center gap-1 rounded-full border px-3 py-1 text-sm ${toneClass}`}>
+      <p
+        className={`inline-flex w-fit items-center gap-1 rounded-full border px-3 py-1 text-sm ${toneClass}`}
+      >
         {signal}
       </p>
     </section>
@@ -184,16 +184,33 @@ function ChipList({ items }: { items: readonly string[] }) {
   );
 }
 
-function ProgressView({ phase, onDisconnect }: { phase: MatchPhase; onDisconnect: () => void }) {
+/**
+ * The one-line progress message for a phase.
+ *
+ * Extracted so the Phase B "identify" screen can reuse the same
+ * progress/error shell as the match screen without duplicating it.
+ */
+export function progressMessage(t: (key: TranslationKey) => string, phase: MatchPhase): string {
+  if (phase === 'connecting') return t('match.progressConnecting');
+  if (phase === 'exchanging') return t('match.progressExchanging');
+  if (phase === 'analysing') return t('match.progressAnalysing');
+  return t('match.progressWorking');
+}
+
+/**
+ * The "still working" shell.
+ *
+ * Exported so the Phase B identify screen — which runs between the
+ * pairing and the consent — can reuse it verbatim.
+ */
+export function ProgressView({
+  message,
+  onDisconnect,
+}: {
+  message: string;
+  onDisconnect: () => void;
+}) {
   const t = useTranslate();
-  const message =
-    phase === 'connecting'
-      ? t('match.progressConnecting')
-      : phase === 'exchanging'
-        ? t('match.progressExchanging')
-        : phase === 'analysing'
-          ? t('match.progressAnalysing')
-          : t('match.progressWorking');
   return (
     <main className="mx-auto flex w-full max-w-2xl flex-col items-center gap-6 px-6 py-20">
       <p className="text-kindora-500 dark:text-kindora-400 text-sm">{message}</p>
@@ -208,12 +225,21 @@ function ProgressView({ phase, onDisconnect }: { phase: MatchPhase; onDisconnect
   );
 }
 
-function ErrorView({ message, onDisconnect }: { message: string; onDisconnect: () => void }) {
+/**
+ * The "that did not work" shell.
+ */
+export function ErrorView({
+  message,
+  onDisconnect,
+}: {
+  message: string;
+  onDisconnect: () => void;
+}) {
   const t = useTranslate();
   return (
     <main className="mx-auto flex w-full max-w-2xl flex-col gap-4 px-6 py-20">
       <section className="kindora-card flex flex-col gap-3">
-        <h2 className="text-rose-600 dark:text-rose-400 text-xs uppercase tracking-wide">
+        <h2 className="text-xs uppercase tracking-wide text-rose-600 dark:text-rose-400">
           {t('common.error')}
         </h2>
         <p className="text-sm leading-relaxed">{message}</p>

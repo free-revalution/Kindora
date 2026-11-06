@@ -54,13 +54,33 @@ describe('@kindora/protocol', () => {
     expect([...CONVERSATION_STYLES].sort()).toEqual([...expected].sort());
   });
 
-  it('freezes default boundaries to default-true only for agent conversation (开发手册.md § 9)', () => {
+  it('freezes the default boundaries to the minimal-necessary set (Phase B / B1)', () => {
+    // Phase B / B1 changed the defaults. They used to be the KSA 0.1
+    // five: `allowAgentConversation` on and everything else off. The
+    // five new field-level gates did not exist then, and
+    // `allowCurrentActivity` was on — which contradicted "最小必要授权".
+    //
+    // The rule now (the user's ruling): the **behavioural** permissions
+    // keep the KSA 0.1 shape — only `allowAgentConversation` is on.
+    // The **field-level** gates are "interests on, the rest off", except
+    // for `allowSocialIntent` / `allowConversationStyle`, which stay on
+    // so the consent screen has something to show.
+    //
+    // This assertion is now *stronger* than the one it replaces: it pins
+    // all ten keys, not five.
     expect(DEFAULT_SOCIAL_BOUNDARIES).toEqual({
+      // behavioural
       allowAgentConversation: true,
       allowContactExchange: false,
       allowOfflineMeeting: false,
       allowProjectDetails: false,
-      allowCurrentActivity: true,
+      // field-level
+      allowCurrentActivity: false,
+      allowBio: false,
+      allowInterests: true,
+      allowAvatar: false,
+      allowSocialIntent: true,
+      allowConversationStyle: true,
     });
     expect(Object.isFrozen(DEFAULT_SOCIAL_BOUNDARIES)).toBe(true);
   });
@@ -70,7 +90,13 @@ describe('@kindora/protocol', () => {
     expect(DEFAULT_AGENT_CAPABILITIES.supportsMatchAnalysis).toBe(true);
     expect(DEFAULT_AGENT_CAPABILITIES.supportsIcebreaker).toBe(true);
     expect(DEFAULT_AGENT_CAPABILITIES.supportsChatAssist).toBe(true);
-    expect(DEFAULT_AGENT_CAPABILITIES.supportsEncryption).toBe(true);
+    // Phase A / A4 — the old, ambiguous `supportsEncryption: true` is gone.
+    // An agent that has not computed its capabilities from a real runtime
+    // has no security capability at all.
+    expect(DEFAULT_AGENT_CAPABILITIES.supportsMessageSigning).toBe(false);
+    expect(DEFAULT_AGENT_CAPABILITIES.supportsSessionEncryption).toBe(false);
+    expect(DEFAULT_AGENT_CAPABILITIES.supportsTransportEncryption).toBe(false);
+    expect(DEFAULT_AGENT_CAPABILITIES.supportsWebRtc).toBe(false);
     expect(Object.isFrozen(DEFAULT_AGENT_CAPABILITIES)).toBe(true);
   });
 });

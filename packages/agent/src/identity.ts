@@ -22,14 +22,84 @@ export interface AgentIdentity {
 }
 
 /**
+ * What the *current runtime* can actually do.
+ *
+ * Phase A / A4: capabilities used to be a hard-coded object, which let
+ * the app advertise things it could not do — most importantly
+ * `supportsEncryption: true` while the LAN transport was plaintext
+ * TCP and no session key was ever negotiated. Every capability flag
+ * now has to be derived from the runtime that is actually in front of
+ * us.
+ */
+export interface RuntimeCapabilities {
+  /** `crypto.subtle` is available. */
+  readonly cryptoAvailable: boolean;
+  /** The long-term private key is reachable, so ES256 signatures can be produced. */
+  readonly signingReady: boolean;
+  /** ECDH + HKDF + AES-GCM are available, so an encrypted session can be negotiated. */
+  readonly sessionEncryptionReady: boolean;
+  /** The transport itself is protected by TLS. False in KSA 0.1. */
+  readonly transportEncryption: boolean;
+  /** A WebRTC DataChannel transport is available. False in KSA 0.1. */
+  readonly webRtc: boolean;
+}
+
+/**
+ * The capability flags an agent may set for itself.
+ *
+ * The four security flags are deliberately **not** in here: they are
+ * derived from the runtime (see `buildRuntimeCapabilities`) and cannot
+ * be overridden by a caller, because a caller that could flip them
+ * would be able to advertise a capability the agent does not have.
+ */
+export type CapabilityOverrides = Partial<
+  Omit<
+    AgentCapabilities,
+    | 'supportsMessageSigning'
+    | 'supportsSessionEncryption'
+    | 'supportsTransportEncryption'
+    | 'supportsWebRtc'
+  >
+>;
+
+/**
  * Build capabilities matching the V0.1 protocol.
  * See 开发手册.md § 15.
+ *
+ * The security flags default to `false`: an agent must opt in by
+ * describing the runtime it actually has.
  */
-export function buildCapabilities(overrides: Partial<AgentCapabilities> = {}): AgentCapabilities {
+export function buildCapabilities(overrides: CapabilityOverrides = {}): AgentCapabilities {
   return Object.freeze({
     ...DEFAULT_AGENT_CAPABILITIES,
     ...overrides,
     protocolVersion: overrides.protocolVersion ?? PROTOCOL_VERSION,
+  });
+}
+
+/**
+ * Build the capabilities of an agent from the runtime it is running in.
+ *
+ * Phase A / A4. The result is frozen and every security flag is a
+ * direct function of `runtime` — there is no way to end up advertising
+ * a capability the runtime does not have.
+ */
+export function buildRuntimeCapabilities(
+  runtime: RuntimeCapabilities,
+  overrides: CapabilityOverrides = {},
+): AgentCapabilities {
+  return Object.freeze({
+    protocolVersion: overrides.protocolVersion ?? PROTOCOL_VERSION,
+    supportsMatchAnalysis:
+      overrides.supportsMatchAnalysis ?? DEFAULT_AGENT_CAPABILITIES.supportsMatchAnalysis,
+    supportsIcebreaker:
+      overrides.supportsIcebreaker ?? DEFAULT_AGENT_CAPABILITIES.supportsIcebreaker,
+    supportsChatAssist:
+      overrides.supportsChatAssist ?? DEFAULT_AGENT_CAPABILITIES.supportsChatAssist,
+    supportsMessageSigning: runtime.cryptoAvailable && runtime.signingReady,
+    supportsSessionEncryption: runtime.cryptoAvailable && runtime.sessionEncryptionReady,
+    supportsTransportEncryption: runtime.transportEncryption,
+    supportsWebRtc: runtime.webRtc,
   });
 }
 

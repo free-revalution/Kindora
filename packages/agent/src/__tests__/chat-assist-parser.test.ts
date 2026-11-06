@@ -1,8 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import {
-  parseChatAssistReply,
-  MAX_CHAT_ASSIST_SUGGESTIONS,
-} from '../output-parser';
+import { parseChatAssistReply, MAX_CHAT_ASSIST_SUGGESTIONS } from '../output-parser';
 
 describe('@kindora/agent — parseChatAssistReply', () => {
   it('parses a well-formed JSON object with summary + suggestions', () => {
@@ -81,9 +78,7 @@ describe('@kindora/agent — parseChatAssistReply', () => {
   it('caps each text and rationale length', () => {
     const raw = JSON.stringify({
       summary: '',
-      suggestions: [
-        { kind: 'reply', text: 'x'.repeat(2000), rationale: 'y'.repeat(2000) },
-      ],
+      suggestions: [{ kind: 'reply', text: 'x'.repeat(2000), rationale: 'y'.repeat(2000) }],
     });
     const out = parseChatAssistReply(raw);
     const s = out.reply.suggestions[0];

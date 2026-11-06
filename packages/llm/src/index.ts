@@ -10,7 +10,11 @@
  * desktop Settings UI can offer a first-class preset (default baseUrl,
  * example models) instead of a generic "custom" entry.
  *
- * See 开发手册.md § 10–11.
+ * Phase E1: every provider now shares one error model, one timeout policy,
+ * one cancellation rule and one retry policy (`./http`), and throws
+ * `LLMError` (`./errors`) for every failure.
+ *
+ * See 开发手册.md § 10–11 and `docs/修复.md` § 八.
  */
 
 export interface ChatMessage {
@@ -23,6 +27,10 @@ export interface LLMOptions {
   maxTokens?: number;
   stop?: readonly string[];
   signal?: AbortSignal;
+  /** Deadline for this call, in milliseconds. Overrides the provider default. */
+  timeoutMs?: number;
+  /** Extra attempts after a retryable failure. Overrides the provider default. */
+  maxRetries?: number;
 }
 
 export interface LLMResponse {
@@ -47,6 +55,10 @@ export interface LLMConfig {
   readonly model: string;
   /** API key is required for cloud providers; stored only in SecretStore. */
   readonly apiKey?: string;
+  /** Deadline for one attempt, in milliseconds. Default 60000. */
+  readonly timeoutMs?: number;
+  /** Extra attempts after a retryable failure. Default 2. */
+  readonly maxRetries?: number;
 }
 
 export const LLM_PACKAGE_VERSION = '0.1.0';
@@ -76,6 +88,8 @@ export function createProvider(config: LLMConfig): LLMProvider {
         baseUrl,
         model: config.model,
         apiKey: config.apiKey,
+        timeoutMs: config.timeoutMs,
+        maxRetries: config.maxRetries,
       });
     }
     case 'anthropic': {
@@ -87,11 +101,18 @@ export function createProvider(config: LLMConfig): LLMProvider {
         baseUrl,
         model: config.model,
         apiKey: config.apiKey,
+        timeoutMs: config.timeoutMs,
+        maxRetries: config.maxRetries,
       });
     }
     case 'ollama': {
       const baseUrl = config.baseUrl ?? 'http://localhost:11434';
-      return new OllamaProvider({ baseUrl, model: config.model });
+      return new OllamaProvider({
+        baseUrl,
+        model: config.model,
+        timeoutMs: config.timeoutMs,
+        maxRetries: config.maxRetries,
+      });
     }
     case 'minimax': {
       const baseUrl = config.baseUrl ?? 'https://api.minimaxi.com/v1';
@@ -102,7 +123,37 @@ export function createProvider(config: LLMConfig): LLMProvider {
         baseUrl,
         model: config.model,
         apiKey: config.apiKey,
+        timeoutMs: config.timeoutMs,
+        maxRetries: config.maxRetries,
       });
     }
   }
 }
+
+/* ------------------------------------------------------------------ */
+/* The unified error model + transport policy (Phase E1)               */
+/* ------------------------------------------------------------------ */
+
+export {
+  LLMError,
+  isLLMError,
+  redactSecrets,
+  type LLMErrorCode,
+  type LLMErrorInit,
+} from './errors';
+
+export {
+  DEFAULT_MAX_RETRIES,
+  DEFAULT_REQUEST_POLICY,
+  DEFAULT_RETRY_BASE_DELAY_MS,
+  DEFAULT_RETRY_MAX_DELAY_MS,
+  DEFAULT_TIMEOUT_MS,
+  MAX_RETRY_AFTER_MS,
+  parseRetryAfter,
+  resolvePolicy,
+  sendJson,
+  type JsonRequest,
+  type JsonResponse,
+  type LLMRequestOptions,
+  type RequestPolicy,
+} from './http';

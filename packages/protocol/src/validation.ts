@@ -21,6 +21,7 @@
 import {
   COMPATIBILITY_SIGNALS,
   CONVERSATION_STYLES,
+  DEFAULT_SOCIAL_BOUNDARIES,
   MESSAGE_TYPES,
   PROTOCOL_NAME,
   PROTOCOL_VERSION,
@@ -30,6 +31,14 @@ import {
   type SocialProfile,
 } from './index';
 import type { KsaMessage } from './envelope';
+import {
+  ES256_SIGNATURE_BYTES,
+  SHA256_BYTES,
+  SIGNATURE_ALG,
+  SIGNING_SCHEME,
+  isBase64UrlOfLength,
+  type KsaSignature,
+} from './signature';
 import type {
   BlockPayload,
   ChatMessagePayload,
@@ -121,6 +130,27 @@ function requireBoolean(obj: Record<string, unknown>, field: string): boolean {
   return v;
 }
 
+/**
+ * Read a boolean that a peer may not have sent yet.
+ *
+ * Phase A / A4: the security capability flags were added after KSA 0.1
+ * shipped, so an older peer's `hello` simply does not carry them. A
+ * missing flag means "this peer does not have the capability" — never
+ * an error — which is what keeps the handshake forward compatible.
+ */
+function optionalBoolean(obj: Record<string, unknown>, field: string): boolean | undefined {
+  const v = obj[field];
+  if (v === undefined || v === null) return undefined;
+  if (typeof v !== 'boolean') {
+    throw new ProtocolValidationError(
+      field,
+      'not-boolean',
+      `${field} must be a boolean when present.`,
+    );
+  }
+  return v;
+}
+
 function requireArrayOfStrings(
   obj: Record<string, unknown>,
   field: string,
@@ -179,15 +209,27 @@ function requireEnum<T extends string>(
 /* ------------------------------------------------------------------ */
 
 function validateBoundaries(obj: Record<string, unknown>, path: string): SocialBoundaries {
+  // (path kept for future error-message localisation)
+  void path;
+  const d = DEFAULT_SOCIAL_BOUNDARIES;
   return {
     allowAgentConversation: requireBoolean(obj, 'allowAgentConversation'),
     allowContactExchange: requireBoolean(obj, 'allowContactExchange'),
     allowOfflineMeeting: requireBoolean(obj, 'allowOfflineMeeting'),
     allowProjectDetails: requireBoolean(obj, 'allowProjectDetails'),
     allowCurrentActivity: requireBoolean(obj, 'allowCurrentActivity'),
+    // Phase B: the field-level disclosure gates were added after KSA
+    // 0.1 shipped, so a peer that predates them simply does not carry
+    // them. A missing gate means "use the default" — never "allowed".
+    // The default is `false` for the sensitive fields (bio / avatar /
+    // currentActivities) and `true` for the ones the core flow needs.
+    allowBio: optionalBoolean(obj, 'allowBio') ?? d.allowBio,
+    allowInterests: optionalBoolean(obj, 'allowInterests') ?? d.allowInterests,
+    allowAvatar: optionalBoolean(obj, 'allowAvatar') ?? d.allowAvatar,
+    allowSocialIntent: optionalBoolean(obj, 'allowSocialIntent') ?? d.allowSocialIntent,
+    allowConversationStyle:
+      optionalBoolean(obj, 'allowConversationStyle') ?? d.allowConversationStyle,
   };
-  // (path kept for future error-message localisation)
-  void path;
 }
 
 function validateSocialProfile(obj: Record<string, unknown>, path: string): SocialProfile {
@@ -196,7 +238,14 @@ function validateSocialProfile(obj: Record<string, unknown>, path: string): Soci
   }
   const profile: SocialProfile = {
     nickname: requireString(obj, 'nickname', 64),
-    bio: requireString(obj, 'bio', 400),
+    // Phase B: `bio` may be empty (or absent). A profile whose fields
+    // the user did not authorise is a **redacted** profile, and a
+    // redacted profile must still be a legal profile — otherwise the
+    // privacy filter would produce envelopes the peer throws away.
+    // The "a bio is required" rule stays where it belongs: in the form
+    // validator (`validateProfile` in @kindora/agent), which governs
+    // the LOCAL profile, not the wire copy.
+    bio: optionalString(obj, 'bio', 400) ?? '',
     interests: requireArrayOfStrings(obj, 'interests', { maxCount: 16, maxItem: 80 }),
     currentActivities: requireArrayOfStrings(obj, 'currentActivities', {
       maxCount: 16,
@@ -216,20 +265,12 @@ function validateSocialProfile(obj: Record<string, unknown>, path: string): Soci
       `${path}.boundaries`,
     ),
   };
-  if (profile.socialIntent.length === 0) {
-    throw new ProtocolValidationError(
-      'socialIntent',
-      'empty',
-      `${path}.socialIntent must contain at least one valid intent.`,
-    );
-  }
-  if (profile.conversationStyle.length === 0) {
-    throw new ProtocolValidationError(
-      'conversationStyle',
-      'empty',
-      `${path}.conversationStyle must contain at least one valid style.`,
-    );
-  }
+  // Phase B: the "at least one intent / one style" rule was **removed**
+  // from the wire validator. It used to reject a redacted profile whose
+  // user had switched the corresponding disclosure gate off — which
+  // would have made the privacy filter break the protocol. It remains
+  // enforced for the LOCAL profile by `validateProfile`
+  // (@kindora/agent), so the user still cannot save an empty profile.
   return profile;
 }
 
@@ -237,6 +278,9 @@ function validateHelloPayload(payload: unknown): HelloPayload {
   if (!isObject(payload)) {
     throw new ProtocolValidationError('payload', 'not-object', 'hello payload must be an object.');
   }
+  const exchange = isObject(payload.sessionKeyExchange)
+    ? (payload.sessionKeyExchange as Record<string, unknown>)
+    : undefined;
   return {
     displayName: requireString(payload, 'displayName', 64),
     capabilities: validateCapabilities(
@@ -244,21 +288,42 @@ function validateHelloPayload(payload: unknown): HelloPayload {
       'payload.capabilities',
     ),
     status: optionalString(payload, 'status', 280),
+    // The identity public key travels in `hello` so the peer can verify
+    // this message's signature. Standard base64, SPKI DER.
+    publicKey: optionalString(payload, 'publicKey', 1024),
+    sessionKeyExchange: exchange
+      ? {
+          ephemeralPublicKey: requireString(exchange, 'ephemeralPublicKey', 1024),
+          keyId: requireString(exchange, 'keyId', 128),
+        }
+      : undefined,
   };
 }
 
+/**
+ * Validate the capability block.
+ *
+ * The three functional flags are mandatory. The four security flags
+ * (Phase A / A4) are optional and default to `false` so that a peer
+ * which predates them still parses — and so that "did not advertise it"
+ * can never be mistaken for "advertised it".
+ */
 function validateCapabilities(
   obj: Record<string, unknown>,
   path: string,
 ): HelloPayload['capabilities'] {
+  // (path kept for future error-message localisation)
+  void path;
   return {
     protocolVersion: requireString(obj, 'protocolVersion', 8),
     supportsMatchAnalysis: requireBoolean(obj, 'supportsMatchAnalysis'),
     supportsIcebreaker: requireBoolean(obj, 'supportsIcebreaker'),
     supportsChatAssist: requireBoolean(obj, 'supportsChatAssist'),
-    supportsEncryption: requireBoolean(obj, 'supportsEncryption'),
+    supportsMessageSigning: optionalBoolean(obj, 'supportsMessageSigning') ?? false,
+    supportsSessionEncryption: optionalBoolean(obj, 'supportsSessionEncryption') ?? false,
+    supportsTransportEncryption: optionalBoolean(obj, 'supportsTransportEncryption') ?? false,
+    supportsWebRtc: optionalBoolean(obj, 'supportsWebRtc') ?? false,
   };
-  void path;
 }
 
 function validateProfileExchangePayload(payload: unknown): ProfileExchangePayload {
@@ -416,11 +481,7 @@ function validateConsentRejectPayload(payload: unknown): ConsentRejectPayload {
 
 function validateBlockPayload(payload: unknown): BlockPayload {
   if (!isObject(payload)) {
-    throw new ProtocolValidationError(
-      'payload',
-      'not-object',
-      'block payload must be an object.',
-    );
+    throw new ProtocolValidationError('payload', 'not-object', 'block payload must be an object.');
   }
   return { reason: optionalString(payload, 'reason', 280) };
 }
@@ -507,6 +568,12 @@ export function validateEnvelope(value: unknown): KsaMessage {
   const validator = PAYLOAD_VALIDATORS[type];
   const payload = validator(value.payload);
 
+  // Phase A / A2: the signature is a top-level field and MUST survive
+  // validation — before this change the re-assembly below dropped every
+  // field it did not know about, which would have silently discarded
+  // the signature of every signed message.
+  const signature = validateSignature(value);
+
   // Re-assemble with the validated payload. Cast through `unknown`
   // because TS cannot prove the validator returned the exact right
   // variant — but every validator above enforces the contract.
@@ -518,7 +585,67 @@ export function validateEnvelope(value: unknown): KsaMessage {
     type,
     sender,
     payload,
+    ...(signature ? { signature } : {}),
   } as KsaMessage;
+}
+
+/**
+ * Validate the detached signature block (Phase A / A2).
+ *
+ * Returns `undefined` when the envelope carries no signature — a peer
+ * that predates signing still parses. The *presence* of a signature on
+ * a protected message is checked by the transport, not here: the
+ * validator only proves the block is well formed, never that it is
+ * correct.
+ */
+function validateSignature(obj: Record<string, unknown>): KsaSignature | undefined {
+  const raw = obj.signature;
+  if (raw === undefined || raw === null) return undefined;
+  if (!isObject(raw)) {
+    throw new ProtocolValidationError(
+      'signature',
+      'not-object',
+      'signature must be an object when present.',
+    );
+  }
+
+  const alg = requireString(raw, 'alg', 16);
+  if (alg !== SIGNATURE_ALG) {
+    throw new ProtocolValidationError(
+      'signature',
+      'unknown-alg',
+      `signature.alg must be "${SIGNATURE_ALG}" (got ${JSON.stringify(alg)}).`,
+    );
+  }
+
+  const signedFields = requireString(raw, 'signedFields', 32);
+  if (signedFields !== SIGNING_SCHEME) {
+    throw new ProtocolValidationError(
+      'signature',
+      'unknown-scheme',
+      `signature.signedFields must be "${SIGNING_SCHEME}" (got ${JSON.stringify(signedFields)}).`,
+    );
+  }
+
+  const keyId = requireString(raw, 'keyId', 128);
+  if (!isBase64UrlOfLength(keyId, SHA256_BYTES)) {
+    throw new ProtocolValidationError(
+      'signature',
+      'bad-key-id',
+      'signature.keyId must be base64url of a 32-byte SHA-256 digest.',
+    );
+  }
+
+  const value = requireString(raw, 'value', 256);
+  if (!isBase64UrlOfLength(value, ES256_SIGNATURE_BYTES)) {
+    throw new ProtocolValidationError(
+      'signature',
+      'bad-value',
+      'signature.value must be base64url of a 64-byte ES256 signature.',
+    );
+  }
+
+  return { alg, keyId, value, signedFields };
 }
 
 /**

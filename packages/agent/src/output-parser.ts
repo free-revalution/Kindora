@@ -296,11 +296,7 @@ export const MAX_CHAT_ASSIST_SUGGESTIONS = 4;
 
 export type ChatAssistKind = 'reply' | 'topic' | 'explanation';
 
-export const CHAT_ASSIST_KINDS: readonly ChatAssistKind[] = [
-  'reply',
-  'topic',
-  'explanation',
-];
+export const CHAT_ASSIST_KINDS: readonly ChatAssistKind[] = ['reply', 'topic', 'explanation'];
 
 export interface ChatAssistSuggestion {
   readonly kind: ChatAssistKind;
@@ -327,10 +323,7 @@ const EMPTY_REPLY: ChatAssistReply = Object.freeze({
 });
 
 function isKind(value: unknown): value is ChatAssistKind {
-  return (
-    typeof value === 'string' &&
-    (CHAT_ASSIST_KINDS as readonly string[]).includes(value)
-  );
+  return typeof value === 'string' && (CHAT_ASSIST_KINDS as readonly string[]).includes(value);
 }
 
 function coerceSuggestion(raw: unknown): ChatAssistSuggestion | null {
@@ -340,10 +333,7 @@ function coerceSuggestion(raw: unknown): ChatAssistSuggestion | null {
   if (typeof obj.text !== 'string') return null;
   const text = obj.text.trim().slice(0, MAX_ITEM_LEN);
   if (text.length === 0) return null;
-  const rationale =
-    typeof obj.rationale === 'string'
-      ? obj.rationale.trim().slice(0, 200)
-      : '';
+  const rationale = typeof obj.rationale === 'string' ? obj.rationale.trim().slice(0, 200) : '';
   return Object.freeze({ kind: obj.kind, text, rationale });
 }
 
@@ -407,10 +397,7 @@ export function parseChatAssistReply(raw: string): ParseChatAssistResult {
     suggestions: Object.freeze(suggestions),
   });
 
-  const note =
-    degradedFlags.length === 0
-      ? null
-      : `defaults-applied: ${degradedFlags.join(', ')}`;
+  const note = degradedFlags.length === 0 ? null : `defaults-applied: ${degradedFlags.join(', ')}`;
   return {
     reply,
     degraded: degradedFlags.length > 0,

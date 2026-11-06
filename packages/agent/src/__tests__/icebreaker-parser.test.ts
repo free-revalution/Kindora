@@ -69,10 +69,7 @@ describe('@kindora/agent — parseIcebreakerTopics', () => {
   });
 
   it('parses content wrapped in ```json fences', () => {
-    const raw =
-      '```json\n' +
-      JSON.stringify({ topics: ['hi 1', 'hi 2', 'hi 3'] }) +
-      '\n```';
+    const raw = '```json\n' + JSON.stringify({ topics: ['hi 1', 'hi 2', 'hi 3'] }) + '\n```';
     const out = parseIcebreakerTopics(raw);
     expect(out.degraded).toBe(false);
     expect(out.topics).toEqual(['hi 1', 'hi 2', 'hi 3']);

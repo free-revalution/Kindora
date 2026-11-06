@@ -31,6 +31,12 @@ export const en = {
 
   /* ── App shell ──────────────────────────────────────────────────── */
   'app.loading': 'Loading…',
+  'app.keychainErrorTitle': 'Your private key could not be loaded',
+  'app.keychainErrorRetry': 'Try again',
+  'app.databaseErrorTitle': 'Your local database could not be opened',
+  'app.databaseErrorRetry': 'Try again',
+  'home.keychainDevWarning':
+    'Browser preview: your private key is kept in this browser’s local storage, not in the system keychain. Use the desktop app for real protection.',
 
   /* ── Welcome ────────────────────────────────────────────────────── */
   'welcome.taglineFirst': 'Your AI finds the connection.',
@@ -51,6 +57,8 @@ export const en = {
   'home.lookingFor': 'Looking for',
   'home.conversationStyle': 'Conversation style',
   'home.connectAgent': 'Connect Agent',
+  'home.blockedAgents': 'Blocked agents',
+  'home.chatHistory': 'Chat history',
   'home.intent.similar_interests': 'Similar interests',
   'home.intent.project_partner': 'Project partners',
   'home.intent.gaming_partner': 'Gaming partners',
@@ -104,6 +112,58 @@ export const en = {
   'agent.suggestedInterest.reading': 'Reading',
   'agent.suggestedInterest.climbing': 'Climbing',
 
+  /* ── Privacy boundaries (Phase B / B1) ──────────────────────────── */
+  'privacy.title': 'Privacy',
+  'privacy.intro':
+    'These switches decide what leaves this device. Every field is filtered before it goes on the wire — a field you switch off is not sent at all, not sent and hidden afterwards.',
+  'privacy.behaviourTitle': 'What other agents may do',
+  'privacy.behaviourIntro': 'Permissions for the conversation itself.',
+  'privacy.fieldsTitle': 'Which parts of your profile are visible',
+  'privacy.fieldsIntro':
+    'Your profile is filtered field by field. A field you switch off is removed before the profile is sent.',
+  'privacy.visible': 'Shared',
+  'privacy.hidden': 'Private',
+  'privacy.allowAgentConversation': 'Let other agents start a conversation',
+  'privacy.allowAgentConversationHint':
+    'Turn this off and your agent will not take part in agent-assisted conversations. You can still write to the chat yourself.',
+  'privacy.allowContactExchange': 'Share contact details',
+  'privacy.allowContactExchangeHint':
+    'Lets the other agent ask for, and be given, contact details such as an email address or a phone number.',
+  'privacy.allowOfflineMeeting': 'Agree to meet offline',
+  'privacy.allowOfflineMeetingHint':
+    'Lets the other agent suggest meeting in person. Kindora never arranges a meeting by itself.',
+  'privacy.allowProjectDetails': 'Share project-level details',
+  'privacy.allowProjectDetailsHint':
+    'Lets the other agent see code, repositories or customer details. Leave this off unless you mean it.',
+  'privacy.allowBio': 'Your bio',
+  'privacy.allowBioHint':
+    'Your free-text self-description. Off by default — it often says more about you than you intend.',
+  'privacy.allowInterests': 'Your interests',
+  'privacy.allowInterestsHint':
+    'The topics you listed above. Shared by default: without them there is no common ground to match on.',
+  'privacy.allowCurrentActivity': 'What you are doing right now',
+  'privacy.allowCurrentActivityHint':
+    'Your current activities. Off by default — this is the freshest, most revealing part of a profile.',
+  'privacy.allowAvatar': 'Your avatar',
+  'privacy.allowAvatarHint': 'An image representing you. Off by default.',
+  'privacy.allowSocialIntent': 'What you are looking for',
+  'privacy.allowSocialIntentHint':
+    'The kinds of people you want to meet. Shared by default — it is what makes the match meaningful.',
+  'privacy.allowConversationStyle': 'Your conversation style',
+  'privacy.allowConversationStyleHint':
+    'How you like to talk. Shared by default — it tells the other agent how to approach you.',
+
+  /* ── Blocked agents (Phase B / B3) ──────────────────────────────── */
+  'blocked.title': 'Blocked agents',
+  'blocked.intro':
+    'These agents cannot pair with you. A blocked agent is refused during the handshake, before it learns anything about you.',
+  'blocked.empty': 'You have not blocked anyone.',
+  'blocked.unblock': 'Unblock',
+  'blocked.blockedAt': 'Blocked on {date}',
+  'blocked.reason': 'Reason: {reason}',
+  'blocked.noReason': 'No reason recorded',
+  'blocked.agentId': 'Agent id',
+
   /* ── Profile validation ─────────────────────────────────────────── */
   'validation.nickname_required': 'Nickname is required.',
   'validation.nickname_too_long': 'Nickname must be {max} characters or fewer.',
@@ -148,11 +208,21 @@ export const en = {
   'settings.privacyNote':
     'Kindora never sends your API key to another agent, logs it, or includes it in your profile.',
 
+  /* ── LLM failures (Phase E / E1) ─────────────────────────────────── */
+  'llm.error.auth': 'Check the API key in Settings and save it again.',
+  'llm.error.rateLimit': 'The provider is rate limiting requests — wait a moment and try again.',
+  'llm.error.timeout': 'The provider did not answer in time — check your network and try again.',
+  'llm.error.network': 'Could not reach the provider — check your network and the base URL.',
+  'llm.error.invalidResponse':
+    'The provider answered with something unexpected — check the model name.',
+  'llm.error.provider': 'The provider reported an error — check the model name and try again.',
+  'llm.error.aborted': 'The request was cancelled.',
+
   /* ── Connect ────────────────────────────────────────────────────── */
   'connect.eyebrow': 'Connect',
   'connect.title': 'Pair with another agent',
   'connect.body':
-    'Share a 6-character code with the other person, or type theirs. Once paired, your agents exchange profiles and run a local compatibility analysis.',
+    'Share the 6-character identity fingerprint with the other person, or type theirs. Once paired, your agents exchange profiles and run a local compatibility analysis.',
   'connect.llmNotConfigured': 'LLM not configured',
   'connect.llmNotConfiguredBody':
     'Configure an LLM provider in Settings before pairing. Pairing exchanges profiles and runs a local analysis, which needs an LLM.',
@@ -172,14 +242,42 @@ export const en = {
   'connect.loopback': 'Loopback',
   'connect.loopbackTitle': 'Loopback: in-process pairing (browser dev / single-machine tests).',
   'connect.preparingRoom': 'Preparing room…',
-  'connect.shareCodeLan': 'Share this code (over LAN)',
-  'connect.shareCodeLoopback': 'Share this code (loopback)',
-  'connect.waitingForPeer': 'Waiting for the other person to enter this code…',
-  'connect.pairingCodeLan': 'Pairing code (over LAN)',
-  'connect.pairingCodeLoopback': 'Pairing code (loopback)',
-  'connect.codePlaceholder': 'ABCDEF',
+  'connect.shareCodeLan': 'Share this identity fingerprint (over LAN)',
+  'connect.shareCodeLoopback': 'Share this identity fingerprint (loopback)',
+  'connect.waitingForPeer': 'Waiting for the other person to enter this fingerprint…',
+  'connect.pairingCodeLan': 'Identity fingerprint (over LAN)',
+  'connect.pairingCodeLoopback': 'Identity fingerprint (loopback)',
+  'connect.codePlaceholder': 'A1B2-C3',
+  'connect.fingerprintHint':
+    'Read these 6 characters out loud and check that the other device shows the same ones. This is an identity fingerprint — it identifies the host. It is not a password and it does not open anything by itself.',
+  'connect.fingerprintMismatch':
+    'The other device does not match this fingerprint, so the connection was closed.',
+  'connect.peerDisconnected': 'The other device disconnected, so the connection was closed.',
+  'connect.limitExceeded':
+    'The other device sent more data than the connection allows, so the connection was closed.',
+  'connect.invalidFrame':
+    'The other device sent data that could not be read, so the connection was closed.',
   'connect.searchingLan': 'Searching LAN…',
   'connect.joining': 'Joining…',
+
+  /* ── Connection lifecycle (Phase C / C3 § 8) ─────────────────────── */
+  'connect.state.connecting': 'Connecting…',
+  'connect.state.connected': 'Connected',
+  'connect.state.disconnected': 'Disconnected',
+  'connect.state.reconnecting': 'Reconnecting…',
+  'connect.state.failed': 'Connection failed',
+  'connect.state.idle': 'Not connected',
+  'connect.reconnect': 'Reconnect',
+  'connect.reconnecting': 'Reconnecting — the security handshake is being redone.',
+  'connect.reconnectFailed':
+    'The reconnect attempt failed. Check that the other device is still running.',
+
+  /* ── Identify (Phase B) ─────────────────────────────────────────── */
+  'identify.eyebrow': 'Step 1 of 3',
+  'identify.title': 'Exchanging public cards',
+  'identify.progress': 'Exchanging public cards…',
+  'identify.body':
+    'At this stage only a minimal public card is sent — a name and, if they allow it, what they are looking for. Your full profile stays on this device until both sides agree.',
 
   /* ── Match ──────────────────────────────────────────────────────── */
   'match.connectedWith': 'Connected with',
@@ -208,16 +306,24 @@ export const en = {
   'consent.eyebrowAccepted': 'Connected with',
   'consent.eyebrowBlocked': 'Blocked',
   'consent.eyebrowClosed': 'Connection closed',
-  'consent.eyebrowMatchFound': 'Match found',
+  'consent.eyebrowPeerFound': 'Peer found',
   'consent.close': 'Close',
   'consent.disconnect': 'Disconnect',
-  'consent.compatibility': 'Compatibility',
+  'consent.publicCard': 'Their public card',
+  'consent.publicCardEmpty':
+    'This agent did not share a public card. You can still accept — but you are deciding without knowing anything about them.',
+  'consent.publicCardNote':
+    'This is everything they have shared so far. The rest of their profile is only sent after both sides accept.',
+  'consent.cardNickname': 'Name',
+  'consent.cardIntent': 'Looking for',
+  'consent.cardStyle': 'Conversation style',
+  'consent.cardHidden': 'Not shared',
   'consent.peerNoResponse': 'Peer didn’t respond',
   'consent.peerNoResponseBody':
     'You accepted, but {peer} didn’t reply in time. You can close this session and try again later.',
   'consent.unlocked': 'Conversation unlocked',
   'consent.unlockedBody':
-    'Both you and {peer} accepted. The chat is open. (Chat lands in Phase 9 — for now, this confirms the wire flow works end-to-end.)',
+    'Both you and {peer} accepted. Your profiles are now exchanged and your agent is analysing compatibility.',
   'consent.blockedLocal': 'Blocked',
   'consent.blockedLocalBody':
     '{peer} can no longer reach you. Future pairing requests from this agent are refused.',
@@ -226,7 +332,7 @@ export const en = {
     '{peer} blocked you. Their id has been added to your local block list so you don’t try to reconnect.',
   'consent.bannerAwaitingHeadline': 'Your turn',
   'consent.bannerAwaitingBody':
-    'Decide whether to open a conversation with {peer}. Both of you must accept before chat is unlocked.',
+    'Decide whether to open a conversation with {peer}. Both of you must accept before your full profiles are exchanged.',
   'consent.bannerAcceptedLocalHeadline': 'Waiting for them',
   'consent.bannerAcceptedLocalBody': 'You accepted. Waiting for {peer} to accept too.',
   'consent.bannerAcceptedPeerHeadline': 'They accepted',
@@ -294,6 +400,9 @@ export const en = {
   'chat.aiNeverSends': 'AI never sends — every entry here came from a real human.',
   'chat.opening': 'Opening chat…',
   'chat.bubbleYou': 'You',
+  'chat.fromAgent': 'from your agent',
+  'chat.statusPending': 'Sending…',
+  'chat.statusFailed': 'Not sent',
   'chat.assist.closedPrompt': 'Stuck? Ask your agent for help.',
   'chat.assist.open': 'Ask My Agent',
   'chat.assist.title': 'Ask My Agent',
@@ -319,6 +428,24 @@ export const en = {
   'chat.assist.kind.reply': 'Reply',
   'chat.assist.kind.topic': 'Topic',
   'chat.assist.kind.explanation': 'Explain',
+
+  /* ── Chat history ───────────────────────────────────────────────── */
+  'history.eyebrow': 'Saved on this device',
+  'history.title': 'Chat history',
+  'history.unavailable':
+    'Chat history is kept by the desktop app only. The browser preview stores nothing between sessions.',
+  'history.loading': 'Loading conversations…',
+  'history.empty': 'No conversations yet. The ones you have will show up here.',
+  'history.selectPrompt': 'Select a conversation to read it.',
+  'history.transcriptEmpty': 'This conversation has no messages.',
+  'history.unnamedPeer': 'Unnamed peer',
+  'history.messageCount': '{count} messages',
+  'history.ended': 'ended',
+  'history.active': 'active',
+  'history.peer': 'Peer',
+  'history.fromAgent': 'from your agent',
+  'history.statusPending': 'Never sent.',
+  'history.statusFailed': 'Not sent.',
 
   /* ── Language picker ────────────────────────────────────────────── */
   'language.label': 'Language',

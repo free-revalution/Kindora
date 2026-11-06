@@ -56,19 +56,34 @@
 
 import type { LLMProvider } from '@kindora/llm';
 import {
-  generatePairingCode,
+  ConnectionStateMachine,
   LanTransport,
   PairingSession,
+  derivePairingFingerprint,
+  normalisePairingCode,
+  PAIRING_FINGERPRINT_LENGTH,
+  type ConnectionState,
+  type ConnectionStateHandler,
   type LanJoinPeer,
 } from '@kindora/transport';
 import {
   MatchOrchestrator,
+  PeerBlockedError,
+  type LocalConsent,
   type MatchOrchestratorSelf,
   type MatchOutcome,
+  type PeerIntroduction,
 } from '@kindora/matching';
+import { createEnvelopeSigner } from '@kindora/agent';
 import { loadAgent } from './agent-service';
 import { loadProvider } from './llm-service';
-import type { SocialAgent, SocialProfile } from '@kindora/protocol';
+import { getBlockedAgentsStore } from './connect-service';
+import {
+  base64ToBytes,
+  type EnvelopeSigner,
+  type SocialAgent,
+  type SocialProfile,
+} from '@kindora/protocol';
 
 export type LanRole = 'host' | 'join';
 
@@ -78,13 +93,54 @@ export interface LanStartInput {
   readonly profile: SocialProfile;
   readonly agent: SocialAgent;
   readonly llm: LLMProvider;
+  /**
+   * Phase A / A2 — the signer for outbound envelopes. `null` when the
+   * runtime has no usable WebCrypto.
+   */
+  readonly signer: EnvelopeSigner | null;
+  /**
+   * Phase A / A3 — this agent's pairing fingerprint (six characters
+   * derived from its own public key).
+   *
+   * This is an **identity fingerprint**, not a password and not a
+   * temporary key. It identifies the host; it does not by itself
+   * authorise anything.
+   */
+  readonly fingerprint: string;
 }
 
-export interface LanHostHandle {
-  readonly role: 'host';
-  /** The 6-character pairing code the host displays to the joiner. */
+/**
+ * Phase C / C3 — the internals a reconnect needs.
+ *
+ * Exposed on the handle so `reconnect()` can rebuild the session and
+ * the transport without the caller having to hand the service the
+ * agent profile, the LLM provider, and the identity fingerprint all
+ * over again.
+ *
+ * The fingerprint in particular **must not** change under the peer's
+ * feet: the peer checks the fingerprint it was given against the key
+ * that answers, so a reconnect has to present the same identity.
+ */
+export interface LanHandleInternals {
+  readonly input: LanStartInput;
+  readonly machine: ConnectionStateMachine;
+}
+
+/**
+ * Phase C / C3 — what every LAN handle can do, whatever its role.
+ */
+export interface LanConnectionHandle {
+  /** The 6-character pairing code (the host's identity fingerprint). */
   readonly pairingCode: string;
+  /**
+   * The live pairing session.
+   *
+   * Phase C / C3: this is a **getter** on the concrete handle — after
+   * a `reconnect()` it returns the *new* session, so a caller that
+   * kept the handle reference does not have to swap it out.
+   */
   readonly session: PairingSession;
+  /** The live transport. Same getter contract as `session`. */
   readonly transport: LanTransport;
   readonly selfAgentId: string;
   /**
@@ -95,21 +151,48 @@ export interface LanHostHandle {
    */
   getOrchestrator(): MatchOrchestrator;
   /**
+   * Phase C / C3 § 1 + § 8 — the connection lifecycle, as the UI has
+   * to show it: 连接中 / 已连接 / 断开 / 重连中 / 失败.
+   */
+  connectionState(): ConnectionState;
+  /**
+   * Phase C / C3 § 1 + § 8 — subscribe to connection-state changes.
+   * Returns an unsubscribe function.
+   */
+  onConnectionStateChange(handler: ConnectionStateHandler): () => void;
+  /**
    * Tear down. Idempotent. Clears the host wait loop, the transport
    * poll, the Rust TCP task, and the UDP listener.
    */
   disconnect(reason?: string): Promise<void>;
+  /** @internal — used by `reconnect()`. */
+  readonly internals: LanHandleInternals;
 }
 
-export interface LanJoinHandle {
+export interface LanHostHandle extends LanConnectionHandle {
+  readonly role: 'host';
+  /**
+   * Phase C / C3 § 3 + § 5 — pair again after the link dropped.
+   *
+   * The current transport and session are torn down and **new** ones
+   * are built from scratch, so the reconnect redoes the whole
+   * handshake: a fresh ephemeral key pair, a fresh `hello` exchange,
+   * a fresh session key. Nothing is carried over from the dead link.
+   *
+   * The handle stays valid — `handle.session` and `handle.transport`
+   * return the new objects once the reconnect resolves.
+   */
+  reconnect(): Promise<LanHostHandle>;
+}
+
+export interface LanJoinHandle extends LanConnectionHandle {
   readonly role: 'join';
-  readonly pairingCode: string;
-  readonly session: PairingSession;
-  readonly transport: LanTransport;
-  readonly selfAgentId: string;
   readonly peer: LanJoinPeer;
-  getOrchestrator(): MatchOrchestrator;
-  disconnect(reason?: string): Promise<void>;
+  /**
+   * Phase C / C3 § 3 + § 5 — pair again after the link dropped.
+   * Same contract as `LanHostHandle.reconnect`.
+   */
+  reconnect(): Promise<LanJoinHandle>;
 }
 
 export type LanConnectHandle = LanHostHandle | LanJoinHandle;
@@ -179,7 +262,10 @@ export async function startLanHost(input: LanStartInput): Promise<LanHostHandle>
       activeLanHost = null;
       await previous.disconnect('superseded');
     }
-    const handle = await startLanHostInner(input);
+    // Phase C / C3 § 1: every pairing flow gets its own connection
+    // lifecycle. The machine lives on the handle, so a reconnect keeps
+    // the same one and the UI's subscription survives.
+    const handle = await startLanHostInner(input, new ConnectionStateMachine());
     activeLanHost = handle;
     return handle;
   };
@@ -193,87 +279,214 @@ export async function startLanHost(input: LanStartInput): Promise<LanHostHandle>
   return result;
 }
 
-async function startLanHostInner(input: LanStartInput): Promise<LanHostHandle> {
+/**
+ * Phase C / C3 — the parts of a host connection that a reconnect has
+ * to rebuild from scratch.
+ *
+ * The point of the split is C3 § 5: a reconnect must redo the
+ * identity check and the secure handshake, so it must NOT be a
+ * "reuse the old session" operation. Everything per-connection lives
+ * here and is thrown away and rebuilt.
+ */
+interface HostRuntime {
+  readonly session: PairingSession;
+  readonly transport: LanTransport;
+  /** Stop the "is the peer there yet?" poll. */
+  stop(): void;
+  /** The one-shot teardown promise, so a double disconnect is a no-op. */
+  disposePromise: Promise<void> | null;
+}
+
+async function startLanHostInner(
+  input: LanStartInput,
+  machine: ConnectionStateMachine,
+): Promise<LanHostHandle> {
+  machine.set('connecting');
   if (!isLanAvailable()) {
+    machine.set('failed');
     throw new Error('startLanHost: Tauri runtime not available. Use loopback mode in browser dev.');
   }
 
-  const transport = new LanTransport({
-    selfAgentId: input.agentId,
-    selfDisplayName: input.displayName,
-  });
-  const session = new PairingSession({
-    agentId: input.agentId,
-    displayName: input.displayName,
-  });
-
   // Step 1: mint the code up-front. The session and the Rust
   // transport share this single value; we never run two RNGs.
-  const code = generatePairingCode();
-
-  // Step 2: bind the transport FIRST. If this throws (port in use,
-  // Rust runtime failed, etc.) we have not touched the session, so
-  // the FSM stays in 'idle'. The error propagates to the caller.
-  await transport.startHost(code);
-
-  // Step 3: drive the session. By construction the transport is in
-  // 'host' mode, so the implicit `transport.connect({hint: code})`
-  // inside `PairingSession.startHost` is a no-op — it just records
-  // the self-info on the transport side. This is the Phase 16.3 fix
-  // for the call-order bug: previously, this call happened BEFORE
-  // `transport.startHost`, which left the transport in 'idle' mode
-  // and caused a fire-and-forget joiner-style UDP discover (and in
-  // the worst case, a self-dial into 'join' mode, leaving the
-  // session in 'hosting' over a transport stuck in 'join').
-  session.startHost(transport, { seed: code });
-  if (session.current().state !== 'hosting' || session.current().code !== code) {
-    // Defensive: should never happen because `seed` is validated,
-    // but if a future refactor breaks one half of the contract, we
-    // want to know loudly rather than over a confused session.
-    await transport.disconnect().catch(() => undefined);
+  //
+  // Phase A / A3: the code is this agent's **identity fingerprint**,
+  // derived from its own long-term public key — not a random secret.
+  // It is what the host shows and what the joiner types; the joiner
+  // then checks that the peer really hashes to it (see
+  // `expectedPeerFingerprint` in `startLanJoin`).
+  const code = normalisePairingCode(input.fingerprint);
+  if (!code || code.length !== PAIRING_FINGERPRINT_LENGTH) {
+    machine.set('failed');
     throw new Error(
-      'startLanHost: session.startHost did not produce the expected (hosting, code) state.',
+      'startLanHost: the local identity fingerprint is malformed. Recreate the agent and try again.',
     );
   }
 
-  // Step 4: poll for the peer connecting. When transport.isConnected()
-  // flips true, transition the session to 'tcp-connected' so the
-  // orchestrator can drive the `hello` exchange and lift it to
-  // 'connected'.
-  let resolved = false;
-  const poll = setInterval(() => {
-    if (resolved) return;
-    const snap = session.current();
-    if (snap.state !== 'hosting') {
-      // Session has been disconnected or transitioned — stop polling.
-      clearInterval(poll);
-      resolved = true;
-      return;
-    }
-    if (transport.isConnected()) {
-      resolved = true;
-      clearInterval(poll);
-      // notifyPeerConnected is now an alias for notifyTransportConnected —
-      // it transitions hosting → tcp-connected (NOT 'connected'). The
-      // peer agent id is locked in later, by the orchestrator, when it
-      // calls session.notifyHelloReceived(peerAgentId) after the
-      // peer's `hello` envelope has been received and validated.
-      session.notifyPeerConnected();
-    }
-  }, 200);
+  /**
+   * Build one host connection: a transport bound to the LAN, a
+   * session driving it, and the poll that watches for the peer.
+   *
+   * A reconnect calls this again, which is exactly what C3 § 5 asks
+   * for — the whole handshake is redone from scratch.
+   */
+  const build = async (): Promise<HostRuntime> => {
+    const transport = new LanTransport({
+      selfAgentId: input.agentId,
+      selfDisplayName: input.displayName,
+    });
+    const session = new PairingSession({
+      agentId: input.agentId,
+      displayName: input.displayName,
+      signer: input.signer,
+    });
 
-  // Idempotency guard for the disconnect path. See `disconnect` below.
-  let disconnectPromise: Promise<void> | null = null;
+    // Step 2: bind the transport FIRST. If this throws (port in use,
+    // Rust runtime failed, etc.) we have not touched the session, so
+    // the FSM stays in 'idle'. The error propagates to the caller.
+    try {
+      await transport.startHost(code);
+    } catch (e) {
+      await transport.disconnect().catch(() => undefined);
+      throw e;
+    }
+
+    // Step 3: drive the session. By construction the transport is in
+    // 'host' mode, so the implicit `transport.connect({hint: code})`
+    // inside `PairingSession.startHost` is a no-op — it just records
+    // the self-info on the transport side. This is the Phase 16.3 fix
+    // for the call-order bug: previously, this call happened BEFORE
+    // `transport.startHost`, which left the transport in 'idle' mode
+    // and caused a fire-and-forget joiner-style UDP discover (and in
+    // the worst case, a self-dial into 'join' mode, leaving the
+    // session in 'hosting' over a transport stuck in 'join').
+    session.startHost(transport, { seed: code });
+    if (session.current().state !== 'hosting' || session.current().code !== code) {
+      // Defensive: should never happen because `seed` is validated,
+      // but if a future refactor breaks one half of the contract, we
+      // want to know loudly rather than over a confused session.
+      await transport.disconnect().catch(() => undefined);
+      throw new Error(
+        'startLanHost: session.startHost did not produce the expected (hosting, code) state.',
+      );
+    }
+
+    // Step 4: poll for the peer connecting. When transport.isConnected()
+    // flips true, transition the session to 'tcp-connected' so the
+    // orchestrator can drive the `hello` exchange and lift it to
+    // 'connected'.
+    let resolved = false;
+    const poll = setInterval(() => {
+      if (resolved) return;
+      const snap = session.current();
+      if (snap.state !== 'hosting') {
+        // Session has been disconnected or transitioned — stop polling.
+        clearInterval(poll);
+        resolved = true;
+        return;
+      }
+      if (transport.isConnected()) {
+        resolved = true;
+        clearInterval(poll);
+        // notifyPeerConnected is now an alias for notifyTransportConnected —
+        // it transitions hosting → tcp-connected (NOT 'connected'). The
+        // peer agent id is locked in later, by the orchestrator, when it
+        // calls session.notifyHelloReceived(peerAgentId) after the
+        // peer's `hello` envelope has been received and validated.
+        session.notifyPeerConnected();
+      }
+    }, 200);
+
+    return {
+      session,
+      transport,
+      stop() {
+        clearInterval(poll);
+        resolved = true;
+      },
+      disposePromise: null,
+    };
+  };
+
+  /**
+   * Phase C / C3 § 2 — tear one connection down, exactly once.
+   *
+   * The promise is stored on the runtime, so two concurrent callers
+   * (the unmount cleanup and a user-initiated cancel) share one
+   * teardown instead of racing two `lan_host_stop` calls.
+   */
+  const disposeRuntime = (rt: HostRuntime, reason: string): Promise<void> => {
+    if (!rt.disposePromise) {
+      rt.disposePromise = (async () => {
+        rt.stop();
+        await rt.transport.disconnect();
+        await rt.session.disconnect(reason);
+      })();
+    }
+    return rt.disposePromise;
+  };
+
+  let runtime!: HostRuntime;
+  try {
+    runtime = await build();
+  } catch (e) {
+    machine.set('failed');
+    throw e;
+  }
+
+  // Phase C / C3 § 1 — map the pairing FSM onto the connection
+  // lifecycle the UI shows.
+  //
+  //   - the session reached `connected` → the connection is
+  //     `connected` (the handshake, and therefore the identity check,
+  //     is done).
+  //   - the session closed after that → `disconnected` (recoverable:
+  //     the user can ask for a reconnect).
+  //   - the session closed before that → `failed`.
+  //
+  // The generation counter lets a reconnect mark the previous
+  // session's mapping stale, so the teardown's "closed" transition
+  // does not push a "disconnected" over the "reconnecting" the
+  // reconnect has already claimed.
+  let generation = 0;
+  const watch = (s: PairingSession): void => {
+    const mine = generation;
+    s.onStateChange((snap) => {
+      if (generation !== mine) return;
+      if (snap.state === 'connected') {
+        machine.set('connected');
+      } else if (snap.state === 'closed') {
+        machine.set(machine.current() === 'connected' ? 'disconnected' : 'failed');
+      }
+    });
+  };
+  watch(runtime.session);
+
+  // The live pair. A reconnect swaps them out; the handle's getters
+  // read whichever is current.
+  let liveSession = runtime.session;
+  let liveTransport = runtime.transport;
 
   const handle: LanHostHandle = {
     role: 'host',
     pairingCode: code,
-    session,
-    transport,
+    get session(): PairingSession {
+      return liveSession;
+    },
+    get transport(): LanTransport {
+      return liveTransport;
+    },
     selfAgentId: input.agentId,
     getOrchestrator() {
       return new MatchOrchestrator(toOrchestratorSelf(input), '');
     },
+    connectionState() {
+      return machine.current();
+    },
+    onConnectionStateChange(handler) {
+      return machine.subscribe(handler);
+    },
+    internals: { input, machine },
     async disconnect(reason: string = 'user-requested') {
       try {
         // Idempotent, but *awaitable*: a second caller waits for the
@@ -284,20 +497,40 @@ async function startLanHostInner(input: LanStartInput): Promise<LanHostHandle> {
         // the next `startLanHost` bind before the Rust `host_stop` has
         // landed, which surfaces as "already running in mode host" or as
         // a discovery responder that lost the bind with EADDRINUSE.
-        if (!disconnectPromise) {
-          clearInterval(poll);
-          resolved = true;
-          disconnectPromise = (async () => {
-            await transport.disconnect();
-            await session.disconnect(reason);
-          })();
-        }
-        await disconnectPromise;
+        //
+        // Phase C / C3: the generation bump detaches the session's
+        // state mapping, so an explicit teardown does not masquerade
+        // as a peer drop ("disconnected").
+        generation += 1;
+        await disposeRuntime(runtime, reason);
+        machine.set('idle');
       } finally {
         // This handle is no longer the live host, so the service-level
         // singleton does not have to tear it down again.
         if (activeLanHost === handle) activeLanHost = null;
       }
+    },
+    async reconnect(): Promise<LanHostHandle> {
+      // Phase C / C3 § 3 + § 5 — tear the dead link down and pair
+      // again from scratch. The new session starts in `idle`, so the
+      // identity check and the secure handshake are redone — nothing
+      // is carried over from the link that died.
+      generation += 1;
+      machine.set('reconnecting');
+      await disposeRuntime(runtime, 'reconnect').catch(() => undefined);
+      let next: HostRuntime;
+      try {
+        next = await build();
+      } catch (e) {
+        machine.set('failed');
+        throw e;
+      }
+      runtime = next;
+      liveSession = next.session;
+      liveTransport = next.transport;
+      watch(next.session);
+      machine.set('connecting');
+      return handle;
     },
   };
   return handle;
@@ -320,46 +553,143 @@ export async function startLanJoin(
   code: string,
   timeoutMs: number = 2500,
 ): Promise<LanJoinHandle> {
+  return startLanJoinInner(input, code, timeoutMs, new ConnectionStateMachine());
+}
+
+/**
+ * Phase C / C3 — the parts of a joiner connection that a reconnect
+ * has to rebuild. Same split as the host: a reconnect is a fresh
+ * transport + a fresh session, never a reused one.
+ */
+interface JoinRuntime {
+  readonly session: PairingSession;
+  readonly transport: LanTransport;
+  readonly peer: LanJoinPeer;
+  /** The one-shot teardown promise, so a double disconnect is a no-op. */
+  disposePromise: Promise<void> | null;
+}
+
+async function startLanJoinInner(
+  input: LanStartInput,
+  code: string,
+  timeoutMs: number,
+  machine: ConnectionStateMachine,
+): Promise<LanJoinHandle> {
+  machine.set('connecting');
   if (!isLanAvailable()) {
+    machine.set('failed');
     throw new Error('startLanJoin: Tauri runtime not available. Use loopback mode in browser dev.');
   }
-  const transport = new LanTransport({
-    selfAgentId: input.agentId,
-    selfDisplayName: input.displayName,
-  });
-  // Discover peers on the LAN.
-  const peers = await transport.discover(code, timeoutMs);
-  if (peers.length === 0) {
-    await transport.disconnect().catch(() => undefined);
+  // Phase A / A3: the typed code is the host's identity fingerprint.
+  // Normalise it *before* it reaches the wire: the host registered the
+  // fingerprint without the cosmetic dash, and the Rust side compares
+  // the two strings byte for byte.
+  const normalised = normalisePairingCode(code);
+  if (!normalised || normalised.length !== PAIRING_FINGERPRINT_LENGTH) {
+    machine.set('failed');
     throw new Error(
-      `No peer found on the LAN for code "${code}". Check that both devices are on the same network and that the host is running.`,
+      `That is not a valid identity fingerprint. It is ${PAIRING_FINGERPRINT_LENGTH} characters from the alphabet 0123456789ABCDEFGHJKMNPQRSTVWXYZ.`,
     );
   }
-  const peer: LanJoinPeer = peers[0]!;
-  await transport.startJoin(peer);
-  const session = new PairingSession({
-    agentId: input.agentId,
-    displayName: input.displayName,
-  });
-  // PairingSession.startJoin transitions: idle → joining →
-  // tcp-connected. It calls transport.connect({hint: code}) which is
-  // a no-op for LanTransport in 'join' mode (already connected via
-  // startJoin). The orchestrator then drives the `hello` exchange and
-  // calls session.notifyHelloReceived(peerAgentId) to move the FSM
-  // to 'connected'.
-  await session.startJoin(transport, code);
-  // Idempotency guard for the disconnect path. See `disconnect` below.
-  let disconnected = false;
-  return {
+
+  /**
+   * Build one joiner connection: discover the host, dial it, and
+   * drive a session over it.
+   */
+  const build = async (): Promise<JoinRuntime> => {
+    const transport = new LanTransport({
+      selfAgentId: input.agentId,
+      selfDisplayName: input.displayName,
+    });
+    // Discover peers on the LAN.
+    const peers = await transport.discover(normalised, timeoutMs);
+    if (peers.length === 0) {
+      await transport.disconnect().catch(() => undefined);
+      throw new Error(
+        `No peer found on the LAN for fingerprint "${normalised}". Check that both devices are on the same network and that the host is running.`,
+      );
+    }
+    const peer: LanJoinPeer = peers[0]!;
+    await transport.startJoin(peer);
+    const session = new PairingSession({
+      agentId: input.agentId,
+      displayName: input.displayName,
+      signer: input.signer,
+      // The out-of-band identity check: the peer that answers must
+      // present the public key this fingerprint was derived from.
+      expectedPeerFingerprint: normalised,
+    });
+    // PairingSession.startJoin transitions: idle → joining →
+    // tcp-connected. It calls transport.connect({hint: code}) which is
+    // a no-op for LanTransport in 'join' mode (already connected via
+    // startJoin). The orchestrator then drives the `hello` exchange and
+    // calls session.notifyHelloReceived(peerAgentId) to move the FSM
+    // to 'connected'.
+    await session.startJoin(transport, normalised);
+    return { session, transport, peer, disposePromise: null };
+  };
+
+  /** Phase C / C3 § 2 — tear one connection down, exactly once. */
+  const disposeRuntime = (rt: JoinRuntime, reason: string): Promise<void> => {
+    if (!rt.disposePromise) {
+      rt.disposePromise = (async () => {
+        await rt.transport.disconnect();
+        await rt.session.disconnect(reason);
+      })();
+    }
+    return rt.disposePromise;
+  };
+
+  let runtime!: JoinRuntime;
+  try {
+    runtime = await build();
+  } catch (e) {
+    machine.set('failed');
+    throw e;
+  }
+
+  // Phase C / C3 § 1 — the session→lifecycle mapping. See the host
+  // side for the full explanation of the generation counter.
+  let generation = 0;
+  const watch = (s: PairingSession): void => {
+    const mine = generation;
+    s.onStateChange((snap) => {
+      if (generation !== mine) return;
+      if (snap.state === 'connected') {
+        machine.set('connected');
+      } else if (snap.state === 'closed') {
+        machine.set(machine.current() === 'connected' ? 'disconnected' : 'failed');
+      }
+    });
+  };
+  watch(runtime.session);
+
+  let liveSession = runtime.session;
+  let liveTransport = runtime.transport;
+
+  const handle: LanJoinHandle = {
     role: 'join',
-    pairingCode: code,
-    session,
-    transport,
-    selfAgentId: input.agentId,
-    peer,
-    getOrchestrator() {
-      return new MatchOrchestrator(toOrchestratorSelf(input), peer.agent_id || '');
+    pairingCode: normalised,
+    get session(): PairingSession {
+      return liveSession;
     },
+    get transport(): LanTransport {
+      return liveTransport;
+    },
+    selfAgentId: input.agentId,
+    get peer(): LanJoinPeer {
+      return runtime.peer;
+    },
+    getOrchestrator() {
+      return new MatchOrchestrator(toOrchestratorSelf(input), runtime.peer.agent_id || '');
+    },
+    connectionState() {
+      return machine.current();
+    },
+    onConnectionStateChange(handler) {
+      return machine.subscribe(handler);
+    },
+    internals: { input, machine },
     async disconnect(reason: string = 'user-requested') {
       // Idempotent: see the matching comment in `startLanHost`. The
       // joiner side has no `setInterval` to clean up, but two
@@ -367,12 +697,33 @@ export async function startLanJoin(
       // a user-initiated cancel that arrives late) would each fire
       // `lan_join_disconnect` IPC; the second is a cheap no-op but
       // the guard keeps the call strictly one-shot.
-      if (disconnected) return;
-      disconnected = true;
-      await transport.disconnect();
-      await session.disconnect(reason);
+      generation += 1;
+      await disposeRuntime(runtime, reason);
+      machine.set('idle');
+    },
+    async reconnect(): Promise<LanJoinHandle> {
+      // Phase C / C3 § 3 + § 5 — a fresh discovery, a fresh dial, and
+      // a fresh session, so the identity check and the secure
+      // handshake are redone from scratch.
+      generation += 1;
+      machine.set('reconnecting');
+      await disposeRuntime(runtime, 'reconnect').catch(() => undefined);
+      let next: JoinRuntime;
+      try {
+        next = await build();
+      } catch (e) {
+        machine.set('failed');
+        throw e;
+      }
+      runtime = next;
+      liveSession = next.session;
+      liveTransport = next.transport;
+      watch(next.session);
+      machine.set('connecting');
+      return handle;
     },
   };
+  return handle;
 }
 
 function toOrchestratorSelf(input: LanStartInput): MatchOrchestratorSelf {
@@ -383,8 +734,29 @@ function toOrchestratorSelf(input: LanStartInput): MatchOrchestratorSelf {
     agent: input.agent,
     capabilities: input.agent.capabilities,
     llm: input.llm,
-    peerGuard: () => {
-      // block list check is in the host/join paths already; leave a no-op guard here.
+    peerGuard: async (peerAgentId: string) => {
+      // Phase B: the block-list check runs in phase 1, **before** the
+      // public card is sent. The LAN path used to have no guard at
+      // all — a blocked peer could complete a LAN pairing and receive
+      // the local card.
+      if (!peerAgentId) return;
+      if (await getBlockedAgentsStore().has(peerAgentId)) {
+        throw new PeerBlockedError(peerAgentId);
+      }
+    },
+    boundaries: async () => {
+      // Phase B requirement 8 — read the boundaries in force right now
+      // so a mid-session revocation takes effect on the next send.
+      try {
+        const agent = await loadAgent();
+        if (agent) return agent.profile.boundaries;
+      } catch (err: unknown) {
+        console.error(
+          'Kindora: could not re-read the privacy boundaries; using the ones captured when the session started.',
+          err,
+        );
+      }
+      return input.profile.boundaries;
     },
   };
 }
@@ -407,22 +779,82 @@ export async function toLanInput(): Promise<LanStartInput> {
       capabilities: agent.capabilities,
     },
     llm,
+    signer: await buildSigner(agent),
+    fingerprint: await derivePairingFingerprint(agent.agentId, base64ToBytes(agent.publicKey)),
   };
 }
 
-/** Run the match orchestrator on a LAN handle. */
-export async function runLanMatch(handle: LanConnectHandle): Promise<MatchOutcome> {
+/**
+ * Phase A / A2 — build the envelope signer for the local agent.
+ *
+ * `loadAgent()` attaches the private key in memory (it lives in the OS
+ * keychain in the shipped app). The signer imports it as a
+ * **non-extractable** WebCrypto key.
+ *
+ * Returns `null` when the runtime has no usable WebCrypto: the
+ * session then runs unsigned, and the capability flags say so.
+ */
+async function buildSigner(agent: {
+  readonly agentId: string;
+  readonly publicKey: string;
+  readonly privateKey?: string;
+}): Promise<EnvelopeSigner | null> {
+  if (!agent.privateKey) return null;
+  try {
+    return await createEnvelopeSigner({
+      agentId: agent.agentId,
+      publicKey: agent.publicKey,
+      privateKey: agent.privateKey,
+    });
+  } catch {
+    // No usable WebCrypto (or a corrupt key). The capability flags
+    // already report `supportsMessageSigning: false` in that case.
+    return null;
+  }
+}
+
+/**
+ * Phase 1 — identify the peer over the LAN link: send the `hello` and
+ * the **minimal public card**, refusing a blocked peer before any
+ * profile data leaves the device.
+ */
+export async function runLanIdentify(handle: LanConnectHandle): Promise<PeerIntroduction> {
   // The orchestrator accepts both 'tcp-connected' (it will drive the
   // `hello` exchange itself) and 'connected' (the `hello` exchange
   // was already validated by a previous step).
   const state = handle.session.current().state;
   if (state !== 'connected' && state !== 'tcp-connected') {
     throw new Error(
-      `runLanMatch: session is not connected (state=${state}). Wait for the peer to join first.`,
+      `runLanIdentify: session is not connected (state=${state}). Wait for the peer to join first.`,
     );
   }
-  return handle.getOrchestrator().start(handle.session);
+  return handle.getOrchestrator().identify(handle.session);
 }
 
-/** Re-export the code generator for callers that want to format the code in a UI. */
-export { generatePairingCode };
+/**
+ * Phase 2 — exchange the **authorised** profile over the LAN link and
+ * run the match analysis. Refuses to send anything without a mutual,
+ * peer-specific consent.
+ */
+export async function runLanExchangeAndMatch(
+  handle: LanConnectHandle,
+  consent: LocalConsent,
+): Promise<MatchOutcome> {
+  const state = handle.session.current().state;
+  if (state !== 'connected' && state !== 'tcp-connected') {
+    throw new Error(`runLanExchangeAndMatch: session is not connected (state=${state}).`);
+  }
+  return handle.getOrchestrator().exchangeAndMatch(handle.session, consent);
+}
+
+/**
+ * Re-export the code generator for callers that want to format the code
+ * in a UI.
+ *
+ * Phase A / A3: the LAN pairing code is now the host's **identity
+ * fingerprint**, not a random code — see `derivePairingFingerprint`.
+ * This re-export stays for callers that still want a random code for
+ * something else (e.g. a test fixture); nothing in the pairing flow
+ * uses it any more.
+ */
+export { generatePairingCode } from '@kindora/transport';

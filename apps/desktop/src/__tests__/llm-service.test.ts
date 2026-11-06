@@ -69,7 +69,11 @@ describe('apps/desktop — llm-service persistence', () => {
   });
 
   it('loadProvider still builds a provider for a keyless provider (Ollama)', async () => {
-    await saveLLMConfig({ provider: 'ollama', baseUrl: 'http://localhost:11434', model: 'llama3.1' });
+    await saveLLMConfig({
+      provider: 'ollama',
+      baseUrl: 'http://localhost:11434',
+      model: 'llama3.1',
+    });
     const provider = await loadProvider();
     expect(provider).not.toBeNull();
   });

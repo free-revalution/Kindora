@@ -1,4 +1,5 @@
 import '@testing-library/jest-dom/vitest';
+import { webcrypto } from 'node:crypto';
 
 /**
  * Polyfill Node's empty `localStorage` global with an in-memory
@@ -40,6 +41,26 @@ function needsPolyfill(ls: unknown): boolean {
 if (needsPolyfill(globalThis.localStorage)) {
   Object.defineProperty(globalThis, 'localStorage', {
     value: createMemoryStorage(),
+    writable: true,
+    configurable: true,
+  });
+}
+
+/**
+ * Phase A — jsdom does not implement `crypto.subtle`.
+ *
+ * The whole Phase A surface (ES256 signing, ECDH key agreement, HKDF,
+ * AES-256-GCM) needs it, and the desktop tests create a real agent
+ * identity. Node ships a spec-complete WebCrypto implementation, so we
+ * install it when — and only when — jsdom's stub is in the way.
+ *
+ * This is a **test-environment** polyfill: the shipped app runs in a
+ * real browser / Tauri webview, where `crypto.subtle` is native.
+ */
+const g = globalThis as { crypto?: Crypto };
+if (!g.crypto || !g.crypto.subtle) {
+  Object.defineProperty(globalThis, 'crypto', {
+    value: webcrypto as unknown as Crypto,
     writable: true,
     configurable: true,
   });

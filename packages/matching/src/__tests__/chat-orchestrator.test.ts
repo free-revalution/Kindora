@@ -114,7 +114,8 @@ describe('@kindora/matching — ChatOrchestrator', () => {
       peerDisplayName: 'Bob',
     });
     const startPromise = orchA.start(sessionA);
-    const { createChatMessage, createHello, DEFAULT_AGENT_CAPABILITIES } = await import('@kindora/protocol');
+    const { createChatMessage, createHello, DEFAULT_AGENT_CAPABILITIES } =
+      await import('@kindora/protocol');
     // A "fake peer" envelope with the wrong sender id (impersonator).
     await sessionB.send(
       createChatMessage('00000000-0000-0000-0000-000000000000', { text: 'spoofed' }),

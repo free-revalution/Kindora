@@ -5,8 +5,17 @@
 //!
 //! V0.1 surface:
 //!   - `lan_*` commands: UDP discovery + TCP message transport
-//!   - `secret_*` commands: OS keychain via `keyring` crate
-//!   - `sqlite_*` commands: pass-through to `tauri-plugin-sql`
+//!   - `secret_*` commands: OS keychain via `keyring` crate (LLM API keys)
+//!   - `agent_key_*` commands: OS keychain, agent long-term private key
+//!     (Phase A / A1)
+//!
+//! Note: the `tauri-plugin-sql` plugin is registered below. Since
+//! Phase D / D1 the frontend talks to it directly through the plugin's
+//! own IPC commands (`plugin:sql|load|execute|select|close`); the
+//! capability file already grants them. The frontend only ever opens
+//! `sqlite:kindora.db` — see `apps/desktop/src/lib/tauri-sql-executor.ts`.
+//! No `sqlite_*` commands are defined *in this crate*; the plugin's
+//! commands are used as-is.
 
 mod lan;
 mod secrets;
@@ -17,7 +26,12 @@ mod secrets;
 // the Tauri command layer.
 #[doc(hidden)]
 pub use lan::{HostInfo, LanError, LanState, PeerInfo};
-use secrets::SecretError;
+// The two error types are part of the crate's public API, not just
+// internal plumbing: the `kind` / message contract they carry is
+// mirrored by the TypeScript `AgentKeyErrorKind` union
+// (`apps/desktop/src/lib/tauri-agent-keychain.ts`). Publishing them
+// keeps that taxonomy symmetric on both sides of the IPC boundary.
+pub use secrets::{AgentKeyError, SecretError};
 
 pub struct AppState {
     pub lan: LanState,
@@ -25,7 +39,9 @@ pub struct AppState {
 
 impl AppState {
     pub fn new() -> Self {
-        Self { lan: LanState::new() }
+        Self {
+            lan: LanState::new(),
+        }
     }
 }
 
@@ -48,9 +64,7 @@ async fn lan_host_start(
 }
 
 #[tauri::command]
-async fn lan_host_status(
-    state: tauri::State<'_, AppState>,
-) -> Result<Option<HostInfo>, LanError> {
+async fn lan_host_status(state: tauri::State<'_, AppState>) -> Result<Option<HostInfo>, LanError> {
     state.lan.host_status().await
 }
 
@@ -65,10 +79,7 @@ async fn lan_host_poll(state: tauri::State<'_, AppState>) -> Result<Vec<String>,
 }
 
 #[tauri::command]
-async fn lan_host_send(
-    state: tauri::State<'_, AppState>,
-    message: String,
-) -> Result<(), LanError> {
+async fn lan_host_send(state: tauri::State<'_, AppState>, message: String) -> Result<(), LanError> {
     state.lan.host_send(message).await
 }
 
@@ -104,10 +115,7 @@ async fn lan_join_poll(state: tauri::State<'_, AppState>) -> Result<Vec<String>,
 }
 
 #[tauri::command]
-async fn lan_join_send(
-    state: tauri::State<'_, AppState>,
-    message: String,
-) -> Result<(), LanError> {
+async fn lan_join_send(state: tauri::State<'_, AppState>, message: String) -> Result<(), LanError> {
     state.lan.join_send(message).await
 }
 
@@ -138,6 +146,28 @@ fn secret_list() -> Result<Vec<String>, SecretError> {
     secrets::secret_list()
 }
 
+// ---------- Agent identity key commands (Phase A / A1) ----------
+
+#[tauri::command]
+fn agent_key_store(value: String) -> Result<(), AgentKeyError> {
+    secrets::agent_key_store(value)
+}
+
+#[tauri::command]
+fn agent_key_get() -> Result<Option<String>, AgentKeyError> {
+    secrets::agent_key_get()
+}
+
+#[tauri::command]
+fn agent_key_exists() -> Result<bool, AgentKeyError> {
+    secrets::agent_key_exists()
+}
+
+#[tauri::command]
+fn agent_key_delete() -> Result<(), AgentKeyError> {
+    secrets::agent_key_delete()
+}
+
 // ---------- entry point ----------
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -166,6 +196,10 @@ pub fn run() {
             secret_get,
             secret_delete,
             secret_list,
+            agent_key_store,
+            agent_key_get,
+            agent_key_exists,
+            agent_key_delete,
         ])
         .setup(|_app| Ok(()))
         .run(tauri::generate_context!())

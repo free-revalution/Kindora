@@ -12,6 +12,27 @@ import type { AgentCapabilities, MatchAnalysis, SocialAgent, SocialProfile } fro
 /* hello / profile_exchange — handshake                                */
 /* ------------------------------------------------------------------ */
 
+/**
+ * The ephemeral key material one side offers for session key agreement
+ * (Phase A / A3).
+ *
+ * The key is generated fresh for every session, used exactly once for
+ * the ECDH exchange, and never reused — which gives the session forward
+ * secrecy: compromising the long-term identity key later does not
+ * decrypt traffic that was already exchanged.
+ */
+export interface SessionKeyExchange {
+  /**
+   * The ephemeral ECDH P-256 public key, SPKI DER, **base64url**.
+   *
+   * (New fields use base64url. The legacy `Agent.publicKey` stays on
+   * standard base64 so existing stored agents keep working.)
+   */
+  readonly ephemeralPublicKey: string;
+  /** `base64url(SHA-256(SPKI DER))` of the ephemeral key. */
+  readonly keyId: string;
+}
+
 /** First message on a new connection. Each side announces itself. */
 export interface HelloPayload {
   /** Stable display name shown in the peer list. */
@@ -20,6 +41,23 @@ export interface HelloPayload {
   readonly capabilities: AgentCapabilities;
   /** Optional short status message. */
   readonly status?: string;
+  /**
+   * The sender's long-term identity public key, SPKI DER, standard
+   * base64 (Phase A / A2).
+   *
+   * `hello` is the first message on the wire, so it has to carry the
+   * public key the peer needs in order to verify this very message's
+   * signature. Optional so that a peer which predates signing still
+   * parses — such a session simply cannot be authenticated.
+   */
+  readonly publicKey?: string;
+  /**
+   * The ephemeral key used to negotiate the session key (Phase A / A3).
+   *
+   * Optional: a peer that does not offer one gets a plaintext session,
+   * and both sides say so honestly via their capability flags.
+   */
+  readonly sessionKeyExchange?: SessionKeyExchange;
 }
 
 /**

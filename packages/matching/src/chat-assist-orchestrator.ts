@@ -25,11 +25,7 @@ import type {
   GenerateChatAssistInput,
   GenerateChatAssistResult,
 } from '@kindora/agent';
-import {
-  CHAT_ASSIST_KINDS,
-  generateChatAssist,
-  type ChatAssistKind,
-} from '@kindora/agent';
+import { CHAT_ASSIST_KINDS, generateChatAssist, type ChatAssistKind } from '@kindora/agent';
 import type { MatchAnalysis, SocialProfile } from '@kindora/protocol';
 
 export interface ChatAssistHistoryEntry {
@@ -157,15 +153,13 @@ const KIND_LABEL: Record<ChatAssistKind, string> = Object.freeze({
  * kind labels. Pure — no React / no DOM.
  */
 export function summariseChatAssist(reply: ChatAssistReply): ChatAssistDisplay {
-  const suggestions: ChatAssistDisplaySuggestion[] = reply.suggestions.map(
-    (s, idx) => ({
-      id: `assist-${idx}-${s.kind}`,
-      kind: s.kind,
-      kindLabel: KIND_LABEL[s.kind],
-      text: s.text,
-      rationale: s.rationale,
-    }),
-  );
+  const suggestions: ChatAssistDisplaySuggestion[] = reply.suggestions.map((s, idx) => ({
+    id: `assist-${idx}-${s.kind}`,
+    kind: s.kind,
+    kindLabel: KIND_LABEL[s.kind],
+    text: s.text,
+    rationale: s.rationale,
+  }));
   return {
     summary: reply.summary,
     suggestions: Object.freeze(suggestions),

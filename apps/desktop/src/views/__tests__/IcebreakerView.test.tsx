@@ -7,7 +7,10 @@ beforeEach(() => {
   cleanup();
 });
 
-function makeResult(topics: readonly string[], overrides: Partial<GenerateIcebreakerResult> = {}): GenerateIcebreakerResult {
+function makeResult(
+  topics: readonly string[],
+  overrides: Partial<GenerateIcebreakerResult> = {},
+): GenerateIcebreakerResult {
   return {
     topics,
     messages: [],
@@ -16,6 +19,7 @@ function makeResult(topics: readonly string[], overrides: Partial<GenerateIcebre
     degraded: false,
     degradationNote: null,
     boundaryBlocked: false,
+    notices: [],
     ...overrides,
   };
 }

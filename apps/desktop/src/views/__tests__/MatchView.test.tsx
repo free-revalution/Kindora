@@ -28,10 +28,12 @@ function makeOutcome(peer: string = 'Bob'): MatchOutcome {
       rawResponse: '',
       degraded: false,
       degradationNote: null,
+      // Phase F2: the caller is told what happened to the untrusted
+      // parts of the prompt. Nothing was untrusted here.
+      notices: [],
     },
     peerAnalysisTimeoutMs: 30_000,
     peerAnalysisTimedOut: false,
-    peerRefused: false,
   };
 }
 
@@ -42,9 +44,7 @@ beforeEach(() => {
 describe('apps/desktop — MatchView', () => {
   it('renders all 5 required fields for a strong match', () => {
     const outcome = makeOutcome();
-    render(
-      <MatchView phase="done" outcome={outcome} onDisconnect={() => undefined} />,
-    );
+    render(<MatchView phase="done" outcome={outcome} onDisconnect={() => undefined} />);
     // Both local and peer analyses are 'strong', so "Strong match" appears twice.
     expect(screen.getAllByText('Strong match').length).toBeGreaterThan(0);
     expect(screen.getByText('typescript')).toBeInTheDocument();
@@ -79,9 +79,7 @@ describe('apps/desktop — MatchView', () => {
   });
 
   it('shows the peer display name and short agent id', () => {
-    render(
-      <MatchView phase="done" outcome={makeOutcome('Bob')} onDisconnect={() => undefined} />,
-    );
+    render(<MatchView phase="done" outcome={makeOutcome('Bob')} onDisconnect={() => undefined} />);
     expect(screen.getByText('Bob')).toBeInTheDocument();
     expect(screen.getByText(/22222222/)).toBeInTheDocument();
   });
@@ -106,7 +104,13 @@ describe('apps/desktop — MatchView', () => {
   it('fires onDisconnect when the disconnect button is clicked', () => {
     let called = 0;
     render(
-      <MatchView phase="done" outcome={makeOutcome()} onDisconnect={() => { called += 1; }} />,
+      <MatchView
+        phase="done"
+        outcome={makeOutcome()}
+        onDisconnect={() => {
+          called += 1;
+        }}
+      />,
     );
     fireEvent.click(screen.getByRole('button', { name: /disconnect/i }));
     expect(called).toBe(1);
@@ -144,12 +148,7 @@ describe('apps/desktop — MatchView', () => {
     const peerClosed = new HandshakeClosedError(
       'Peer closed the connection before hello was received.',
     );
-    render(
-      <LiveMatchView
-        run={() => Promise.reject(peerClosed)}
-        onDisconnect={() => undefined}
-      />,
-    );
+    render(<LiveMatchView run={() => Promise.reject(peerClosed)} onDisconnect={() => undefined} />);
     await waitFor(() => {
       expect(
         screen.getByText(/peer closed the connection before hello was received/i),
@@ -171,9 +170,7 @@ describe('apps/desktop — MatchView', () => {
       expect(screen.getByText(/stream closed unexpectedly/)).toBeInTheDocument();
     });
     // The peer-close specific copy is NOT present.
-    expect(
-      screen.queryByText(/peer closed the connection before hello was received/i),
-    ).toBeNull();
+    expect(screen.queryByText(/peer closed the connection before hello was received/i)).toBeNull();
   });
 
   it('MatchView error view renders the message and a back button (peer-close goes through the same path)', () => {

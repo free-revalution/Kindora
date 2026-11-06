@@ -1,11 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import type { MatchAnalysis } from '@kindora/protocol';
-import {
-  compatibilityLabel,
-  formatExplanation,
-  formatList,
-  summariseAnalysis,
-} from '../display';
+import { compatibilityLabel, formatExplanation, formatList, summariseAnalysis } from '../display';
 
 function analysis(overrides: Partial<MatchAnalysis> = {}): MatchAnalysis {
   return {

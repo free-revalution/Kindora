@@ -49,7 +49,10 @@ function sampleSocialAgent(): SocialAgent {
       supportsMatchAnalysis: true,
       supportsIcebreaker: true,
       supportsChatAssist: true,
-      supportsEncryption: true,
+      supportsMessageSigning: false,
+      supportsSessionEncryption: false,
+      supportsTransportEncryption: false,
+      supportsWebRtc: false,
     },
   };
 }

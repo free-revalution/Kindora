@@ -29,7 +29,7 @@
   "bundle": {
     "active": true,
     "targets": "all",
-    "category": "Social",
+    "category": "SocialNetworking",
     "shortDescription": "Personal AI Social Agent client.",
     "longDescription": "Kindora is an open-source personal AI social agent client that helps people discover meaningful human connections through agent-to-agent matching.",
     "icon": [

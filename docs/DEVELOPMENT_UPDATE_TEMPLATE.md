@@ -46,8 +46,8 @@ Point at the diff in docs/DEVELOPMENT_STATUS.md for this month.
 Only list entries whose state actually moved.
 -->
 
-| Capability | Before | After |
-| --- | --- | --- |
+| Capability   | Before                   | After       |
+| ------------ | ------------------------ | ----------- |
 | <Capability> | Implemented, unvalidated | Implemented |
 
 ---

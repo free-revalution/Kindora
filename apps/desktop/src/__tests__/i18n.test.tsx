@@ -90,7 +90,8 @@ describe('apps/desktop — i18n dictionary integrity', () => {
     ]);
 
     const untranslated = Object.keys(en).filter(
-      (k) => en[k as TranslationKey] === zh[k as TranslationKey] && !intentionallyUntranslated.has(k),
+      (k) =>
+        en[k as TranslationKey] === zh[k as TranslationKey] && !intentionallyUntranslated.has(k),
     );
     expect(untranslated).toEqual([]);
   });

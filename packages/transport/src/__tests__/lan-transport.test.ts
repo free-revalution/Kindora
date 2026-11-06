@@ -16,6 +16,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { LanTransport } from '../lan-transport';
+import type { SessionCipher } from '../session-crypto';
 import { decodeEnvelope, encodeEnvelope, type KsaMessage } from '@kindora/protocol';
 
 interface MockLink {
@@ -33,7 +34,13 @@ interface MockState {
   joinLink: MockLink | null;
   hostStarted: boolean;
   joinStarted: boolean;
-  discoverResults: Array<{ ip: string; port: number; agent_id: string; display_name: string; code: string }>;
+  discoverResults: Array<{
+    ip: string;
+    port: number;
+    agent_id: string;
+    display_name: string;
+    code: string;
+  }>;
   /**
    * Phase 16.4: control whether the next `lan_host_poll` /
    * `lan_join_poll` invocation throws `peer closed`. Once set, the
@@ -44,6 +51,14 @@ interface MockState {
    */
   hostPollPeerClosed: boolean;
   joinPollPeerClosed: boolean;
+  /**
+   * Phase C / C2: when non-null, `lan_host_poll` rejects with this
+   * exact message instead of returning messages. Used to simulate
+   * the terminal non-peer-closed rejections the Rust side can now
+   * report — `peer exceeded limit: …` (a resource-limit breach) and
+   * `invalid: …` (a frame we could not decode).
+   */
+  hostPollError: string | null;
   /**
    * Phase 16.5: optional delay (ms) before `lan_host_stop`
    * resolves. Used to test that `startHost` waits for the
@@ -96,11 +111,69 @@ function makeKsaHello(agentId: string, displayName: string): KsaMessage {
         supportsMatchAnalysis: true,
         supportsIcebreaker: true,
         supportsChatAssist: true,
-        supportsEncryption: false,
+        supportsMessageSigning: false,
+        supportsSessionEncryption: false,
+        supportsTransportEncryption: false,
+        supportsWebRtc: false,
       },
       status: 'available',
     },
   } as unknown as KsaMessage;
+}
+
+/**
+ * Phase C / C3 § 6 — a stub session cipher.
+ *
+ * The real AES-256-GCM is exercised in `session-crypto.test.ts`. What
+ * matters *here* is when the cipher is installed and when it is
+ * destroyed — that is the whole of C3 § 6 — so the stub records its
+ * own teardown and decrypts to a fixed, valid `hello` payload.
+ */
+function makeStubCipher(payload: unknown) {
+  const destroySpy = vi.fn();
+  const cipher: SessionCipher = {
+    async seal(plaintext: Uint8Array) {
+      return { nonce: new Uint8Array(12), ciphertext: plaintext };
+    },
+    async open() {
+      return new TextEncoder().encode(JSON.stringify(payload));
+    },
+    destroy: destroySpy,
+  };
+  return { cipher, destroySpy };
+}
+
+/**
+ * The payload the stub cipher "decrypts" to. It has to survive the
+ * protocol's `hello` payload validator, otherwise `openFrame` would
+ * reject it and the frame would be dropped for the wrong reason.
+ */
+const STUB_HELLO_PAYLOAD = {
+  displayName: 'Peer',
+  capabilities: {
+    protocolVersion: '0.1',
+    supportsMatchAnalysis: true,
+    supportsIcebreaker: true,
+    supportsChatAssist: true,
+  },
+  status: 'available',
+};
+
+/**
+ * A wire frame in the encrypted session-frame shape. The transport
+ * cannot tell it apart from a real one until it tries to decrypt it.
+ */
+function makeSessionFrame(messageId: string): string {
+  return JSON.stringify({
+    protocol: 'KSA',
+    version: '0.1',
+    messageId,
+    timestamp: new Date().toISOString(),
+    type: 'hello',
+    sender: '00000000-0000-4000-8000-000000000001',
+    nonce: 'AAAAAAAAAAAAAAAA',
+    ciphertext: 'AAAAAAAAAAAAAAAA',
+  });
 }
 
 function installTauriMock(state: MockState) {
@@ -121,7 +194,12 @@ function installTauriMock(state: MockState) {
             throw new Error(state.hostStartFails);
           }
           state.hostStarted = true;
-          return { tcp_port: 52420, agent_id: args?.agentId, display_name: args?.displayName, code: args?.code };
+          return {
+            tcp_port: 52420,
+            agent_id: args?.agentId,
+            display_name: args?.displayName,
+            code: args?.code,
+          };
         case 'lan_host_status':
           return state.hostStarted
             ? { tcp_port: 52420, agent_id: 'self', display_name: 'self', code: 'ABC123' }
@@ -129,6 +207,7 @@ function installTauriMock(state: MockState) {
         case 'lan_host_linked':
           return Boolean(state.hostLink?.connected);
         case 'lan_host_poll': {
+          if (state.hostPollError) throw new Error(state.hostPollError);
           if (state.hostPollPeerClosed) throw new Error('peer closed');
           const link = state.hostLink;
           if (!link) return [];
@@ -207,6 +286,7 @@ describe('LanTransport (Tauri shim)', () => {
       discoverResults: [],
       hostPollPeerClosed: false,
       joinPollPeerClosed: false,
+      hostPollError: null,
       hostStopDelayMs: 0,
       joinDisconnectDelayMs: 0,
       hostStopFails: null,
@@ -220,7 +300,10 @@ describe('LanTransport (Tauri shim)', () => {
 
   afterEach(async () => {
     // disconnect any in-flight transport by running the tauri mock reset
-    if (state.hostStarted) await new LanTransport({ selfAgentId: 'self', selfDisplayName: 'self' }).startHost('ZZZZZZ').catch(() => undefined);
+    if (state.hostStarted)
+      await new LanTransport({ selfAgentId: 'self', selfDisplayName: 'self' })
+        .startHost('ZZZZZZ')
+        .catch(() => undefined);
   });
 
   it('throws in non-Tauri runtime', () => {
@@ -500,6 +583,77 @@ describe('LanTransport (Tauri shim)', () => {
     state.hostPollPeerClosed = true;
     await new Promise((r) => setTimeout(r, 500));
     expect(fired).toBe(0);
+    await t.disconnect();
+  });
+
+  // ---- Phase C / C2: the close reason reaches the handler ----
+
+  it('host: a limit breach fires onClose with reason "limit-exceeded"', async () => {
+    const t = new LanTransport({ selfAgentId: 'self', selfDisplayName: 'Self' });
+    await t.startHost('ABC123');
+    state.hostLink = { inbound: [], outbound: [], connected: true };
+    state.hostPollError = 'peer exceeded limit: more than 50 messages per second';
+    const reasons: string[] = [];
+    t.onClose((reason) => {
+      reasons.push(reason);
+    });
+    await new Promise((r) => setTimeout(r, 500));
+    expect(reasons).toEqual(['limit-exceeded']);
+    // The poll loop must have stopped — a limit breach is terminal,
+    // not a transient error to retry forever.
+    const callsAfterClose = state.callLog.filter((c) => c === 'lan_host_poll').length;
+    await new Promise((r) => setTimeout(r, 500));
+    expect(state.callLog.filter((c) => c === 'lan_host_poll').length).toBe(callsAfterClose);
+    await t.disconnect();
+  });
+
+  it('host: an undecodable frame fires onClose with reason "invalid-frame"', async () => {
+    const t = new LanTransport({ selfAgentId: 'self', selfDisplayName: 'Self' });
+    await t.startHost('ABC123');
+    state.hostLink = { inbound: [], outbound: [], connected: true };
+    state.hostPollError = 'invalid: invalid utf-8 sequence of 3 bytes from index 0';
+    const reasons: string[] = [];
+    t.onClose((reason) => {
+      reasons.push(reason);
+    });
+    await new Promise((r) => setTimeout(r, 500));
+    expect(reasons).toEqual(['invalid-frame']);
+    await t.disconnect();
+  });
+
+  it('a transient poll error does NOT fire onClose', async () => {
+    // `not connected` is a local teardown marker, not a peer drop —
+    // the transport must keep polling and must not report a close.
+    const t = new LanTransport({ selfAgentId: 'self', selfDisplayName: 'Self' });
+    await t.startHost('ABC123');
+    state.hostLink = { inbound: [], outbound: [], connected: true };
+    state.hostPollError = 'not connected';
+    let fired = 0;
+    t.onClose(() => {
+      fired += 1;
+    });
+    await new Promise((r) => setTimeout(r, 500));
+    expect(fired).toBe(0);
+    await t.disconnect();
+  });
+
+  it('a late onClose subscriber still receives the close reason', async () => {
+    const t = new LanTransport({ selfAgentId: 'self', selfDisplayName: 'Self' });
+    await t.startHost('ABC123');
+    state.hostLink = { inbound: [], outbound: [], connected: true };
+    state.hostPollError =
+      'peer exceeded limit: frame of 33554432 bytes exceeds the 1048576-byte limit';
+    t.onClose(() => undefined);
+    await new Promise((r) => setTimeout(r, 500));
+    // Registered after the close already fired — the late-subscriber
+    // contract says it still gets called, and it must get the
+    // *reason*, not just a bare notification.
+    const reasons: string[] = [];
+    t.onClose((reason) => {
+      reasons.push(reason);
+    });
+    await new Promise((r) => setTimeout(r, 50));
+    expect(reasons).toEqual(['limit-exceeded']);
     await t.disconnect();
   });
 
@@ -809,7 +963,13 @@ describe('LanTransport (Tauri shim)', () => {
     state.joinLink = null;
     state.joinPollPeerClosed = false;
     state.discoverResults = [
-      { ip: '192.168.1.11', port: 52421, agent_id: 'peer2', display_name: 'Peer 2', code: 'DEF456' },
+      {
+        ip: '192.168.1.11',
+        port: 52421,
+        agent_id: 'peer2',
+        display_name: 'Peer 2',
+        code: 'DEF456',
+      },
     ];
     await t.startJoin(state.discoverResults[0]!);
     let secondFired = 0;
@@ -1152,6 +1312,158 @@ describe('LanTransport (Tauri shim)', () => {
     // stays at 1.
     expect(firstConnFired).toBe(1);
     await t.disconnect();
+  });
+
+  /* ---------------------------------------------------------------- */
+  /* Phase C / C3 — the connection lifecycle.                          */
+  /*                                                                   */
+  /* § 6 — the session key must not outlive the link it belongs to.     */
+  /* § 7 — a duplicate connect must not start a second connection.      */
+  /* ---------------------------------------------------------------- */
+
+  it('C3 § 6: the session cipher is destroyed when the peer drops', async () => {
+    const t = new LanTransport({ selfAgentId: 'self', selfDisplayName: 'Self' });
+    await t.startHost('ABC123');
+    const { cipher, destroySpy } = makeStubCipher(STUB_HELLO_PAYLOAD);
+    t.setSessionCipher(cipher);
+    expect(destroySpy).not.toHaveBeenCalled();
+
+    // The peer drops.
+    state.hostLink = { inbound: [], outbound: [], connected: true };
+    state.hostPollPeerClosed = true;
+    await new Promise((r) => setTimeout(r, 500));
+
+    // The key dies with the link.
+    expect(destroySpy).toHaveBeenCalledTimes(1);
+    await t.disconnect();
+  });
+
+  it("C3 § 6: a new connection does not inherit the previous connection's session key", async () => {
+    const t = new LanTransport({ selfAgentId: 'self', selfDisplayName: 'Self' });
+    await t.startHost('ABC123');
+    const { cipher, destroySpy } = makeStubCipher(STUB_HELLO_PAYLOAD);
+    t.setSessionCipher(cipher);
+
+    // The peer drops — the key dies with the link.
+    state.hostLink = { inbound: [], outbound: [], connected: true };
+    state.hostPollPeerClosed = true;
+    await new Promise((r) => setTimeout(r, 500));
+    expect(destroySpy).toHaveBeenCalledTimes(1);
+
+    // A NEW connection on the same transport instance. The peer on
+    // the other end does not have the old key, so what we send must
+    // be a plain envelope — not a frame sealed with the dead key.
+    state.hostLink = null;
+    state.hostStarted = false;
+    state.hostPollPeerClosed = false;
+    await t.startHost('DEF456');
+    state.hostLink = { inbound: [], outbound: [], connected: true };
+
+    await t.send(makeKsaHello('self', 'Self'));
+    const outbound = state.hostLink.outbound;
+    expect(outbound.length).toBe(1);
+    const raw = outbound[0];
+    expect(raw).toBeDefined();
+    const parsed = JSON.parse(raw!) as Record<string, unknown>;
+    expect(parsed.nonce).toBeUndefined();
+    expect(parsed.ciphertext).toBeUndefined();
+    expect(parsed.payload).toBeDefined();
+
+    await t.disconnect();
+  });
+
+  it('C3 § 6: a frame that arrives before the cipher is installed is delivered once the cipher lands', async () => {
+    // The control for the next test: the queue really does deliver
+    // once a cipher arrives.
+    const t = new LanTransport({ selfAgentId: 'self', selfDisplayName: 'Self' });
+    await t.startHost('ABC123');
+    const got: KsaMessage[] = [];
+    t.onMessage((m) => got.push(m));
+
+    state.hostLink = {
+      inbound: [makeSessionFrame('11111111-2222-4333-8444-aaaaaaaaaaaa')],
+      outbound: [],
+      connected: true,
+    };
+    // The poll picks the frame up and queues it — there is no cipher
+    // yet, so nothing is delivered.
+    await new Promise((r) => setTimeout(r, 500));
+    expect(got).toHaveLength(0);
+
+    const { cipher } = makeStubCipher(STUB_HELLO_PAYLOAD);
+    t.setSessionCipher(cipher);
+    await new Promise((r) => setTimeout(r, 100));
+    expect(got).toHaveLength(1);
+    expect(got[0]?.type).toBe('hello');
+
+    await t.disconnect();
+  });
+
+  it('C3 § 6: a queued frame that belongs to the previous peer is dropped when the link dies', async () => {
+    const t = new LanTransport({ selfAgentId: 'self', selfDisplayName: 'Self' });
+    await t.startHost('ABC123');
+    const got: KsaMessage[] = [];
+    t.onMessage((m) => got.push(m));
+
+    state.hostLink = {
+      inbound: [makeSessionFrame('22222222-3333-4444-8555-bbbbbbbbbbbb')],
+      outbound: [],
+      connected: true,
+    };
+    // The frame is queued (no cipher yet) and stays queued.
+    await new Promise((r) => setTimeout(r, 500));
+    expect(got).toHaveLength(0);
+
+    // The peer drops. The queue dies with the link.
+    state.hostPollPeerClosed = true;
+    await new Promise((r) => setTimeout(r, 500));
+
+    // A reconnect would install a NEW cipher. The dead peer's frame
+    // must not be decrypted with it — it belongs to a peer that is
+    // gone, and decrypting it would hand the new peer a message it
+    // never sent.
+    const { cipher } = makeStubCipher(STUB_HELLO_PAYLOAD);
+    t.setSessionCipher(cipher);
+    await new Promise((r) => setTimeout(r, 100));
+    expect(got).toHaveLength(0);
+
+    await t.disconnect();
+  });
+
+  it('C3 § 7: two concurrent connect() calls run ONE discovery and ONE dial', async () => {
+    const t = new LanTransport({ selfAgentId: 'self', selfDisplayName: 'Self' });
+    state.discoverResults = [
+      { ip: '192.168.1.10', port: 52420, agent_id: 'peer', display_name: 'Peer', code: 'ABC123' },
+    ];
+
+    await Promise.all([
+      t.connect({ agentId: 'peer', displayName: 'Peer', hint: 'ABC123' }),
+      t.connect({ agentId: 'peer', displayName: 'Peer', hint: 'ABC123' }),
+    ]);
+
+    // One discovery, one dial. The second caller joined the attempt
+    // that was already in flight instead of starting its own.
+    expect(state.callLog.filter((c) => c === 'lan_join_discover')).toHaveLength(1);
+    expect(state.callLog.filter((c) => c === 'lan_join_connect')).toHaveLength(1);
+    expect(t.isConnected()).toBe(true);
+
+    await t.disconnect();
+  });
+
+  it('C3 § 7: both concurrent connect() callers see the same failure', async () => {
+    const t = new LanTransport({ selfAgentId: 'self', selfDisplayName: 'Self' });
+    state.discoverResults = [];
+
+    const results = await Promise.allSettled([
+      t.connect({ agentId: 'peer', displayName: 'Peer', hint: 'NOSUCH' }),
+      t.connect({ agentId: 'peer', displayName: 'Peer', hint: 'NOSUCH' }),
+    ]);
+
+    expect(results[0]?.status).toBe('rejected');
+    expect(results[1]?.status).toBe('rejected');
+    // Still only one discovery — and no dial at all.
+    expect(state.callLog.filter((c) => c === 'lan_join_discover')).toHaveLength(1);
+    expect(state.callLog.filter((c) => c === 'lan_join_connect')).toHaveLength(0);
   });
 });
 

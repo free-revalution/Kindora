@@ -27,7 +27,10 @@ const HOST_AGENT_ID: &str = "11111111-2222-4333-8444-555555555555";
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().collect();
     if args.len() != 3 {
-        eprintln!("[host] FAIL: usage: {} <local_udp_port> <peer_udp_port>", args[0]);
+        eprintln!(
+            "[host] FAIL: usage: {} <local_udp_port> <peer_udp_port>",
+            args[0]
+        );
         return ExitCode::from(2);
     }
     let local_port: u16 = match args[1].parse() {
@@ -57,7 +60,6 @@ fn main() -> ExitCode {
         eprintln!("[host] FAIL: set_read_timeout: {}", e);
         return ExitCode::from(3);
     }
-    let peer_addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, peer_port));
 
     // Stage 1: wait for "ready" from joiner.
     let mut buf = [0u8; 4096];
@@ -130,7 +132,10 @@ fn main() -> ExitCode {
                     eprintln!("[host] FAIL: ack agent_id not UUID v4: {:?}", agent_id);
                     return ExitCode::from(6);
                 }
-                let pv = v.get("protocol_version").and_then(|p| p.as_str()).unwrap_or("");
+                let pv = v
+                    .get("protocol_version")
+                    .and_then(|p| p.as_str())
+                    .unwrap_or("");
                 if pv != PROTOCOL_VERSION {
                     eprintln!(
                         "[host] FAIL: ack protocol_version {:?} != {:?}",
@@ -165,12 +170,18 @@ fn is_uuid_v4(s: &str) -> bool {
     if parts.len() != 5 {
         return false;
     }
-    if parts[0].len() != 8 || parts[1].len() != 4 || parts[2].len() != 4
-        || parts[3].len() != 4 || parts[4].len() != 12
+    if parts[0].len() != 8
+        || parts[1].len() != 4
+        || parts[2].len() != 4
+        || parts[3].len() != 4
+        || parts[4].len() != 12
     {
         return false;
     }
-    let all_hex = format!("{}{}{}{}{}", parts[0], parts[1], parts[2], parts[3], parts[4]);
+    let all_hex = format!(
+        "{}{}{}{}{}",
+        parts[0], parts[1], parts[2], parts[3], parts[4]
+    );
     if !all_hex.chars().all(|c| c.is_ascii_hexdigit()) {
         return false;
     }

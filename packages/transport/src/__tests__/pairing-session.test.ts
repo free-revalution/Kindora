@@ -1,15 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
-import {
-  createDisconnect,
-  type KsaMessage,
-  SensitiveFieldError,
-} from '@kindora/protocol';
-import {
-  LoopbackHub,
-  LoopbackTransport,
-  PairingSession,
-  WireRateLimitExceeded,
-} from '../index';
+import { createDisconnect, type KsaMessage, SensitiveFieldError } from '@kindora/protocol';
+import { LoopbackHub, LoopbackTransport, PairingSession, WireRateLimitExceeded } from '../index';
 
 const A = '11111111-2222-4333-8444-aaaaaaaaaaaa';
 const B = '22222222-3333-4444-8555-bbbbbbbbbbbb';
@@ -209,9 +200,7 @@ describe('@kindora/transport — PairingSession', () => {
       await sessionA.send(createDisconnect(A, { reason: 'three' }));
 
       // Only the first one (within the 1-token bucket) should reach the handler.
-      expect(received.map((m) => m.payload)).toEqual([
-        expect.objectContaining({ reason: 'one' }),
-      ]);
+      expect(received.map((m) => m.payload)).toEqual([expect.objectContaining({ reason: 'one' })]);
     });
 
     it('rateLimiter=null disables all rate limiting', async () => {

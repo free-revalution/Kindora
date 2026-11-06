@@ -21,6 +21,21 @@ export const LAN_ERROR_PEER_CLOSED_DISPLAY = 'peer closed';
 export const LAN_ERROR_NOT_CONNECTED_DISPLAY = 'not connected';
 
 /**
+ * Phase C / C1: the prefix of the Rust `Display` string for
+ * `LanError::LimitExceeded(String)` (see
+ * `apps/desktop/src-tauri/src/lan.rs`).
+ *
+ * Unlike the two constants above this one carries a **suffix** — the
+ * limit that was hit ("frame of 8388608 bytes exceeds the 1048576
+ * limit"), so it is matched by prefix rather than equality.
+ *
+ * It is pinned here AND in a Rust unit test
+ * (`limit_exceeded_display_matches_ipc_contract` in `lan.rs`) so
+ * neither side can drift without a deliberate, documented change.
+ */
+export const LAN_ERROR_LIMIT_EXCEEDED_PREFIX = 'peer exceeded limit: ';
+
+/**
  * LanError — typed representation of the Rust `LanError` enum.
  *
  * The Rust side serialises each error variant as its `Display` string
@@ -56,6 +71,10 @@ export type LanErrorKind =
   | 'already-running'
   /** `LanError::PeerClosed` — `Display = "peer closed"`. Phase 16.3. */
   | 'peer-closed'
+  /** `LanError::LimitExceeded(String)` — `Display = "peer exceeded limit: …"`.
+   *  Phase C / C1: the peer breached a resource limit (frame size,
+   *  message rate, inbox backpressure). */
+  | 'limit-exceeded'
   /** Anything else — could be a Tauri runtime error, a transport
    *  failure that did not come from our `LanError`, or a future Rust
    *  variant. */
@@ -80,6 +99,19 @@ export class LanError extends Error {
    */
   isPeerClosed(): boolean {
     return this.kind === 'peer-closed';
+  }
+
+  /**
+   * True iff the peer breached a Phase C / C1 resource limit — an
+   * oversized frame, a message rate above the per-connection cap, or
+   * an inbox that stayed full past the backpressure window.
+   *
+   * These are *not* `peer-closed`: the transport dropped the link, so
+   * the peer is gone too, but the caller usually wants to say "you
+   * were sending too much" rather than "the connection ended".
+   */
+  isLimitExceeded(): boolean {
+    return this.kind === 'limit-exceeded';
   }
 
   /**
@@ -123,6 +155,9 @@ export class LanError extends Error {
     if (message.startsWith('io error: ')) return new LanError('io', message);
     if (message.startsWith('json error: ')) return new LanError('json', message);
     if (message.startsWith('invalid: ')) return new LanError('invalid', message);
+    if (message.startsWith(LAN_ERROR_LIMIT_EXCEEDED_PREFIX)) {
+      return new LanError('limit-exceeded', message);
+    }
     if (message.startsWith('already running in mode ')) {
       return new LanError('already-running', message);
     }

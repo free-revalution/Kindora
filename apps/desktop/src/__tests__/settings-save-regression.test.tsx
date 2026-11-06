@@ -179,9 +179,7 @@ describe('apps/desktop — Settings save feedback', () => {
     // disk), so the banner assertion goes inside `waitFor`: a plain
     // `expect(...).not.toBeInTheDocument()` would race the refresh and fail
     // on a working save.
-    await waitFor(() =>
-      expect(screen.queryByText(/LLM not configured/i)).not.toBeInTheDocument(),
-    );
+    await waitFor(() => expect(screen.queryByText(/LLM not configured/i)).not.toBeInTheDocument());
     expect(await screen.findByTestId('host-pairing-code')).toBeInTheDocument();
   });
 

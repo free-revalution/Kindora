@@ -78,10 +78,7 @@ describe('@kindora/storage — BrowserLocalStorageBlockedAgentsStore', () => {
   });
 
   it('survives malformed JSON in storage by returning an empty list', async () => {
-    globalThis.localStorage.setItem(
-      'kindora:phase7:blocked-agents:v1',
-      'this is not json',
-    );
+    globalThis.localStorage.setItem('kindora:phase7:blocked-agents:v1', 'this is not json');
     const s = new BrowserLocalStorageBlockedAgentsStore();
     expect(await s.list()).toEqual([]);
   });

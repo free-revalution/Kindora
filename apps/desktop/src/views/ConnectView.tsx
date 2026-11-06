@@ -19,6 +19,8 @@
 
 import { useEffect, useRef, useState, type FormEvent } from 'react';
 import type { MatchOrchestrator } from '@kindora/matching';
+import type { ConnectionState } from '@kindora/transport';
+import { formatPairingFingerprint, type PairingSession } from '@kindora/transport';
 import { startHost, startJoin, toConnectInput, type ConnectHandle } from '../lib/connect-service';
 import {
   isLanAvailable,
@@ -27,6 +29,7 @@ import {
   toLanInput,
   type LanConnectHandle,
 } from '../lib/lan-connect-service';
+import { ConnectionStatus } from './ConnectionStatus';
 import { useTranslate } from '../i18n';
 
 export type ConnectMode = 'host' | 'join';
@@ -54,9 +57,7 @@ export function ConnectView({
 }: ConnectViewProps) {
   const t = useTranslate();
   const [mode, setMode] = useState<ConnectMode>('host');
-  const [transport, setTransport] = useState<TransportMode>(
-    isLanAvailable() ? 'lan' : 'loopback',
-  );
+  const [transport, setTransport] = useState<TransportMode>(isLanAvailable() ? 'lan' : 'loopback');
   const lanAvailable = isLanAvailable();
 
   return (
@@ -78,7 +79,7 @@ export function ConnectView({
 
       {!llmReady && (
         <section className="kindora-card flex flex-col gap-2">
-          <h2 className="text-rose-600 dark:text-rose-400 text-xs uppercase tracking-wide">
+          <h2 className="text-xs uppercase tracking-wide text-rose-600 dark:text-rose-400">
             {llmNotReadyTitle ?? t('connect.llmNotConfigured')}
           </h2>
           <p className="text-sm leading-relaxed">
@@ -135,6 +136,108 @@ export function ConnectView({
 }
 
 /* ------------------------------------------------------------------ */
+/* Shared helpers                                                       */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Phase A / A3 — surface a **security** failure to the user.
+ *
+ * The session closes itself with a specific `closeReason` when a check
+ * fails outright (a fingerprint that does not match, a peer that
+ * contradicts its own capability claim, a failed key agreement). Those
+ * are not "the other person cancelled" — the user needs to know that
+ * the pairing was refused and why.
+ *
+ * Phase C / C2 — the same mechanism now carries the **transport** close
+ * reasons. The Rust side reports why a link ended, the transport
+ * classifies it, the session stores it in `closeReason`, and this hook
+ * turns it into a message. Without this the UI could only say
+ * "something went wrong", which is exactly the "异常关闭被误判" case
+ * C2 § 6 rules out.
+ */
+function useCloseReasonError(
+  session: PairingSession | null | undefined,
+  onError: (message: string) => void,
+): void {
+  const t = useTranslate();
+  useEffect(() => {
+    if (!session) return undefined;
+    return session.onStateChange((snap) => {
+      if (snap.state !== 'closed') return;
+      if (snap.closeReason === 'peer-fingerprint-mismatch') {
+        onError(t('connect.fingerprintMismatch'));
+        return;
+      }
+      if (snap.closeReason === 'limit-exceeded') {
+        onError(t('connect.limitExceeded'));
+        return;
+      }
+      if (snap.closeReason === 'invalid-frame') {
+        onError(t('connect.invalidFrame'));
+        return;
+      }
+      if (snap.closeReason === 'peer-closed') {
+        onError(t('connect.peerDisconnected'));
+      }
+    });
+  }, [session, onError, t]);
+}
+
+/* ------------------------------------------------------------------ */
+/* Connection lifecycle (Phase C / C3 § 1 + § 8)                        */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Follow the LAN connection lifecycle and offer a reconnect.
+ *
+ * Returns:
+ *   - `state` — the current connection state, or `null` when the
+ *     handle does not report one (the in-process loopback path has
+ *     no "the peer went away" event).
+ *   - `reconnect` — a callback that asks the service to pair again,
+ *     or `null` when there is nothing to reconnect.
+ *   - `error` — why the last reconnect attempt failed, if it did.
+ *
+ * The reconnect itself lives in `lan-connect-service`: it rebuilds
+ * the transport and the session from scratch, so the identity check
+ * and the secure handshake are redone (C3 § 5).
+ */
+function useLanConnectionState(handle: LanConnectHandle | null): {
+  state: ConnectionState | null;
+  reconnect: (() => void) | null;
+  error: string | null;
+} {
+  const [state, setState] = useState<ConnectionState | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!handle) {
+      setState(null);
+      return undefined;
+    }
+    setState(handle.connectionState());
+    return handle.onConnectionStateChange((next) => {
+      setState(next);
+    });
+  }, [handle]);
+
+  const reconnect = handle
+    ? () => {
+        setError(null);
+        // The two roles have different return types; the caller does
+        // not care, so widen it once here.
+        const attempt: Promise<unknown> =
+          handle.role === 'host' ? handle.reconnect() : handle.reconnect();
+        void attempt.catch((e: unknown) => {
+          setError(e instanceof Error ? e.message : String(e));
+        });
+      }
+    : null;
+
+  return { state, reconnect, error };
+}
+
+/* ------------------------------------------------------------------ */
 /* Host panel                                                          */
 /* ------------------------------------------------------------------ */
 
@@ -152,6 +255,10 @@ function HostPanel({
   const [lanHandle, setLanHandle] = useState<LanConnectHandle | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  // Phase C / C3 § 8 — follow the connection lifecycle so the user
+  // sees 连接中 / 已连接 / 断开 / 重连中 / 失败 while the pairing runs.
+  const lan = useLanConnectionState(lanHandle);
+
   // Refs to the in-flight handles. Used by the unmount cleanup so
   // we always release the LAN transport + session, even when the
   // user clicks Cancel (or the parent view tears down) AFTER the
@@ -165,6 +272,10 @@ function HostPanel({
   // the host side of the connection times out.
   const handleRef = useRef<ConnectHandle | null>(null);
   const lanHandleRef = useRef<LanConnectHandle | null>(null);
+
+  // Phase A / A3 — a failed identity check closes the session with a
+  // specific reason. Show it instead of a silent hang.
+  useCloseReasonError(handle?.session ?? lanHandle?.session, setError);
 
   // Unmount cleanup: release any in-flight handle. The disconnect
   // function is idempotent (see `lan-connect-service.ts`) so a
@@ -275,17 +386,43 @@ function HostPanel({
         // MatchOrchestrators on the same session (double LLM call,
         // duplicate match_request envelopes).
         let cachedOrchestrator: MatchOrchestrator | null = null;
+        let cachedSession: PairingSession | null = null;
         const bridged: ConnectHandle = {
           pairingCode: lanHandle.pairingCode,
-          session: lanHandle.session,
+          // Phase C / C3: a getter, not a captured reference. A
+          // reconnect builds a NEW session on the LAN handle, and a
+          // value captured here would keep pointing at the dead one.
+          get session(): PairingSession {
+            return lanHandle.session;
+          },
           selfAgentId: lanHandle.selfAgentId,
           get orchestrator() {
-            if (!cachedOrchestrator) {
+            // The orchestrator is cached so repeated reads return the
+            // SAME instance — calling `lanHandle.getOrchestrator()`
+            // twice would create two MatchOrchestrators on the same
+            // session (double LLM call, duplicate match_request
+            // envelopes).
+            //
+            // Phase C / C3: the cache is keyed on the session. After a
+            // reconnect the LAN handle has a new session, and the
+            // orchestrator latches the peer's identity from the first
+            // message it sees — a cached one would carry the dead
+            // peer's state.
+            if (!cachedOrchestrator || cachedSession !== lanHandle.session) {
               cachedOrchestrator = lanHandle.getOrchestrator();
+              cachedSession = lanHandle.session;
             }
             return cachedOrchestrator;
           },
           state: snap.state,
+          // Phase C / C3 § 1 + § 8 — the connection lifecycle, so the
+          // next screen can show 连接中 / 已连接 / 断开 / 重连中 / 失败
+          // and offer a reconnect.
+          connectionState: () => lanHandle.connectionState(),
+          onConnectionStateChange: (handler) => lanHandle.onConnectionStateChange(handler),
+          reconnect: async () => {
+            await lanHandle.reconnect();
+          },
           async disconnect(reason: string = 'user-requested') {
             await lanHandle.disconnect(reason);
           },
@@ -315,7 +452,7 @@ function HostPanel({
   if (error) {
     return (
       <section className="kindora-card flex flex-col gap-2">
-        <h2 className="text-rose-600 dark:text-rose-400 text-xs uppercase tracking-wide">
+        <h2 className="text-xs uppercase tracking-wide text-rose-600 dark:text-rose-400">
           {t('common.error')}
         </h2>
         <p className="text-sm leading-relaxed">{error}</p>
@@ -337,10 +474,26 @@ function HostPanel({
         className="font-mono text-5xl font-semibold tracking-[0.4em]"
         data-testid="host-pairing-code"
       >
-        {code}
+        {/* Phase A / A3 — this is the host's *identity fingerprint*,
+            grouped for read-out. It identifies the host; it is not a
+            password and it does not open anything by itself. */}
+        {formatPairingFingerprint(code)}
       </p>
       <p className="text-kindora-500 dark:text-kindora-400 text-center text-sm">
         {t('connect.waitingForPeer')}
+      </p>
+      {lan.state && (
+        <ConnectionStatus
+          state={lan.state}
+          onReconnect={lan.reconnect ?? undefined}
+          error={lan.error}
+        />
+      )}
+      <p
+        className="text-kindora-600 dark:text-kindora-300 max-w-md text-center text-xs leading-relaxed"
+        data-testid="host-fingerprint-hint"
+      >
+        {t('connect.fingerprintHint')}
       </p>
     </section>
   );
@@ -363,6 +516,23 @@ function JoinPanel({
   const [code, setCode] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  /**
+   * Phase A / A3 — the session of the in-flight join, kept in state so
+   * a security failure (e.g. a fingerprint that does not match) can be
+   * surfaced instead of the panel looking stuck.
+   */
+  const [session, setSession] = useState<PairingSession | null>(null);
+  /**
+   * Phase C / C3 § 8 — the LAN handle, kept in state so the panel can
+   * show the connection lifecycle and offer a reconnect while the
+   * pairing is running.
+   */
+  const [lanHandle, setLanHandle] = useState<LanConnectHandle | null>(null);
+
+  useCloseReasonError(session, setError);
+
+  // Phase C / C3 § 8 — follow the connection lifecycle.
+  const lan = useLanConnectionState(lanHandle);
 
   // Tracks whether the panel is still mounted. The async submit
   // path (which awaits `startLanJoin` over real UDP) can race with
@@ -391,6 +561,10 @@ function JoinPanel({
         // awaiting, drop the result without trying to connect.
         if (!mountedRef.current) return;
         const h = await startLanJoin(input, code.trim());
+        setSession(h.session);
+        // Phase C / C3 § 8: keep the handle so the panel can show the
+        // connection lifecycle and offer a reconnect.
+        setLanHandle(h);
         // If the user cancelled during `startLanJoin` (UDP discover
         // window), the joiner may have already bound a UDP socket
         // and even established a TCP dial. Tear it down before the
@@ -404,17 +578,37 @@ function JoinPanel({
         // `h.getOrchestrator()` twice would create two
         // MatchOrchestrators on the same session.
         let cachedOrchestrator: MatchOrchestrator | null = null;
+        let cachedSession: PairingSession | null = null;
         const bridged: ConnectHandle = {
           pairingCode: h.pairingCode,
-          session: h.session,
+          // Phase C / C3: a getter — a reconnect builds a NEW session
+          // on the LAN handle.
+          get session(): PairingSession {
+            return h.session;
+          },
           selfAgentId: h.selfAgentId,
           get orchestrator() {
-            if (!cachedOrchestrator) {
+            // Cache the orchestrator so repeated reads of
+            // `bridged.orchestrator` return the SAME instance — calling
+            // `h.getOrchestrator()` twice would create two
+            // MatchOrchestrators on the same session.
+            //
+            // Phase C / C3: the cache is keyed on the session, so a
+            // reconnect does not reuse the orchestrator that latched
+            // the previous peer's identity.
+            if (!cachedOrchestrator || cachedSession !== h.session) {
               cachedOrchestrator = h.getOrchestrator();
+              cachedSession = h.session;
             }
             return cachedOrchestrator;
           },
           state: 'tcp-connected',
+          // Phase C / C3 § 1 + § 8 — the connection lifecycle.
+          connectionState: () => h.connectionState(),
+          onConnectionStateChange: (handler) => h.onConnectionStateChange(handler),
+          reconnect: async () => {
+            await h.reconnect();
+          },
           async disconnect(reason: string = 'user-requested') {
             await h.disconnect(reason);
           },
@@ -426,6 +620,7 @@ function JoinPanel({
         // guard the unmount race.
         if (!mountedRef.current) return;
         const handle = startJoin({ ...input, code: code.trim() });
+        setSession(handle.session);
         // Wait for the next tick — startJoin transitions the session
         // to 'tcp-connected' (Phase 15: NOT 'connected') on the next
         // microtask. The orchestrator will drive the `hello` exchange
@@ -465,7 +660,14 @@ function JoinPanel({
         maxLength={12}
         data-testid="join-code-input"
       />
-      {error && <p className="text-rose-600 dark:text-rose-400 text-sm">{error}</p>}
+      {error && <p className="text-sm text-rose-600 dark:text-rose-400">{error}</p>}
+      {lan.state && (
+        <ConnectionStatus
+          state={lan.state}
+          onReconnect={lan.reconnect ?? undefined}
+          error={lan.error}
+        />
+      )}
       <button
         type="submit"
         className="kindora-button self-start"
@@ -475,6 +677,9 @@ function JoinPanel({
           ? t(transport === 'lan' ? 'connect.searchingLan' : 'connect.joining')
           : t('connect.join')}
       </button>
+      <p className="text-kindora-600 dark:text-kindora-300 text-xs leading-relaxed">
+        {t('connect.fingerprintHint')}
+      </p>
     </form>
   );
 }

@@ -59,7 +59,12 @@ describe('apps/desktop — Phase 1 profile flow', () => {
     expect(stored?.profile.socialIntent).toEqual(['similar_interests', 'technical_discussion']);
     expect(stored?.profile.conversationStyle).toEqual(['technical']);
     expect(stored?.publicKey.length).toBeGreaterThan(0);
-    expect(stored?.privateKey.length).toBeGreaterThan(0);
+    // Phase A / A1: `privateKey` is optional on `StoredAgent` — in the
+    // Tauri runtime it lives in the OS keychain and the persisted record
+    // does not carry it. The second `?.` keeps the chain honest instead
+    // of relying on the property being present; the assertion itself is
+    // unchanged and still fails when the key is missing.
+    expect(stored?.privateKey?.length).toBeGreaterThan(0);
     expect(stored?.publicKey).not.toBe(stored?.privateKey);
   });
 

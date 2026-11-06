@@ -14,7 +14,11 @@
  */
 import type { ChatMessage, LLMOptions, LLMProvider } from '@kindora/llm';
 import type { MatchAnalysis, SocialProfile } from '@kindora/protocol';
-import { type BuildContextOptions, buildMatchContext } from './context-builder';
+import {
+  type BuildContextOptions,
+  buildMatchContextDetailed,
+  type UntrustedNotice,
+} from './context-builder';
 import { computeHeuristics } from './heuristics';
 import { applyBoundaryOverride, parseMatchAnalysis, type ParseResult } from './output-parser';
 
@@ -49,6 +53,14 @@ export interface AnalyzeMatchResult {
   readonly degraded: boolean;
   /** Reason for degradation, if any. */
   readonly degradationNote: string | null;
+  /**
+   * What happened to the untrusted (peer-derived) parts of the prompt.
+   *
+   * Phase F2 — the caller is told when peer content was truncated,
+   * redacted, or dropped, so it can surface that to the user instead
+   * of silently analysing a partial profile.
+   */
+  readonly notices: readonly UntrustedNotice[];
 }
 
 export async function analyzeMatch(
@@ -66,7 +78,8 @@ export async function analyzeMatch(
   // LLM and save tokens / latency / cost.
   const hints = computeHeuristics(input.selfProfile, input.peerProfile);
   if (hints.blockingIssues.length > 0) {
-    const messages = buildMatchContext(input, contextOptions);
+    const built = buildMatchContextDetailed(input, contextOptions);
+    const messages = built.messages;
     const tokens = estimateTotal(messages);
     const blocked = applyBoundaryOverride(
       // any signal — the override will reduce it to 'none'
@@ -87,10 +100,12 @@ export async function analyzeMatch(
       rawResponse: '',
       degraded: true,
       degradationNote: 'boundary-block: ' + hints.blockingIssues.join('; '),
+      notices: built.notices,
     };
   }
 
-  const messages = buildMatchContext(input, contextOptions);
+  const built = buildMatchContextDetailed(input, contextOptions);
+  const messages = built.messages;
   const tokens = estimateTotal(messages);
 
   const llmOptions: LLMOptions = {
@@ -111,6 +126,7 @@ export async function analyzeMatch(
     rawResponse: response.content,
     degraded: parsed.degraded,
     degradationNote: parsed.note,
+    notices: built.notices,
   };
 }
 

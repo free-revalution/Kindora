@@ -29,9 +29,7 @@ export function Welcome({ onCreate }: WelcomeProps) {
         {t('welcome.createAgent')}
       </button>
 
-      <p className="text-kindora-500 dark:text-kindora-400 mt-8 text-xs">
-        {t('welcome.footer')}
-      </p>
+      <p className="text-kindora-500 dark:text-kindora-400 mt-8 text-xs">{t('welcome.footer')}</p>
     </main>
   );
 }

@@ -24,12 +24,17 @@ export const zh: Dictionary = {
 
   /* ── App shell ──────────────────────────────────────────────────── */
   'app.loading': '加载中…',
+  'app.keychainErrorTitle': '无法读取你的私钥',
+  'app.keychainErrorRetry': '重试',
+  'app.databaseErrorTitle': '无法打开本地数据库',
+  'app.databaseErrorRetry': '重试',
+  'home.keychainDevWarning':
+    '浏览器预览模式：你的私钥保存在本浏览器的 localStorage 中，而不是系统钥匙串。请使用桌面应用以获得真正的保护。',
 
   /* ── Welcome ────────────────────────────────────────────────────── */
   'welcome.taglineFirst': '你的 AI 找到同频的人。',
   'welcome.taglineSecond': '而友谊，由你亲自建立。',
-  'welcome.body':
-    '创建一个懂你的私人 AI 社交助理，帮你找到真正合拍的人，然后它就退到幕后。',
+  'welcome.body': '创建一个懂你的私人 AI 社交助理，帮你找到真正合拍的人，然后它就退到幕后。',
   'welcome.createAgent': '创建我的 Agent',
   'welcome.footer': '本地优先 · 开源 · MIT',
 
@@ -44,6 +49,8 @@ export const zh: Dictionary = {
   'home.lookingFor': '想认识',
   'home.conversationStyle': '聊天风格',
   'home.connectAgent': '连接 Agent',
+  'home.blockedAgents': '已拉黑的 Agent',
+  'home.chatHistory': '聊天记录',
   'home.intent.similar_interests': '兴趣相近的人',
   'home.intent.project_partner': '项目伙伴',
   'home.intent.gaming_partner': '游戏搭子',
@@ -96,6 +103,50 @@ export const zh: Dictionary = {
   'agent.suggestedInterest.reading': '阅读',
   'agent.suggestedInterest.climbing': '攀岩',
 
+  /* ── 隐私授权（Phase B / B1） ──────────────────────────────────── */
+  'privacy.title': '隐私',
+  'privacy.intro':
+    '这些开关决定了哪些内容会离开这台设备。资料在发送前会逐字段过滤 —— 关掉的字段是根本不会发送，而不是先发了再藏起来。',
+  'privacy.behaviourTitle': '允许对方做什么',
+  'privacy.behaviourIntro': '针对这次对话本身的权限。',
+  'privacy.fieldsTitle': '资料的哪些部分可见',
+  'privacy.fieldsIntro': '你的资料按字段过滤。关掉的字段会在发送前被移除。',
+  'privacy.visible': '对外可见',
+  'privacy.hidden': '不外发',
+  'privacy.allowAgentConversation': '允许对方 Agent 发起对话',
+  'privacy.allowAgentConversationHint':
+    '关掉之后，你的 Agent 不再参与「由 Agent 协助的对话」。你自己仍然可以在聊天里打字。',
+  'privacy.allowContactExchange': '交换联系方式',
+  'privacy.allowContactExchangeHint': '允许对方索取并获得联系方式，例如邮箱或手机号。',
+  'privacy.allowOfflineMeeting': '接受线下见面',
+  'privacy.allowOfflineMeetingHint': '允许对方提出线下见面。Kindora 本身不会安排任何见面。',
+  'privacy.allowProjectDetails': '分享项目级细节',
+  'privacy.allowProjectDetailsHint': '允许对方看到代码、仓库或客户信息。不确定就别开。',
+  'privacy.allowBio': '你的简介',
+  'privacy.allowBioHint': '自由书写的自我介绍。默认关闭 —— 它常常比你想说的透露得更多。',
+  'privacy.allowInterests': '你的兴趣',
+  'privacy.allowInterestsHint': '上面列出的兴趣方向。默认开启 —— 没有它就没有可匹配的共同点。',
+  'privacy.allowCurrentActivity': '你此刻在做什么',
+  'privacy.allowCurrentActivityHint':
+    '你当前的活动。默认关闭 —— 这是资料里最新、也最暴露隐私的部分。',
+  'privacy.allowAvatar': '你的头像',
+  'privacy.allowAvatarHint': '代表你的一张图片。默认关闭。',
+  'privacy.allowSocialIntent': '你想找什么人',
+  'privacy.allowSocialIntentHint': '你希望遇到哪一类人。默认开启 —— 这是让匹配有意义的前提。',
+  'privacy.allowConversationStyle': '你的聊天风格',
+  'privacy.allowConversationStyleHint': '你喜欢怎么聊。默认开启 —— 它告诉对方该怎么跟你交流。',
+
+  /* ── 黑名单（Phase B / B3） ────────────────────────────────────── */
+  'blocked.title': '已拉黑的 Agent',
+  'blocked.intro':
+    '这些 Agent 无法与你配对。被拉黑的 Agent 会在握手阶段就被拒绝，此时它还没有拿到你的任何资料。',
+  'blocked.empty': '你还没有拉黑任何人。',
+  'blocked.unblock': '解除拉黑',
+  'blocked.blockedAt': '拉黑时间：{date}',
+  'blocked.reason': '原因：{reason}',
+  'blocked.noReason': '没有记录原因',
+  'blocked.agentId': 'Agent ID',
+
   /* ── Profile validation ─────────────────────────────────────────── */
   'validation.nickname_required': '请填写昵称。',
   'validation.nickname_too_long': '昵称最多 {max} 个字符。',
@@ -122,7 +173,8 @@ export const zh: Dictionary = {
   'settings.apiKeyPlaceholderSaved': '••••••••（已保存）—— 输入新值以替换',
   'settings.apiKeyPlaceholderEmpty': 'sk-…',
   'settings.apiKeyStorageNote': '仅保存在本地 —— 浏览器开发模式下加密存储，桌面版存入系统钥匙串。',
-  'settings.apiKeyStoredNote': '该 Provider 已保存 API Key。出于安全考虑不会显示明文 —— 输入新值即可替换。',
+  'settings.apiKeyStoredNote':
+    '该 Provider 已保存 API Key。出于安全考虑不会显示明文 —— 输入新值即可替换。',
   'settings.apiKeyClear': '删除已保存的 Key',
   'settings.apiKeyCleared': '已删除保存的 API Key。',
   'settings.apiKeyClearFailed': '删除已保存的 Key 失败：{message}',
@@ -135,17 +187,28 @@ export const zh: Dictionary = {
   'settings.connectionOk': '连接正常。模型回复：',
   'settings.language': '语言',
   'settings.languageHint': '切换后立即生效。',
-  'settings.privacyNote': 'Kindora 绝不会把你的 API Key 发给其他 Agent、写入日志，或放进你的资料里。',
+  'settings.privacyNote':
+    'Kindora 绝不会把你的 API Key 发给其他 Agent、写入日志，或放进你的资料里。',
+
+  'llm.error.auth': '请到「设置」里检查 API Key 并重新保存。',
+  'llm.error.rateLimit': '服务商正在限流 —— 请稍等片刻再试。',
+  'llm.error.timeout': '服务商没有及时响应 —— 请检查网络后重试。',
+  'llm.error.network': '无法连接服务商 —— 请检查网络和 Base URL。',
+  'llm.error.invalidResponse': '服务商的返回内容异常 —— 请检查模型名称。',
+  'llm.error.provider': '服务商报告了一个错误 —— 请检查模型名称后重试。',
+  'llm.error.aborted': '请求已取消。',
 
   /* ── Connect ────────────────────────────────────────────────────── */
   'connect.eyebrow': '连接',
   'connect.title': '与另一个 Agent 配对',
   'connect.body':
-    '把 6 位配对码发给对方，或者输入对方的配对码。配对成功后，双方的 Agent 会交换资料，并各自在本地做一次匹配分析。',
+    '把 6 位身份指纹发给对方，或者输入对方的身份指纹。配对成功后，双方的 Agent 会交换资料，并各自在本地做一次匹配分析。',
   'connect.llmNotConfigured': '尚未配置 LLM',
-  'connect.llmNotConfiguredBody': '配对前请先在设置里配置 LLM 服务商。配对会交换资料并执行本地分析，这一步需要 LLM。',
+  'connect.llmNotConfiguredBody':
+    '配对前请先在设置里配置 LLM 服务商。配对会交换资料并执行本地分析，这一步需要 LLM。',
   'connect.llmMissingApiKeyTitle': '找不到 API Key',
-  'connect.llmMissingApiKeyBody': '服务商已经保存，但钥匙串里没有它的 API Key。请到设置里重新输入 API Key 并再次保存。',
+  'connect.llmMissingApiKeyBody':
+    '服务商已经保存，但钥匙串里没有它的 API Key。请到设置里重新输入 API Key 并再次保存。',
   'connect.llmInvalidConfigTitle': '服务商配置不完整',
   'connect.llmInvalidConfigBody': '已保存的服务商无法使用。请到设置里检查 Base URL 和模型。',
   'connect.host': '发起方',
@@ -156,14 +219,31 @@ export const zh: Dictionary = {
   'connect.loopback': '本机回环',
   'connect.loopbackTitle': '本机回环：进程内配对（浏览器开发模式 / 单机测试）。',
   'connect.preparingRoom': '正在准备房间…',
-  'connect.shareCodeLan': '把这段配对码发给对方（局域网）',
-  'connect.shareCodeLoopback': '把这段配对码发给对方（本机回环）',
-  'connect.waitingForPeer': '正在等待对方输入这段配对码…',
-  'connect.pairingCodeLan': '配对码（局域网）',
-  'connect.pairingCodeLoopback': '配对码（本机回环）',
-  'connect.codePlaceholder': 'ABCDEF',
+  'connect.shareCodeLan': '把这段身份指纹发给对方（局域网）',
+  'connect.shareCodeLoopback': '把这段身份指纹发给对方（本机回环）',
+  'connect.waitingForPeer': '正在等待对方输入这段指纹…',
+  'connect.pairingCodeLan': '身份指纹（局域网）',
+  'connect.pairingCodeLoopback': '身份指纹（本机回环）',
+  'connect.codePlaceholder': 'A1B2-C3',
+  'connect.fingerprintHint':
+    '请把这 6 个字符读给对方，并确认对方屏幕上显示的是同一串。这是身份指纹，用来确认对方就是你想连接的那台设备；它不是密码，也不能单独用来打开任何东西。',
+  'connect.fingerprintMismatch': '对方的身份指纹与这一串不一致，连接已关闭。',
+  'connect.peerDisconnected': '对方已断开连接，连接已关闭。',
+  'connect.limitExceeded': '对方发送的数据超过了连接上限，连接已关闭。',
+  'connect.invalidFrame': '对方发送的数据无法解析，连接已关闭。',
   'connect.searchingLan': '正在搜索局域网…',
   'connect.joining': '正在加入…',
+
+  /* ── 连接状态（Phase C / C3 § 8） ────────────────────────────────── */
+  'connect.state.connecting': '正在连接…',
+  'connect.state.connected': '已连接',
+  'connect.state.disconnected': '已断开',
+  'connect.state.reconnecting': '正在重连…',
+  'connect.state.failed': '连接失败',
+  'connect.state.idle': '尚未连接',
+  'connect.reconnect': '重新连接',
+  'connect.reconnecting': '正在重连 —— 身份校验与安全握手会重新走一遍。',
+  'connect.reconnectFailed': '重连失败。请确认对方设备仍在运行。',
 
   /* ── Match ──────────────────────────────────────────────────────── */
   'match.connectedWith': '已连接',
@@ -188,25 +268,43 @@ export const zh: Dictionary = {
   'match.signal.weak': '契合度一般',
   'match.signal.none': '不契合',
 
+  /* ── Identify (Phase B) ─────────────────────────────────────────── */
+  'identify.eyebrow': '第 1 步 / 共 3 步',
+  'identify.title': '正在交换公开名片',
+  'identify.progress': '正在交换公开名片…',
+  'identify.body':
+    '这一步只发送一张最小公开名片 —— 昵称，以及对方愿意分享的「想找什么人」。你的完整资料仍然留在本机，要等双方都接受之后才会发送。',
+
   /* ── Consent ────────────────────────────────────────────────────── */
   'consent.eyebrowAccepted': '已连接',
   'consent.eyebrowBlocked': '已拉黑',
   'consent.eyebrowClosed': '连接已关闭',
-  'consent.eyebrowMatchFound': '发现匹配',
+  'consent.eyebrowPeerFound': '找到对方',
   'consent.close': '关闭',
   'consent.disconnect': '断开连接',
-  'consent.compatibility': '契合度',
+  'consent.publicCard': '对方的公开名片',
+  'consent.publicCardEmpty':
+    '对方没有发送公开名片。你仍然可以选择接受，但这意味着你在不了解对方的情况下做决定。',
+  'consent.publicCardNote':
+    '以上是对方目前分享的全部内容。对方资料里剩下的部分，要等双方都接受之后才会发送。',
+  'consent.cardNickname': '昵称',
+  'consent.cardIntent': '想找的人',
+  'consent.cardStyle': '聊天风格',
+  'consent.cardHidden': '未分享',
   'consent.peerNoResponse': '对方没有回应',
-  'consent.peerNoResponseBody': '你已经接受了，但 {peer} 没有及时回应。你可以关闭这次会话，稍后再试。',
+  'consent.peerNoResponseBody':
+    '你已经接受了，但 {peer} 没有及时回应。你可以关闭这次会话，稍后再试。',
   'consent.unlocked': '聊天已解锁',
   'consent.unlockedBody':
-    '你和 {peer} 都已接受，可以开始聊天了。（聊天功能属于 Phase 9 —— 目前这一步只用来确认整条链路是通的。）',
+    '你和 {peer} 都已接受。你们的资料现在开始交换，你的 Agent 正在分析契合度。',
   'consent.blockedLocal': '已拉黑',
   'consent.blockedLocalBody': '{peer} 再也无法联系到你。这个 Agent 之后发起的配对请求都会被拒绝。',
   'consent.blockedByPeer': '你被拉黑了',
-  'consent.blockedByPeerBody': '{peer} 把你拉黑了。对方的 ID 已加入你的本地黑名单，之后不会再尝试重连。',
+  'consent.blockedByPeerBody':
+    '{peer} 把你拉黑了。对方的 ID 已加入你的本地黑名单，之后不会再尝试重连。',
   'consent.bannerAwaitingHeadline': '轮到你决定',
-  'consent.bannerAwaitingBody': '决定是否与 {peer} 开启聊天。双方都接受后，聊天才会解锁。',
+  'consent.bannerAwaitingBody':
+    '决定是否与 {peer} 开启聊天。双方都接受之后，双方的完整资料才会交换。',
   'consent.bannerAcceptedLocalHeadline': '等待对方',
   'consent.bannerAcceptedLocalBody': '你已经接受了，正在等 {peer} 也接受。',
   'consent.bannerAcceptedPeerHeadline': '对方已接受',
@@ -221,7 +319,8 @@ export const zh: Dictionary = {
   'consent.accept': '接受',
   'consent.reject': '拒绝',
   'consent.block': '拉黑',
-  'consent.actionsNote': '「拉黑」会把对方的 ID 存进本地黑名单，之后无法再与你配对；「拒绝」只关闭这一次连接。',
+  'consent.actionsNote':
+    '「拉黑」会把对方的 ID 存进本地黑名单，之后无法再与你配对；「拒绝」只关闭这一次连接。',
 
   /* ── Icebreaker ─────────────────────────────────────────────────── */
   'icebreaker.eyebrow': '挑一句开场白',
@@ -255,9 +354,11 @@ export const zh: Dictionary = {
   'chat.back': '返回',
   'chat.disconnect': '断开连接',
   'chat.blockedLocal': '已拉黑',
-  'chat.blockedLocalBody': '你拉黑了 {peer}。对方的 ID 已进入本地黑名单，之后的配对请求会被自动拒绝。',
+  'chat.blockedLocalBody':
+    '你拉黑了 {peer}。对方的 ID 已进入本地黑名单，之后的配对请求会被自动拒绝。',
   'chat.blockedByPeer': '你被拉黑了',
-  'chat.blockedByPeerBody': '{peer} 把你拉黑了。对方的 ID 已加入你的本地黑名单，之后不会再尝试重连。',
+  'chat.blockedByPeerBody':
+    '{peer} 把你拉黑了。对方的 ID 已加入你的本地黑名单，之后不会再尝试重连。',
   'chat.peerLeft': '{peer} 结束了对话。',
   'chat.emptyOpen': '还没有消息 —— 打个招呼吧。',
   'chat.emptyClosed': '双方没有交换任何消息。',
@@ -271,10 +372,14 @@ export const zh: Dictionary = {
   'chat.aiNeverSends': 'AI 从不代发 —— 这里每一条消息都来自真实的人。',
   'chat.opening': '正在打开聊天…',
   'chat.bubbleYou': '我',
+  'chat.fromAgent': '来自你的 Agent',
+  'chat.statusPending': '发送中…',
+  'chat.statusFailed': '未发送',
   'chat.assist.closedPrompt': '不知道该怎么接？问问你的 Agent。',
   'chat.assist.open': '问问我的 Agent',
   'chat.assist.title': '问问我的 Agent',
-  'chat.assist.subtitle': '这些建议来自你的 Agent。每一句都要你自己过目 —— 在你亲手点「发送」之前，什么都不会发出去。',
+  'chat.assist.subtitle':
+    '这些建议来自你的 Agent。每一句都要你自己过目 —— 在你亲手点「发送」之前，什么都不会发出去。',
   'chat.assist.close': '关闭',
   'chat.assist.unavailableFallback': '助手现在不可用（尚未配置 LLM）。',
   'chat.assist.queryLabel': '你想让它帮什么忙？',
@@ -295,5 +400,22 @@ export const zh: Dictionary = {
   'chat.assist.kind.explanation': '解释说明',
 
   /* ── Language picker ────────────────────────────────────────────── */
+  /* ── 聊天记录 ───────────────────────────────────────────────────── */
+  'history.eyebrow': '保存在本机',
+  'history.title': '聊天记录',
+  'history.unavailable': '聊天记录只由桌面应用保存。浏览器预览模式在会话结束后不会留下任何数据。',
+  'history.loading': '正在加载会话…',
+  'history.empty': '还没有聊天记录。聊过的会话会出现在这里。',
+  'history.selectPrompt': '选择一个会话查看内容。',
+  'history.transcriptEmpty': '这个会话没有消息。',
+  'history.unnamedPeer': '未命名对方',
+  'history.messageCount': '{count} 条消息',
+  'history.ended': '已结束',
+  'history.active': '进行中',
+  'history.peer': '对方',
+  'history.fromAgent': '来自你的 Agent',
+  'history.statusPending': '从未发送。',
+  'history.statusFailed': '未发送。',
+
   'language.label': '语言',
 };

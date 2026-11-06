@@ -13,23 +13,19 @@
  *   parseEnvelope(string)    → KsaMessage (validates)
  *   encodeEnvelope(e)        → string   (alias of jsonStringifyEnvelope)
  *   decodeEnvelope(string)   → KsaMessage (alias of parseEnvelope)
+ *
+ * Phase A / A2: the encoder now uses **RFC 8785 canonical JSON**
+ * (`canonicalize`) rather than a hand-rolled sorted-key replacer, so
+ * the bytes on the wire are exactly the bytes a signature is computed
+ * over — and so that a future non-JavaScript peer has a single, precise
+ * rule to implement.
  */
 import type { KsaMessage } from './envelope';
+import { canonicalize } from './canonical-json';
 import { validateEnvelope } from './validation';
 
 export function jsonStringifyEnvelope(envelope: KsaMessage): string {
-  return JSON.stringify(envelope, canonicalReplacer);
-}
-
-function canonicalReplacer(_key: string, value: unknown): unknown {
-  if (value && typeof value === 'object' && !Array.isArray(value)) {
-    const sorted: Record<string, unknown> = {};
-    for (const k of Object.keys(value as Record<string, unknown>).sort()) {
-      sorted[k] = (value as Record<string, unknown>)[k];
-    }
-    return sorted;
-  }
-  return value;
+  return canonicalize(envelope);
 }
 
 export function parseEnvelope(text: string): KsaMessage {

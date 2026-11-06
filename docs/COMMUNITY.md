@@ -8,15 +8,15 @@ expect.**
 
 ## Where to ask what
 
-| You want to… | Go to |
-| --- | --- |
+| You want to…                                                  | Go to                                                                        |
+| ------------------------------------------------------------- | ---------------------------------------------------------------------------- |
 | Ask a question, share an idea, or start a design conversation | [GitHub Discussions](https://github.com/free-revalution/Kindora/discussions) |
-| Report something that is broken | [Bug report](../.github/ISSUE_TEMPLATE/bug_report.yml) |
-| Suggest a new capability | [Feature request](../.github/ISSUE_TEMPLATE/feature_request.yml) |
-| Propose a change to the protocol, transport, or data model | [Technical proposal](../.github/ISSUE_TEMPLATE/technical_proposal.yml) |
-| Report a security problem | **[SECURITY.md](../SECURITY.md)** — privately, not as a public issue |
-| Contribute code | [CONTRIBUTING.md](../CONTRIBUTING.md) |
-| See what is actually done | [DEVELOPMENT_STATUS.md](DEVELOPMENT_STATUS.md) |
+| Report something that is broken                               | [Bug report](../.github/ISSUE_TEMPLATE/bug_report.yml)                       |
+| Suggest a new capability                                      | [Feature request](../.github/ISSUE_TEMPLATE/feature_request.yml)             |
+| Propose a change to the protocol, transport, or data model    | [Technical proposal](../.github/ISSUE_TEMPLATE/technical_proposal.yml)       |
+| Report a security problem                                     | **[SECURITY.md](../SECURITY.md)** — privately, not as a public issue         |
+| Contribute code                                               | [CONTRIBUTING.md](../CONTRIBUTING.md)                                        |
+| See what is actually done                                     | [DEVELOPMENT_STATUS.md](DEVELOPMENT_STATUS.md)                               |
 
 **Rule of thumb:** if it is a question, a "what if", or a design idea, it is a
 discussion. If it is a concrete defect or a concrete request, it is an issue.
@@ -25,14 +25,14 @@ discussion. If it is a concrete defect or a concrete request, it is an issue.
 
 ## Discussion categories
 
-| Category | Use it for |
-| --- | --- |
-| **Announcements** | Release notes, milestone summaries, maintainer notes |
-| **General** | Anything that does not fit elsewhere |
-| **Ideas** | Feature ideas that are not yet concrete enough for an issue |
-| **Show and tell** | What you built, what you tried, what you are working on |
-| **Q&A** | Questions from people new to the project or to the codebase |
-| **Development** | Architecture, protocol design, trade-offs, experiments |
+| Category          | Use it for                                                  |
+| ----------------- | ----------------------------------------------------------- |
+| **Announcements** | Release notes, milestone summaries, maintainer notes        |
+| **General**       | Anything that does not fit elsewhere                        |
+| **Ideas**         | Feature ideas that are not yet concrete enough for an issue |
+| **Show and tell** | What you built, what you tried, what you are working on     |
+| **Q&A**           | Questions from people new to the project or to the codebase |
+| **Development**   | Architecture, protocol design, trade-offs, experiments      |
 
 ### Three questions we want your help with
 
@@ -81,21 +81,21 @@ rather say so here than quietly not merge it.
 
 ## Labels
 
-| Label | Meaning |
-| --- | --- |
+| Label              | Meaning                                                    |
+| ------------------ | ---------------------------------------------------------- |
 | `good first issue` | Contained, well-specified, a reasonable first contribution |
-| `help wanted` | We would like help, but it is not a first contribution |
-| `bug` | Something does not work as documented |
-| `enhancement` | A new or improved capability |
-| `documentation` | Docs, examples, translations |
-| `frontend` | React / Tauri UI |
-| `backend` | Rust / Tauri commands |
-| `rust` | Rust code |
-| `typescript` | TypeScript code |
-| `ai-agent` | Agent behaviour, prompts, matching |
-| `networking` | Transport, discovery, sockets |
-| `security` | Secrets, keys, injection, privacy boundaries |
-| `discussion` | Needs a design conversation before it can be an issue |
+| `help wanted`      | We would like help, but it is not a first contribution     |
+| `bug`              | Something does not work as documented                      |
+| `enhancement`      | A new or improved capability                               |
+| `documentation`    | Docs, examples, translations                               |
+| `frontend`         | React / Tauri UI                                           |
+| `backend`          | Rust / Tauri commands                                      |
+| `rust`             | Rust code                                                  |
+| `typescript`       | TypeScript code                                            |
+| `ai-agent`         | Agent behaviour, prompts, matching                         |
+| `networking`       | Transport, discovery, sockets                              |
+| `security`         | Secrets, keys, injection, privacy boundaries               |
+| `discussion`       | Needs a design conversation before it can be an issue      |
 
 ---
 

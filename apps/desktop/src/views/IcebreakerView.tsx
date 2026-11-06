@@ -19,19 +19,11 @@
  */
 
 import { useEffect, useRef, useState } from 'react';
-import type {
-  GenerateIcebreakerInput,
-  GenerateIcebreakerResult,
-} from '@kindora/agent';
+import type { GenerateIcebreakerInput, GenerateIcebreakerResult } from '@kindora/agent';
 import { ICEBREAKER_TOPIC_CAP } from '@kindora/agent';
 import { useTranslate } from '../i18n';
 
-export type IcebreakerPhase =
-  | 'idle'
-  | 'generating'
-  | 'ready'
-  | 'regenerating'
-  | 'error';
+export type IcebreakerPhase = 'idle' | 'generating' | 'ready' | 'regenerating' | 'error';
 
 export interface IcebreakerViewProps {
   /** Peer display name for the title block. */
@@ -105,7 +97,7 @@ export function IcebreakerView({
           className="kindora-card flex flex-col gap-2 border border-rose-300 dark:border-rose-700"
           data-testid="icebreaker-error"
         >
-          <h2 className="text-rose-600 dark:text-rose-400 text-xs uppercase tracking-wide">
+          <h2 className="text-xs uppercase tracking-wide text-rose-600 dark:text-rose-400">
             {t('icebreaker.generationFailed')}
           </h2>
           <p className="text-sm leading-relaxed">{error ?? t('icebreaker.unknownError')}</p>
@@ -120,7 +112,7 @@ export function IcebreakerView({
           className="kindora-card flex flex-col gap-2 border border-rose-300 dark:border-rose-700"
           data-testid="icebreaker-blocked"
         >
-          <h2 className="text-rose-600 dark:text-rose-400 text-xs uppercase tracking-wide">
+          <h2 className="text-xs uppercase tracking-wide text-rose-600 dark:text-rose-400">
             {t('icebreaker.disabled')}
           </h2>
           <p className="text-sm leading-relaxed">{t('icebreaker.disabledBody')}</p>
@@ -132,7 +124,7 @@ export function IcebreakerView({
           className="kindora-card flex flex-col gap-2 border border-amber-300 dark:border-amber-700"
           data-testid="icebreaker-degraded"
         >
-          <h2 className="text-amber-600 dark:text-amber-400 text-xs uppercase tracking-wide">
+          <h2 className="text-xs uppercase tracking-wide text-amber-600 dark:text-amber-400">
             {t('icebreaker.couldNotGenerate')}
           </h2>
           <p className="text-sm leading-relaxed">{degradationNote}</p>
@@ -142,12 +134,7 @@ export function IcebreakerView({
         </section>
       )}
 
-      <IcebreakerTopicList
-        topics={topics}
-        isLoading={isLoading}
-        onUse={onUse}
-        phase={phase}
-      />
+      <IcebreakerTopicList topics={topics} isLoading={isLoading} onUse={onUse} phase={phase} />
 
       <ActionBar
         phase={phase}
@@ -195,10 +182,7 @@ function IcebreakerTopicList({
 
   if (topics.length === 0) {
     return (
-      <section
-        className="kindora-card flex flex-col gap-2"
-        data-testid="icebreaker-empty"
-      >
+      <section className="kindora-card flex flex-col gap-2" data-testid="icebreaker-empty">
         <p className="text-kindora-500 dark:text-kindora-400 text-sm italic">
           {t('icebreaker.empty')}
         </p>

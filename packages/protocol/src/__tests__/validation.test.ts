@@ -14,7 +14,10 @@ function sampleCapabilities() {
     supportsMatchAnalysis: true,
     supportsIcebreaker: true,
     supportsChatAssist: true,
-    supportsEncryption: true,
+    supportsMessageSigning: false,
+    supportsSessionEncryption: false,
+    supportsTransportEncryption: false,
+    supportsWebRtc: false,
   };
 }
 
@@ -295,9 +298,9 @@ describe('@kindora/protocol — validateEnvelope (per-type payloads)', () => {
   });
 
   it('rejects block with a non-object payload', () => {
-    expect(() =>
-      validateEnvelope({ ...baseEnvelope(), type: 'block', payload: 'nope' }),
-    ).toThrow(/object/);
+    expect(() => validateEnvelope({ ...baseEnvelope(), type: 'block', payload: 'nope' })).toThrow(
+      /object/,
+    );
   });
 });
 

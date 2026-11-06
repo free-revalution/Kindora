@@ -44,11 +44,17 @@ export {
   DEFAULT_PEER_ANALYSIS_TIMEOUT_MS,
   DEFAULT_EARLY_WAIT_TIMEOUT_MS,
   DEFAULT_HELLO_TIMEOUT_MS,
+  DEFAULT_PEER_HELLO_GRACE_MS,
   HandshakeTimeoutError,
   HandshakeValidationError,
   HandshakeClosedError,
+  ConsentRequiredError,
+  PeerBlockedError,
   type MatchOrchestratorSelf,
+  type MatchOrchestratorOptions,
   type MatchOutcome,
+  type PeerIntroduction,
+  type LocalConsent,
 } from './orchestrator';
 
 export {
@@ -70,6 +76,14 @@ export {
   type ChatCloseReason,
   type ChatOrchestratorOptions,
 } from './chat-orchestrator';
+
+export {
+  type ChatMessageSource,
+  type ChatMessageStatus,
+  type ChatPersistence,
+  type PendingChatMessage,
+  type ReceivedChatMessage,
+} from './chat-persistence';
 
 export {
   compatibilityLabel,

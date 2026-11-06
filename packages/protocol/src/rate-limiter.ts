@@ -112,7 +112,10 @@ export class RateLimiter {
  * events per second". Equivalent to `new RateLimiter({ capacity: N,
  * refillPerSecond: N })`.
  */
-export function rateLimiter(eventsPerSecond: number, opts: Omit<RateLimiterOptions, 'capacity' | 'refillPerSecond'> = {}): RateLimiter {
+export function rateLimiter(
+  eventsPerSecond: number,
+  opts: Omit<RateLimiterOptions, 'capacity' | 'refillPerSecond'> = {},
+): RateLimiter {
   return new RateLimiter({
     capacity: eventsPerSecond,
     refillPerSecond: eventsPerSecond,

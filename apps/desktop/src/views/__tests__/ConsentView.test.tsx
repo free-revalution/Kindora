@@ -1,36 +1,46 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { fireEvent, render, screen, cleanup, waitFor } from '@testing-library/react';
-import type { MatchAnalysis } from '@kindora/protocol';
-import type { ConsentOutcome, MatchOutcome } from '@kindora/matching';
+import type { PeerIntroduction, ConsentOutcome } from '@kindora/matching';
+import type { SocialProfile } from '@kindora/protocol';
 import { ConsentView, LiveConsentView } from '../ConsentView';
 
-const SAMPLE: MatchAnalysis = {
-  compatibilitySignal: 'moderate',
-  commonGround: ['typescript'],
-  recommendedTopics: ['side projects'],
-  potentialFriction: ['timezones'],
-  explanation: 'some overlap',
-};
-
-function makeOutcome(): MatchOutcome {
+/**
+ * Phase B: the consent screen shows the peer's **public card**, not a
+ * match outcome. The compatibility signal is not available at this
+ * point in the flow — it is computed later, from the authorised
+ * profiles, and only after both sides accepted.
+ */
+function makeCard(overrides: Partial<SocialProfile> = {}): SocialProfile {
   return {
-    peerDisplayName: 'Bob',
-    peerAgentId: '22222222-3333-4444-8555-bbbbbbbbbbbb',
-    peerAgent: null,
-    peerProfile: null,
-    localAnalysis: SAMPLE,
-    peerAnalysis: SAMPLE,
-    localResult: {
-      analysis: SAMPLE,
-      messages: [],
-      estimatedTokens: 0,
-      rawResponse: '',
-      degraded: false,
-      degradationNote: null,
+    nickname: 'Bob',
+    bio: '',
+    interests: [],
+    currentActivities: [],
+    socialIntent: ['similar_interests'],
+    conversationStyle: ['casual'],
+    boundaries: {
+      allowAgentConversation: true,
+      allowContactExchange: false,
+      allowOfflineMeeting: false,
+      allowProjectDetails: false,
+      allowCurrentActivity: false,
+      allowBio: false,
+      allowInterests: true,
+      allowAvatar: false,
+      allowSocialIntent: true,
+      allowConversationStyle: true,
     },
-    peerAnalysisTimeoutMs: 30_000,
-    peerAnalysisTimedOut: false,
-    peerRefused: false,
+    ...overrides,
+  };
+}
+
+function makePeer(overrides: Partial<PeerIntroduction> = {}): PeerIntroduction {
+  return {
+    peerAgentId: '22222222-3333-4444-8555-bbbbbbbbbbbb',
+    peerDisplayName: 'Bob',
+    peerCard: makeCard(),
+    peerAgent: null,
+    ...overrides,
   };
 }
 
@@ -39,27 +49,88 @@ beforeEach(() => {
 });
 
 describe('apps/desktop — ConsentView', () => {
-  it('shows the peer name, signal, and 3 buttons when nothing decided', () => {
+  it('shows the peer name and the 3 buttons when nothing decided', () => {
     render(
       <ConsentView
-        outcome={makeOutcome()}
+        peer={makePeer()}
         state="awaiting_decision"
         onDecide={() => undefined}
         onDisconnect={() => undefined}
       />,
     );
-    expect(screen.getByText('Bob')).toBeInTheDocument();
-    expect(screen.getByText('Moderate match')).toBeInTheDocument();
+    // The peer's name is the heading. (The public card shows the same
+    // name again, so a bare getByText('Bob') would match two nodes.)
+    expect(screen.getByRole('heading', { name: 'Bob' })).toBeInTheDocument();
     expect(screen.getByTestId('consent-accept')).toBeInTheDocument();
     expect(screen.getByTestId('consent-reject')).toBeInTheDocument();
     expect(screen.getByTestId('consent-block')).toBeInTheDocument();
     expect(screen.getByTestId('consent-status')).toHaveTextContent(/your turn/i);
   });
 
+  it('shows the peer public card — the only thing shared so far', () => {
+    render(
+      <ConsentView
+        peer={makePeer()}
+        state="awaiting_decision"
+        onDecide={() => undefined}
+        onDisconnect={() => undefined}
+      />,
+    );
+    const card = screen.getByTestId('consent-public-card');
+    expect(card).toBeInTheDocument();
+    expect(card).toHaveTextContent('Bob');
+    // The intent and the style are what the peer authorised.
+    expect(card).toHaveTextContent(/similar/i);
+    expect(card).toHaveTextContent(/casual/i);
+  });
+
+  it('says "not shared" for a card field the peer withheld', () => {
+    render(
+      <ConsentView
+        peer={makePeer({
+          peerCard: makeCard({ socialIntent: [], conversationStyle: [] }),
+        })}
+        state="awaiting_decision"
+        onDecide={() => undefined}
+        onDisconnect={() => undefined}
+      />,
+    );
+    const card = screen.getByTestId('consent-public-card');
+    expect(card).toHaveTextContent(/not shared/i);
+  });
+
+  it('falls back to an empty-card notice when the peer sent no card', () => {
+    render(
+      <ConsentView
+        peer={makePeer({ peerCard: null })}
+        state="awaiting_decision"
+        onDecide={() => undefined}
+        onDisconnect={() => undefined}
+      />,
+    );
+    expect(screen.queryByTestId('consent-public-card')).toBeNull();
+    expect(screen.getByText(/did not share/i)).toBeInTheDocument();
+  });
+
+  it('does NOT show a compatibility signal before the consent', () => {
+    // Phase B: the analysis runs after the consent, so there is no
+    // signal to show here. The screen must not pretend otherwise.
+    render(
+      <ConsentView
+        peer={makePeer()}
+        state="awaiting_decision"
+        onDecide={() => undefined}
+        onDisconnect={() => undefined}
+      />,
+    );
+    expect(screen.queryByText(/moderate match/i)).toBeNull();
+    expect(screen.queryByText(/strong match/i)).toBeNull();
+  });
+
   it('shows accepted_local status after local accept', () => {
     render(
       <ConsentView
-        outcome={makeOutcome()}
+        peer={makePeer()}
         state="accepted_local"
         onDecide={() => undefined}
         onDisconnect={() => undefined}
@@ -71,7 +142,7 @@ describe('apps/desktop — ConsentView', () => {
   it('shows accepted_peer status when peer accepted first', () => {
     render(
       <ConsentView
-        outcome={makeOutcome()}
+        peer={makePeer()}
         state="accepted_peer"
         onDecide={() => undefined}
         onDisconnect={() => undefined}
@@ -81,8 +152,8 @@ describe('apps/desktop — ConsentView', () => {
   });
 
   it('shows the "conversation unlocked" banner when both accepted', () => {
-    const final: ConsentOutcome = {
-      state: 'accepted_both',
+    const final = {
+      state: 'accepted_both' as const,
       peerDisplayName: 'Bob',
       peerAgentId: '22222222-3333-4444-8555-bbbbbbbbbbbb',
       bothAccepted: true,
@@ -94,7 +165,7 @@ describe('apps/desktop — ConsentView', () => {
     };
     render(
       <ConsentView
-        outcome={makeOutcome()}
+        peer={makePeer()}
         state="accepted_both"
         onDecide={() => undefined}
         onDisconnect={() => undefined}
@@ -107,8 +178,8 @@ describe('apps/desktop — ConsentView', () => {
   });
 
   it('shows the "blocked" banner when the local user blocked', () => {
-    const final: ConsentOutcome = {
-      state: 'blocked',
+    const final = {
+      state: 'blocked' as const,
       peerDisplayName: 'Bob',
       peerAgentId: '22222222-3333-4444-8555-bbbbbbbbbbbb',
       bothAccepted: false,
@@ -120,7 +191,7 @@ describe('apps/desktop — ConsentView', () => {
     };
     render(
       <ConsentView
-        outcome={makeOutcome()}
+        peer={makePeer()}
         state="blocked"
         onDecide={() => undefined}
         onDisconnect={() => undefined}
@@ -132,8 +203,8 @@ describe('apps/desktop — ConsentView', () => {
   });
 
   it('shows the "you were blocked" banner when the peer blocked', () => {
-    const final: ConsentOutcome = {
-      state: 'blocked',
+    const final = {
+      state: 'blocked' as const,
       peerDisplayName: 'Bob',
       peerAgentId: '22222222-3333-4444-8555-bbbbbbbbbbbb',
       bothAccepted: false,
@@ -145,7 +216,7 @@ describe('apps/desktop — ConsentView', () => {
     };
     render(
       <ConsentView
-        outcome={makeOutcome()}
+        peer={makePeer()}
         state="blocked"
         onDecide={() => undefined}
         onDisconnect={() => undefined}
@@ -159,7 +230,7 @@ describe('apps/desktop — ConsentView', () => {
     let called: string | null = null;
     render(
       <ConsentView
-        outcome={makeOutcome()}
+        peer={makePeer()}
         state="awaiting_decision"
         onDecide={(d) => {
           called = d;
@@ -175,7 +246,7 @@ describe('apps/desktop — ConsentView', () => {
     const calls: string[] = [];
     render(
       <ConsentView
-        outcome={makeOutcome()}
+        peer={makePeer()}
         state="awaiting_decision"
         onDecide={(d) => {
           calls.push(d);
@@ -191,7 +262,7 @@ describe('apps/desktop — ConsentView', () => {
   it('disables the buttons in a terminal state', () => {
     render(
       <ConsentView
-        outcome={makeOutcome()}
+        peer={makePeer()}
         state="rejected"
         onDecide={() => undefined}
         onDisconnect={() => undefined}
@@ -201,8 +272,8 @@ describe('apps/desktop — ConsentView', () => {
   });
 
   it('shows the "didn’t respond" banner on soft timeout', () => {
-    const final: ConsentOutcome = {
-      state: 'accepted_local',
+    const final = {
+      state: 'accepted_local' as const,
       peerDisplayName: 'Bob',
       peerAgentId: '22222222-3333-4444-8555-bbbbbbbbbbbb',
       bothAccepted: false,
@@ -214,7 +285,7 @@ describe('apps/desktop — ConsentView', () => {
     };
     render(
       <ConsentView
-        outcome={makeOutcome()}
+        peer={makePeer()}
         state="accepted_local"
         onDecide={() => undefined}
         onDisconnect={() => undefined}
@@ -227,8 +298,8 @@ describe('apps/desktop — ConsentView', () => {
 
 describe('apps/desktop — LiveConsentView', () => {
   it('transitions to "done" and shows the final banner when start() resolves accepted_both', async () => {
-    const final: ConsentOutcome = {
-      state: 'accepted_both',
+    const final = {
+      state: 'accepted_both' as const,
       peerDisplayName: 'Bob',
       peerAgentId: '22222222-3333-4444-8555-bbbbbbbbbbbb',
       bothAccepted: true,
@@ -240,7 +311,7 @@ describe('apps/desktop — LiveConsentView', () => {
     };
     render(
       <LiveConsentView
-        outcome={makeOutcome()}
+        peer={makePeer()}
         start={() => Promise.resolve(final)}
         decide={() => Promise.resolve()}
         onDisconnect={() => undefined}
@@ -252,8 +323,8 @@ describe('apps/desktop — LiveConsentView', () => {
   });
 
   it('fires onFinal when start() resolves to a terminal state', async () => {
-    const final: ConsentOutcome = {
-      state: 'rejected',
+    const final = {
+      state: 'rejected' as const,
       peerDisplayName: 'Bob',
       peerAgentId: '22222222-3333-4444-8555-bbbbbbbbbbbb',
       bothAccepted: false,
@@ -266,7 +337,7 @@ describe('apps/desktop — LiveConsentView', () => {
     const received: { current?: ConsentOutcome } = {};
     render(
       <LiveConsentView
-        outcome={makeOutcome()}
+        peer={makePeer()}
         start={() => Promise.resolve(final)}
         decide={() => Promise.resolve()}
         onDisconnect={() => undefined}
@@ -282,8 +353,8 @@ describe('apps/desktop — LiveConsentView', () => {
   });
 
   it('does not fire onFinal when start() resolves to a non-terminal state', async () => {
-    const final: ConsentOutcome = {
-      state: 'awaiting_decision',
+    const final = {
+      state: 'awaiting_decision' as const,
       peerDisplayName: 'Bob',
       peerAgentId: '22222222-3333-4444-8555-bbbbbbbbbbbb',
       bothAccepted: false,
@@ -296,7 +367,7 @@ describe('apps/desktop — LiveConsentView', () => {
     let fired = 0;
     render(
       <LiveConsentView
-        outcome={makeOutcome()}
+        peer={makePeer()}
         start={() => Promise.resolve(final)}
         decide={() => Promise.resolve()}
         onDisconnect={() => undefined}

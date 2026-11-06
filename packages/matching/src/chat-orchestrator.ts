@@ -26,33 +26,52 @@
  * Per § 30 the default chat is two-party (Human A ↔ Human B). The
  * four-party variant in the manual is explicitly out of scope.
  *
- * See 开发手册.md Phase 9.
+ * ## Phase D / D2 — the transcript is persisted
+ *
+ * The orchestrator writes every message down through the
+ * {@link ChatPersistence} port:
+ *
+ * ```
+ *   recordPending()  →  PENDING on disk
+ *   (the message goes out)
+ *   markSent()       →  SENT
+ *        or
+ *   markFailed()     →  FAILED, with the reason
+ * ```
+ *
+ * The port is **optional**: without it the chat behaves exactly as it
+ * did before Phase D (in memory only). With it, a message that could
+ * not be sent stays visible as `FAILED` instead of vanishing, and the
+ * whole conversation survives a restart.
+ *
+ * See 开发手册.md Phase 9, docs/修复.md § 七 D2.
  */
 import type { KsaMessage } from '@kindora/protocol';
-import {
-  createBlock,
-  createChatMessage,
-  createDisconnect,
-} from '@kindora/protocol';
+import { createBlock, createChatMessage, createDisconnect } from '@kindora/protocol';
 import type { PairingSession } from '@kindora/transport';
 
+import { type BlockedAgentsLookup } from './consent-orchestrator';
 import {
-  type BlockedAgentsLookup,
-} from './consent-orchestrator';
+  type ChatMessageSource,
+  type ChatMessageStatus,
+  type ChatPersistence,
+} from './chat-persistence';
 
 export { type BlockedAgentsLookup } from './consent-orchestrator';
+export {
+  type ChatMessageSource,
+  type ChatMessageStatus,
+  type ChatPersistence,
+  type PendingChatMessage,
+  type ReceivedChatMessage,
+} from './chat-persistence';
 
 /** Default maximum text length — matches `validateChatMessagePayload`. */
 export const DEFAULT_CHAT_TEXT_MAX_LENGTH = 2000;
 
 /** What closed the chat. */
 export type ChatCloseReason =
-  | 'open'
-  | 'user-disconnect'
-  | 'user-block'
-  | 'peer-disconnect'
-  | 'peer-block'
-  | 'session-closed';
+  'open' | 'user-disconnect' | 'user-block' | 'peer-disconnect' | 'peer-block' | 'session-closed';
 
 export interface ChatEntry {
   /** Unique id — messageId for received entries, locally-generated for sent. */
@@ -62,6 +81,21 @@ export interface ChatEntry {
   readonly text: string;
   /** ISO timestamp from the envelope (received) or from the send call (sent). */
   readonly timestamp: string;
+  /**
+   * Phase D / D2 — who composed the message.
+   *
+   * `human` by default; `agent` when an agent drafted the text and a
+   * human pressed Send (per § 32 the agent never sends by itself).
+   */
+  readonly source?: ChatMessageSource;
+  /**
+   * Phase D / D2 — the delivery state.
+   *
+   * A sent message is `PENDING` until the transport accepted it, then
+   * `SENT`; a failed send stays in the history as `FAILED`. A received
+   * message is `DELIVERED` — it is on this device by definition.
+   */
+  readonly status?: ChatMessageStatus;
 }
 
 export interface ChatSnapshot {
@@ -84,10 +118,40 @@ export interface ChatOrchestratorOptions {
    * unique within the chat. Production callers should leave it unset.
    */
   readonly idGenerator?: () => string;
+  /**
+   * Phase D / D2 — where the transcript is written.
+   *
+   * Optional: without it the chat runs in memory only, exactly as it
+   * did before Phase D.
+   */
+  readonly persistence?: ChatPersistence;
+  /**
+   * Phase D / D2 — the id of the conversation the persisted rows
+   * belong to. Required for the persistence to be usable; without a
+   * `sessionId` the persisted rows are grouped under an empty id,
+   * which the storage layer refuses — so the orchestrator skips
+   * persistence entirely when it is missing.
+   */
+  readonly sessionId?: string;
+  /**
+   * Phase D / D2 — who composed the messages the **peer** sends.
+   *
+   * KSA 0.1's wire format carries no author field, so a peer message
+   * is attributed to a human by default. The seam exists so that a
+   * future protocol that *does* carry the author can say so.
+   */
+  readonly inboundSource?: ChatMessageSource;
 }
 
+/**
+ * The in-memory entry. Same shape as {@link ChatEntry}, but the
+ * status is mutable: a message is `PENDING` before it goes out and
+ * becomes `SENT` or `FAILED` afterwards.
+ */
+type InternalChatEntry = { -readonly [K in keyof ChatEntry]: ChatEntry[K] };
+
 interface InternalState {
-  entries: ChatEntry[];
+  entries: InternalChatEntry[];
   state: 'open' | 'closed';
   closeReason: ChatCloseReason;
   blockedByLocal: boolean;
@@ -101,6 +165,9 @@ export class ChatOrchestrator {
   private readonly blockList: BlockedAgentsLookup;
   private readonly maxTextLength: number;
   private readonly idGenerator: () => string;
+  private readonly persistence: ChatPersistence | null;
+  private readonly sessionId: string;
+  private readonly inboundSource: ChatMessageSource;
   private readonly listeners = new Set<ChatListener>();
   private readonly internal: InternalState;
 
@@ -124,6 +191,13 @@ export class ChatOrchestrator {
         // Fallback for environments without crypto.randomUUID.
         return `id-${Math.random().toString(36).slice(2)}-${Date.now()}`;
       });
+    // Phase D / D2 — persistence needs a session to write into. A
+    // persistence port without a session id would write rows nobody
+    // can read back, so it is not used at all in that case.
+    this.sessionId = input.options?.sessionId ?? '';
+    this.persistence =
+      input.options?.persistence && this.sessionId.length > 0 ? input.options.persistence : null;
+    this.inboundSource = input.options?.inboundSource ?? 'human';
     this.internal = {
       entries: [],
       state: 'open',
@@ -214,35 +288,60 @@ export class ChatOrchestrator {
    * Send a chat message to the peer. Returns the local `ChatEntry`
    * that was appended to history. Throws if the session isn't open
    * or the text is empty / too long.
+   *
+   * Phase D / D2: `source` says who composed the message — `human`
+   * (the default) or `agent` (an agent drafted it and a human pressed
+   * Send). The message is written down as `PENDING` **before** it goes
+   * out; a send that fails leaves a `FAILED` entry in the history
+   * instead of silently dropping the message.
    */
-  async send(session: PairingSession, text: string): Promise<ChatEntry> {
+  async send(
+    session: PairingSession,
+    text: string,
+    source: ChatMessageSource = 'human',
+  ): Promise<ChatEntry> {
     if (this.internal.state !== 'open') {
-      throw new Error(
-        `Cannot send: chat is closed (reason: "${this.internal.closeReason}").`,
-      );
+      throw new Error(`Cannot send: chat is closed (reason: "${this.internal.closeReason}").`);
     }
     const trimmed = text.trim();
     if (trimmed.length === 0) {
       throw new Error('Cannot send an empty message.');
     }
     if (trimmed.length > this.maxTextLength) {
-      throw new Error(
-        `Message is ${trimmed.length} chars; max is ${this.maxTextLength}.`,
-      );
+      throw new Error(`Message is ${trimmed.length} chars; max is ${this.maxTextLength}.`);
     }
 
     const envelope = createChatMessage(this.selfAgentId, { text: trimmed });
-    await session.send(envelope);
-
-    const entry: ChatEntry = {
+    const entry: InternalChatEntry = {
       id: this.idGenerator(),
       direction: 'sent',
       sender: this.selfAgentId,
       text: trimmed,
       timestamp: envelope.timestamp,
+      source,
+      status: 'PENDING',
     };
+
+    // Phase D / D2 — write it down FIRST. A crash between here and
+    // the send leaves a visible `PENDING` row; the other order would
+    // lose the message without a trace.
+    await this.persistPending(entry);
+
     this.internal.entries.push(entry);
     this.notify();
+
+    try {
+      await session.send(envelope);
+    } catch (err) {
+      entry.status = 'FAILED';
+      this.notify();
+      await this.persistFailed(entry, err);
+      throw err;
+    }
+
+    entry.status = 'SENT';
+    this.notify();
+    await this.persistSent(entry);
     return entry;
   }
 
@@ -288,15 +387,87 @@ export class ChatOrchestrator {
 
   private appendReceived(msg: KsaMessage & { type: 'chat_message' }): void {
     if (this.internal.state !== 'open') return;
-    const entry: ChatEntry = {
+    const entry: InternalChatEntry = {
       id: msg.messageId,
       direction: 'received',
       sender: msg.sender,
       text: msg.payload.text,
       timestamp: msg.timestamp,
+      source: this.inboundSource,
+      // A message the peer sent us is on this device by definition —
+      // its arrival is the receipt.
+      status: 'DELIVERED',
     };
     this.internal.entries.push(entry);
     this.notify();
+    // The write happens after the entry is visible: the user should
+    // not wait for the disk to see a message that already arrived.
+    void this.persistReceived(entry);
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* Phase D / D2 — the persistence port                                */
+  /* ------------------------------------------------------------------ */
+
+  /**
+   * A storage failure must not stop the conversation.
+   *
+   * Failing to *record* a message is bad, but failing to *send* it
+   * because the disk hiccupped is worse. Every persistence error is
+   * therefore reported and swallowed — the in-memory history stays
+   * correct, and the app logs the problem so it can be reported.
+   */
+  private reportPersistenceFailure(what: string, err: unknown): void {
+    console.error(`Kindora: could not ${what}.`, err);
+  }
+
+  private async persistPending(entry: InternalChatEntry): Promise<void> {
+    if (!this.persistence) return;
+    try {
+      await this.persistence.recordPending({
+        sessionId: this.sessionId,
+        senderAgentId: entry.sender,
+        text: entry.text,
+        source: entry.source ?? 'human',
+        messageId: entry.id,
+      });
+    } catch (err) {
+      this.reportPersistenceFailure('record the outgoing message', err);
+    }
+  }
+
+  private async persistSent(entry: InternalChatEntry): Promise<void> {
+    if (!this.persistence) return;
+    try {
+      await this.persistence.markSent(entry.id);
+    } catch (err) {
+      this.reportPersistenceFailure('mark the outgoing message as sent', err);
+    }
+  }
+
+  private async persistFailed(entry: InternalChatEntry, cause: unknown): Promise<void> {
+    if (!this.persistence) return;
+    const reason = cause instanceof Error ? cause.message : String(cause);
+    try {
+      await this.persistence.markFailed(entry.id, reason);
+    } catch (err) {
+      this.reportPersistenceFailure('mark the outgoing message as failed', err);
+    }
+  }
+
+  private async persistReceived(entry: InternalChatEntry): Promise<void> {
+    if (!this.persistence) return;
+    try {
+      await this.persistence.recordReceived({
+        sessionId: this.sessionId,
+        senderAgentId: entry.sender,
+        text: entry.text,
+        source: entry.source ?? 'human',
+        messageId: entry.id,
+      });
+    } catch (err) {
+      this.reportPersistenceFailure('record the incoming message', err);
+    }
   }
 
   private transition(reason: ChatCloseReason): void {

@@ -36,6 +36,7 @@ import type {
   ProfileExchangePayload,
 } from './payloads';
 import { PROTOCOL_NAME, PROTOCOL_VERSION, type MessageType } from './index';
+import type { KsaSignature } from './signature';
 
 /* Per-type envelope variants — discriminated union on `type`. */
 export interface KsaEnvelope<T extends MessageType, P> {
@@ -46,6 +47,18 @@ export interface KsaEnvelope<T extends MessageType, P> {
   readonly type: T;
   readonly sender: string;
   readonly payload: P;
+  /**
+   * Detached signature over the envelope (Phase A / A2).
+   *
+   * Optional on the wire so that a peer which does not implement
+   * signing can still be parsed — but every **protected** message type
+   * must carry one, and the transport rejects protected messages that
+   * arrive without it. See `signature.ts`.
+   *
+   * The signature is deliberately NOT part of the signed payload: it
+   * would be self-referential.
+   */
+  readonly signature?: KsaSignature;
 }
 
 export type KsaHello = KsaEnvelope<'hello', HelloPayload>;

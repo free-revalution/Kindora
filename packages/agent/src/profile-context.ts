@@ -11,7 +11,7 @@
  *
  * See 开发手册.md § 9, § 35.
  */
-import type { SocialProfile } from '@kindora/protocol';
+import { resolveBoundaries, type SocialProfile } from '@kindora/protocol';
 
 /**
  * Per-field character caps applied when rendering.
@@ -74,6 +74,11 @@ export interface ProfileContextOptions {
  *       offline meeting: no
  *       project details: no
  *       current activity: yes
+ *       bio: no
+ *       interests: yes
+ *       avatar: no
+ *       social intent: yes
+ *       conversation style: yes
  */
 export function renderProfileContext(
   profile: SocialProfile,
@@ -90,7 +95,7 @@ export function renderProfileContext(
   }
   lines.push(`- bio: ${clip(profile.bio, FIELD_CAPS.bio) || '(none)'}`);
   lines.push(
-    `- interests: ${renderList(profile.interests as readonly string[], FIELD_CAPS.listItem, FIELD_CAPS.listCount)}`,
+    `- interests: ${renderList(profile.interests, FIELD_CAPS.listItem, FIELD_CAPS.listCount)}`,
   );
   lines.push(
     `- current activities: ${renderList(profile.currentActivities, FIELD_CAPS.listItem, FIELD_CAPS.listCount)}`,
@@ -102,11 +107,25 @@ export function renderProfileContext(
     `- conversation styles: ${renderList(profile.conversationStyle as readonly string[], FIELD_CAPS.listItem, FIELD_CAPS.listCount)}`,
   );
   lines.push('- boundaries:');
-  const b = profile.boundaries;
+  // Phase B / B1 — the boundaries are normalised first, so a profile
+  // written before the field-level gates existed still renders a
+  // complete set (and the LLM is never left guessing what `undefined`
+  // meant).
+  const b = resolveBoundaries(profile.boundaries);
   lines.push(`    agent conversation: ${b.allowAgentConversation ? 'yes' : 'no'}`);
   lines.push(`    contact exchange:   ${b.allowContactExchange ? 'yes' : 'no'}`);
   lines.push(`    offline meeting:    ${b.allowOfflineMeeting ? 'yes' : 'no'}`);
   lines.push(`    project details:    ${b.allowProjectDetails ? 'yes' : 'no'}`);
   lines.push(`    current activity:   ${b.allowCurrentActivity ? 'yes' : 'no'}`);
+  // The field-level gates matter to the model for a specific reason:
+  // an empty field is ambiguous on its own. "bio: (none)" could mean
+  // "the user wrote no bio" or "the bio was withheld". These lines
+  // remove the ambiguity, so the analysis does not invent a story
+  // about a field the user deliberately kept private.
+  lines.push(`    bio:                ${b.allowBio ? 'yes' : 'no'}`);
+  lines.push(`    interests:          ${b.allowInterests ? 'yes' : 'no'}`);
+  lines.push(`    avatar:             ${b.allowAvatar ? 'yes' : 'no'}`);
+  lines.push(`    social intent:      ${b.allowSocialIntent ? 'yes' : 'no'}`);
+  lines.push(`    conversation style: ${b.allowConversationStyle ? 'yes' : 'no'}`);
   return lines.join('\n');
 }

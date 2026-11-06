@@ -4,12 +4,17 @@
  * Local model server — no API key. POST {baseUrl}/api/chat with
  * { model, messages, stream: false }.
  *
- * See 开发手册.md § 10.
+ * The transport is shared with every other provider (`../http`): one error
+ * model, one timeout policy, one cancellation rule, one retry policy.
+ *
+ * See 开发手册.md § 10 and `docs/修复.md` § 八 E1.
  */
 
 import type { ChatMessage, LLMOptions, LLMProvider, LLMResponse } from '../index';
+import { LLMError } from '../errors';
+import { sendJson, resolvePolicy, type LLMRequestOptions } from '../http';
 
-export interface OllamaConfig {
+export interface OllamaConfig extends LLMRequestOptions {
   /** e.g. "http://localhost:11434". */
   readonly baseUrl: string;
   /** e.g. "llama3.1". */
@@ -36,22 +41,24 @@ export class OllamaProvider implements LLMProvider {
         : {}),
     };
 
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-      signal: options.signal,
+    const policy = resolvePolicy(this.config, {
+      timeoutMs: options.timeoutMs,
+      maxRetries: options.maxRetries,
     });
 
-    const payload = (await res.json().catch(() => ({}))) as OllamaChatResponse;
-
-    if (!res.ok) {
-      throw mapHttpError(res.status, payload?.error ?? res.statusText);
-    }
+    const { payload } = await sendJson<OllamaChatResponse>(
+      {
+        url,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+        signal: options.signal,
+      },
+      policy,
+    );
 
     const content = payload.message?.content ?? '';
     if (!content) {
-      throw new Error('Ollama response had no message content.');
+      throw new LLMError('INVALID_RESPONSE', 'Ollama response had no message content.');
     }
 
     return Object.freeze({
@@ -64,10 +71,4 @@ export class OllamaProvider implements LLMProvider {
 function joinUrl(base: string, path: string): string {
   const trimmed = base.replace(/\/+$/, '');
   return `${trimmed}/${path.replace(/^\/+/, '')}`;
-}
-
-function mapHttpError(status: number, fallbackMessage: string): Error {
-  if (status === 404) return new Error(`Model not found (404): ${fallbackMessage}`);
-  if (status >= 500) return new Error(`Ollama server error (${status}): ${fallbackMessage}`);
-  return new Error(`Ollama request failed (${status}): ${fallbackMessage}`);
 }

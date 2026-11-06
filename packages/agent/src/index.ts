@@ -47,7 +47,23 @@ export function createAgentConfig(opts: AgentRuntimeOptions = {}): AgentRuntimeC
   });
 }
 
-export { type AgentIdentity, createAgentIdentity, buildCapabilities } from './identity';
+export {
+  type AgentIdentity,
+  type RuntimeCapabilities,
+  type CapabilityOverrides,
+  createAgentIdentity,
+  buildCapabilities,
+  buildRuntimeCapabilities,
+} from './identity';
+/**
+ * Phase A / A2 — the envelope signer.
+ *
+ * The transport layer never sees a private key; it only knows the
+ * `EnvelopeSigner` interface from `@kindora/protocol`. Keeping the
+ * bridge here means the OS keychain (where the key actually lives in
+ * the shipped desktop app) stays out of `@kindora/transport`.
+ */
+export { createEnvelopeSigner, type SignerIdentity } from './signer';
 export {
   type ProfileValidationError,
   type ProfileValidationCode,
@@ -67,21 +83,31 @@ export { renderProfileContext, type ProfileContextOptions } from './profile-cont
 export { computeHeuristics, renderHeuristics, type HeuristicHints } from './heuristics';
 export {
   buildMatchContext,
+  buildMatchContextDetailed,
   renderMatchUserMessage,
+  renderMatchUserMessageDetailed,
   buildIcebreakerContext,
+  buildIcebreakerContextDetailed,
   renderIcebreakerUserMessage,
+  renderIcebreakerUserMessageDetailed,
   buildChatAssistContext,
+  buildChatAssistContextDetailed,
   renderChatAssistUserMessage,
+  renderChatAssistUserMessageDetailed,
   estimateTokens,
   DEFAULT_CHARS_PER_TOKEN,
   TokenLimitExceeded,
   type BuildContextInput,
   type BuildContextOptions,
+  type BuildContextResult,
   type BuildIcebreakerInput,
   type BuildIcebreakerContextOptions,
   type BuildChatAssistInput,
   type BuildChatAssistContextOptions,
   type ChatHistoryEntryLike,
+  type RenderedUserMessage,
+  type UntrustedNotice,
+  type UntrustedSource,
 } from './context-builder';
 export {
   parseMatchAnalysis,

@@ -6,16 +6,25 @@
 
 import type { SocialIntent } from '@kindora/protocol';
 import type { StoredAgent } from '@kindora/storage';
-import { SOCIAL_INTENT_SHORT_KEYS, CONVERSATION_STYLE_KEYS, useTranslate, type Translate } from '../i18n';
+import {
+  SOCIAL_INTENT_SHORT_KEYS,
+  CONVERSATION_STYLE_KEYS,
+  useTranslate,
+  type Translate,
+} from '../i18n';
 
 export interface HomeProps {
   agent: StoredAgent;
   onEdit: () => void;
   onConnect: () => void;
   onSettings: () => void;
+  /** Phase B / B3 — open the blocked-agents list. */
+  onBlocked?: () => void;
+  /** Phase D / D2 — open the chat history of this device. */
+  onHistory?: () => void;
 }
 
-export function Home({ agent, onEdit, onConnect, onSettings }: HomeProps) {
+export function Home({ agent, onEdit, onConnect, onSettings, onBlocked, onHistory }: HomeProps) {
   const t = useTranslate();
   const { profile } = agent;
   return (
@@ -34,6 +43,16 @@ export function Home({ agent, onEdit, onConnect, onSettings }: HomeProps) {
           </p>
         </div>
         <div className="flex gap-2">
+          {onHistory && (
+            <button type="button" className="kindora-button-ghost" onClick={onHistory}>
+              {t('home.chatHistory')}
+            </button>
+          )}
+          {onBlocked && (
+            <button type="button" className="kindora-button-ghost" onClick={onBlocked}>
+              {t('home.blockedAgents')}
+            </button>
+          )}
           <button type="button" className="kindora-button-ghost" onClick={onSettings}>
             {t('home.settings')}
           </button>
@@ -42,6 +61,15 @@ export function Home({ agent, onEdit, onConnect, onSettings }: HomeProps) {
           </button>
         </div>
       </header>
+
+      {/* Phase A / A1 — the browser-dev fallback keeps the private key in
+          localStorage. Say so, loudly, rather than implying the key is in a
+          secure store. */}
+      {agent.privateKeyStorage.kind === 'dev-localstorage' && (
+        <section className="kindora-warning">
+          <p className="text-sm leading-relaxed">{t('home.keychainDevWarning')}</p>
+        </section>
+      )}
 
       <section className="kindora-card">
         <p className="text-sm leading-relaxed">{profile.bio}</p>
@@ -100,10 +128,7 @@ export function Home({ agent, onEdit, onConnect, onSettings }: HomeProps) {
   );
 }
 
-function intentSummary(
-  t: Translate,
-  intents: readonly SocialIntent[],
-): string {
+function intentSummary(t: Translate, intents: readonly SocialIntent[]): string {
   if (intents.length === 0) return '—';
   return intents.map((i) => t(SOCIAL_INTENT_SHORT_KEYS[i])).join(' · ');
 }

@@ -12,22 +12,22 @@
 //!   - 2. Both sides send and receive `hello`.
 //!   - 3. Both sides exchange `profile_exchange`.
 //!   - 4. Both sides exchange `match_request` and `match_response`
-//!         in order, with the correct count.
+//!        in order, with the correct count.
 //!   - 5. Host never sends `hello` → joiner times out (joiner's
-//!         `join_poll` keeps returning empty until the test's own
-//!         deadline).
+//!        `join_poll` keeps returning empty until the test's own
+//!        deadline).
 //!   - 6. Malformed `hello` is delivered without transport rejection
-//!         (validation happens on the TS side; this test only
-//!         verifies the wire path doesn't drop or mangle it).
+//!        (validation happens on the TS side; this test only
+//!        verifies the wire path doesn't drop or mangle it).
 //!   - 7. Mid-handshake disconnect: host stops before the joiner
-//!         sends its first envelope → joiner's next `join_poll`
-//!         eventually times out / `host_status` clears.
+//!        sends its first envelope → joiner's next `join_poll`
+//!        eventually times out / `host_status` clears.
 //!   - 8. Post-protocol disconnect: both sides have exchanged
-//!         hello + profile + match_request/response → host stops →
-//!         joiner's next `join_send` returns NotConnected.
+//!        hello + profile + match_request/response → host stops →
+//!        joiner's next `join_send` returns NotConnected.
 //!   - 9. Cancel + re-pair: host starts with code A, joiner tries
-//!         to discover code B (no match) → joiner can immediately
-//!         re-discover code A and connect.
+//!        to discover code B (no match) → joiner can immediately
+//!        re-discover code A and connect.
 //!
 //! Each test uses two FRESH `LanState` instances on different UDP
 //! ports so they don't share state. `127.0.0.1` is used as the
@@ -89,7 +89,15 @@ fn hello_envelope(sender: &str, display_name: &str) -> String {
                 "supportsMatchAnalysis": true,
                 "supportsIcebreaker": true,
                 "supportsChatAssist": true,
-                "supportsEncryption": false,
+                // Phase A / A4: the single ambiguous `supportsEncryption`
+                // flag was replaced by four flags that cannot be confused
+                // with one another. The Rust side moves opaque bytes, but
+                // this fixture must still mirror what the TypeScript app
+                // actually puts on the wire.
+                "supportsMessageSigning": false,
+                "supportsSessionEncryption": false,
+                "supportsTransportEncryption": false,
+                "supportsWebRtc": false,
             },
         },
     })
@@ -145,7 +153,15 @@ fn profile_exchange_envelope(sender: &str, nickname: &str) -> String {
                     "supportsMatchAnalysis": true,
                     "supportsIcebreaker": true,
                     "supportsChatAssist": true,
-                    "supportsEncryption": false,
+                    // Phase A / A4: the single ambiguous `supportsEncryption`
+                    // flag was replaced by four flags that cannot be confused
+                    // with one another. The Rust side moves opaque bytes, but
+                    // this fixture must still mirror what the TypeScript app
+                    // actually puts on the wire.
+                    "supportsMessageSigning": false,
+                    "supportsSessionEncryption": false,
+                    "supportsTransportEncryption": false,
+                    "supportsWebRtc": false,
                 },
             },
         },
@@ -237,9 +253,7 @@ enum Side {
     Join,
 }
 
-async fn connect_two(
-    code: &str,
-) -> (kindora_lib::LanState, kindora_lib::LanState) {
+async fn connect_two(code: &str) -> (kindora_lib::LanState, kindora_lib::LanState) {
     let host_state = fresh_state();
     let joiner_state = fresh_state();
     host_state
@@ -301,8 +315,13 @@ async fn two_instance_hello_exchange() {
 
     let host_hello = hello_envelope(AGENT_HOST, "Host");
     let joiner_hello = hello_envelope(AGENT_JOINER, "Joiner");
-    host.host_send(host_hello.clone()).await.expect("host_send hello");
-    joiner.join_send(joiner_hello.clone()).await.expect("join_send hello");
+    host.host_send(host_hello.clone())
+        .await
+        .expect("host_send hello");
+    joiner
+        .join_send(joiner_hello.clone())
+        .await
+        .expect("join_send hello");
 
     // Each side should receive the other's hello.
     let host_got = drain_n(&host, Side::Host, 1, Duration::from_secs(2)).await;
@@ -337,8 +356,13 @@ async fn two_instance_profile_exchange_round_trip() {
     // Skip hello for brevity; the wire doesn't enforce order.
     let host_profile = profile_exchange_envelope(AGENT_HOST, "host_nick");
     let joiner_profile = profile_exchange_envelope(AGENT_JOINER, "joiner_nick");
-    host.host_send(host_profile).await.expect("host_send profile");
-    joiner.join_send(joiner_profile).await.expect("join_send profile");
+    host.host_send(host_profile)
+        .await
+        .expect("host_send profile");
+    joiner
+        .join_send(joiner_profile)
+        .await
+        .expect("join_send profile");
 
     let host_got = drain_n(&host, Side::Host, 1, Duration::from_secs(2)).await;
     let joiner_got = drain_n(&joiner, Side::Join, 1, Duration::from_secs(2)).await;
@@ -440,7 +464,10 @@ async fn two_instance_host_silent_then_link_drops() {
 
     // Now the host stops. The joiner side is still up.
     host.host_stop().await.expect("host_stop");
-    assert!(!host.host_linked().await, "host_linked must be false after stop");
+    assert!(
+        !host.host_linked().await,
+        "host_linked must be false after stop"
+    );
 
     // Phase 16.3 § 5.1 fix: `joiner.join_send` no longer silently
     // succeeds after `host_stop`. The `peer_closed` flag is set when
@@ -491,7 +518,8 @@ async fn two_instance_malformed_hello_is_delivered() {
     // just passes the JSON through. The TS-side `validatePeerHello`
     // is what rejects it. This test only verifies the wire doesn't
     // mangle or drop the bytes.
-    let bad_hello = r#"{"protocol":"KSA","version":"0.1","type":"hello","sender":"not-a-uuid","payload":{}}"#;
+    let bad_hello =
+        r#"{"protocol":"KSA","version":"0.1","type":"hello","sender":"not-a-uuid","payload":{}}"#;
     host.host_send(bad_hello.to_string())
         .await
         .expect("host_send bad");
@@ -526,7 +554,10 @@ async fn two_instance_mid_handshake_disconnect() {
 
     // Now the host stops BEFORE the joiner replies.
     host.host_stop().await.expect("host_stop");
-    assert!(!host.host_linked().await, "host_linked must be false after stop");
+    assert!(
+        !host.host_linked().await,
+        "host_linked must be false after stop"
+    );
 
     // Phase 16.3 § 5.1 fix: the joiner detects the host-side drop
     // within ≤ 1 s of `host_stop` via `Err(PeerClosed)` from
@@ -597,7 +628,10 @@ async fn two_instance_post_protocol_disconnect() {
     let _ = drain_n(&joiner, Side::Join, 3, Duration::from_secs(1)).await;
 
     host.host_stop().await.expect("host_stop");
-    assert!(!host.host_linked().await, "host_linked must be false after stop");
+    assert!(
+        !host.host_linked().await,
+        "host_linked must be false after stop"
+    );
 
     // Phase 16.3 § 5.1 fix: post-stop, the joiner's `join_send` no
     // longer succeeds silently. The kernel may still accept bytes
@@ -657,7 +691,12 @@ async fn two_instance_cancel_and_repair() {
         .join_discover(code_a.to_string(), 1500)
         .await
         .expect("discover A");
-    assert_eq!(hit.len(), 1, "host A should respond to code_a; got {:?}", hit);
+    assert_eq!(
+        hit.len(),
+        1,
+        "host A should respond to code_a; got {:?}",
+        hit
+    );
     let peer = &hit[0];
     joiner
         .join_connect(peer.ip.clone(), peer.port)
@@ -669,7 +708,10 @@ async fn two_instance_cancel_and_repair() {
     while Instant::now() < deadline && !host.host_linked().await {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    assert!(host.host_linked().await, "host should be linked after re-pair");
+    assert!(
+        host.host_linked().await,
+        "host should be linked after re-pair"
+    );
 
     // And a hello round-trip works.
     host.host_send(hello_envelope(AGENT_HOST, "Host"))

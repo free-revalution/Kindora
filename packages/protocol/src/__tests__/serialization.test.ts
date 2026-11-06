@@ -19,7 +19,10 @@ describe('@kindora/protocol — serialization', () => {
         supportsMatchAnalysis: true,
         supportsIcebreaker: true,
         supportsChatAssist: true,
-        supportsEncryption: true,
+        supportsMessageSigning: false,
+        supportsSessionEncryption: false,
+        supportsTransportEncryption: false,
+        supportsWebRtc: false,
       },
     });
     const json = encodeEnvelope(e);

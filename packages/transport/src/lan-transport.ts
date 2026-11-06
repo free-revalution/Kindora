@@ -17,8 +17,11 @@
  *   - Discovery is broadcast on 255.255.255.255:52419 — works on most
  *     home / office LANs; does NOT cross subnets / VLANs / AP
  *     isolation. The UI surfaces this as a non-fatal warning.
- *   - Single peer per session (host accepts one connection and
- *     stops listening). Documented.
+ *   - Single peer per session. The Rust side enforces this with a
+ *     connection cap (`MAX_CONNECTIONS`), **not** by tearing the
+ *     listener down after the first accept — the listener stays up
+ *     so a peer that disconnects frees its slot and a new peer can
+ *     connect (Phase C / C3).
  *   - No TCP-level encryption. The KSA envelope layer above this
  *     transport is the trust boundary. Suitable for prototype;
  *     production must add TLS or a WebRTC DataChannel layer.
@@ -27,9 +30,29 @@
  */
 
 import type { KsaMessage } from '@kindora/protocol';
-import { decodeEnvelope, encodeEnvelope } from '@kindora/protocol';
-import type { CloseHandler, MessageHandler, PeerInfo, Transport } from './index';
+import { canonicalize, decodeEnvelope, encodeEnvelope } from '@kindora/protocol';
+import type { CloseHandler, CloseReason, MessageHandler, PeerInfo, Transport } from './index';
 import { LanError } from './lan-error';
+import {
+  isSessionFrame,
+  openFrame,
+  sealEnvelope,
+  type SessionCipher,
+  type SessionFrame,
+} from './session-crypto';
+
+/**
+ * Phase A / A3 — how many encrypted frames may wait for the session
+ * cipher before the oldest ones are dropped.
+ *
+ * The cipher is installed asynchronously (the session has to verify
+ * the peer's `hello` first), but the transport decodes frames as they
+ * arrive. A frame that lands in that window cannot be decrypted yet.
+ * We queue it rather than drop it — dropping would silently lose the
+ * peer's first encrypted message. The cap keeps a peer that never
+ * completes the handshake from growing the queue without bound.
+ */
+const MAX_PENDING_ENCRYPTED_FRAMES = 32;
 
 /** Tauri 2 `invoke` and `event` shim. Falls back to throwing if not in Tauri runtime. */
 interface TauriRuntime {
@@ -37,14 +60,21 @@ interface TauriRuntime {
 }
 
 function getTauri(): TauriRuntime | null {
-  const w = (typeof window !== 'undefined' ? window : (globalThis as { window?: Window }).window) as
-    | (Window & { __TAURI_INTERNALS__?: { invoke?: (cmd: string, args?: Record<string, unknown>) => Promise<unknown> } })
+  const w = (
+    typeof window !== 'undefined' ? window : (globalThis as { window?: Window }).window
+  ) as
+    | (Window & {
+        __TAURI_INTERNALS__?: {
+          invoke?: (cmd: string, args?: Record<string, unknown>) => Promise<unknown>;
+        };
+      })
     | undefined;
   if (!w) return null;
   const inv = w.__TAURI_INTERNALS__?.invoke;
   if (typeof inv !== 'function') return null;
   return {
-    invoke: <T>(cmd: string, args?: Record<string, unknown>) => inv.call(w.__TAURI_INTERNALS__, cmd, args) as Promise<T>,
+    invoke: <T>(cmd: string, args?: Record<string, unknown>) =>
+      inv.call(w.__TAURI_INTERNALS__, cmd, args) as Promise<T>,
   };
 }
 
@@ -71,6 +101,28 @@ export interface LanJoinPeer {
 }
 
 type Mode = 'idle' | 'host' | 'join';
+
+/**
+ * Phase C / C2: map a poll rejection to the close reason it
+ * represents, or `null` when the error is transient and the poll
+ * should simply be retried.
+ *
+ * Terminal:
+ *   - `peer-closed`    — the peer went away (EOF / reset).
+ *   - `limit-exceeded` — the peer broke a resource limit (frame size,
+ *     message rate, inbox backpressure).
+ *   - `invalid-frame`  — the peer sent a frame we could not decode
+ *     (e.g. invalid UTF-8).
+ *
+ * Transient (retried): `not-connected`, `io`, `json`,
+ * `already-running` and anything the classifier could not place.
+ */
+function terminalCloseReason(err: LanError): CloseReason | null {
+  if (err.isPeerClosed()) return 'peer-closed';
+  if (err.isLimitExceeded()) return 'limit-exceeded';
+  if (err.kind === 'invalid') return 'invalid-frame';
+  return null;
+}
 
 /**
  * LanTransport — implements `Transport` over the Tauri LAN commands.
@@ -120,6 +172,14 @@ export class LanTransport implements Transport {
   private closeHandlers = new Set<CloseHandler>();
   private closedByPeer = false;
   /**
+   * Phase C / C2: why the current (or most recent) close happened.
+   *
+   * Kept so a handler registered *after* the close fired can still be
+   * told the reason — the late-subscriber microtask in `onClose`
+   * reads this.
+   */
+  private lastCloseReason: CloseReason = 'peer-closed';
+  /**
    * Phase 16.5: a promise that resolves once any in-flight
    * Rust-side cleanup (peer-close triggered `lan_host_stop` /
    * `lan_join_disconnect`, or an explicit `disconnect()`) has
@@ -153,6 +213,32 @@ export class LanTransport implements Transport {
    * yet).
    */
   private generation = 0;
+  /**
+   * Phase A / A3 — the session cipher. Installed by `PairingSession`
+   * once the ephemeral ECDH exchange has produced a session key. While
+   * it is `null` the transport carries plaintext envelopes (the
+   * handshake itself is plaintext, by design — the key does not exist
+   * yet).
+   */
+  private cipher: SessionCipher | null = null;
+  /**
+   * Phase A / A3 — encrypted frames that arrived before the cipher was
+   * installed. See `MAX_PENDING_ENCRYPTED_FRAMES`.
+   */
+  private pendingFrames: SessionFrame[] = [];
+  /**
+   * Phase C / C3 § 7 — the connect attempt that is currently in
+   * flight, if any.
+   *
+   * `connect()` has to discover a peer before it can dial, and the
+   * discovery window is seconds long. Without this guard, two callers
+   * that ask to connect at the same time both discover and both try
+   * to dial; the loser fails with "already in mode 'join'" instead of
+   * joining the connection the winner established.
+   *
+   * `null` when there is no attempt in flight.
+   */
+  private connectInFlight: Promise<void> | null = null;
 
   constructor(opts: LanTransportOptions) {
     this.opts = opts;
@@ -196,6 +282,12 @@ export class LanTransport implements Transport {
     // connection. (See `onClose` late-subscriber path and the
     // `generation` field.)
     this.generation += 1;
+    // Phase C / C3 § 6: a new connection never inherits the previous
+    // connection's session key. The cipher dies with the link it
+    // belonged to — leaving it installed would mean the next peer
+    // sees frames it cannot decrypt, and that our own outbound frames
+    // are sealed with a key the peer does not have.
+    this.destroySessionCipher();
     try {
       await this.awaitCleanup();
       const info = await this.tauri.invoke<LanHostInfo>('lan_host_start', {
@@ -259,6 +351,9 @@ export class LanTransport implements Transport {
     // Phase 16.6: reserve the mode slot synchronously.
     this.mode = 'join';
     this.generation += 1;
+    // Phase C / C3 § 6: same contract as `startHost` — a new
+    // connection starts with no session key and no queued frames.
+    this.destroySessionCipher();
     try {
       await this.awaitCleanup();
       const info = await this.tauri.invoke<LanJoinPeer>('lan_join_connect', {
@@ -344,38 +439,178 @@ export class LanTransport implements Transport {
    * already started the actual network setup. This mirrors the
    * loopback path where `connect(peerInfo)` is the single entry point
    * and the LAN path where the dedicated methods pre-stage.
+   *
+   * Phase C / C3 § 7 — a **duplicate** connect request does not start
+   * a second connection. `startHost` / `startJoin` reserve the mode
+   * slot synchronously, so two concurrent calls there are already
+   * safe; `connect()` has to discover a peer first, and two callers
+   * racing here would both discover and both try to dial. The loser
+   * would fail with "already in mode 'join'" instead of joining the
+   * connection the winner established. The in-flight promise is
+   * shared: the second caller awaits the first one's result.
    */
   async connect(peer: PeerInfo): Promise<void> {
     if (this.mode === 'host' || this.mode === 'join') {
       // Already started via the dedicated methods. No-op.
       return;
     }
-    if (this.mode === 'idle') {
-      const code = peer.hint;
-      if (!code) {
-        throw new Error(
-          'LanTransport.connect: a joiner needs peer.hint set to the pairing code. Call startJoin(peer) directly with a discovered peer instead.',
-        );
-      }
-      const peers = await this.discover(code, this.discoverTimeoutMs);
-      if (peers.length === 0) {
-        throw new Error(
-          `LanTransport.connect: no peer on the LAN responded to code "${code}" within ${this.discoverTimeoutMs}ms.`,
-        );
-      }
-      await this.startJoin(peers[0]!);
+    if (this.connectInFlight) {
+      // Phase C / C3 § 7: join the attempt that is already running.
+      return this.connectInFlight;
     }
+    const attempt = this.connectOnce(peer);
+    // Assigned synchronously — `connectOnce` returns at its first
+    // `await`, so there is no window in which a second caller could
+    // slip in between the call and the assignment.
+    this.connectInFlight = attempt;
+    try {
+      await attempt;
+    } finally {
+      if (this.connectInFlight === attempt) {
+        this.connectInFlight = null;
+      }
+    }
+  }
+
+  /** Phase C / C3 § 7 — the actual connect work, behind the in-flight guard. */
+  private async connectOnce(peer: PeerInfo): Promise<void> {
+    const code = peer.hint;
+    if (!code) {
+      throw new Error(
+        'LanTransport.connect: a joiner needs peer.hint set to the pairing code. Call startJoin(peer) directly with a discovered peer instead.',
+      );
+    }
+    const peers = await this.discover(code, this.discoverTimeoutMs);
+    if (peers.length === 0) {
+      throw new Error(
+        `LanTransport.connect: no peer on the LAN responded to code "${code}" within ${this.discoverTimeoutMs}ms.`,
+      );
+    }
+    await this.startJoin(peers[0]!);
   }
 
   async send(message: KsaMessage): Promise<void> {
     if (this.mode === 'idle') {
       throw new Error('LanTransport.send: not started');
     }
-    const encoded = encodeEnvelope(message);
+    // Phase A / A3: with a session cipher installed the payload is
+    // encrypted; the header and the signature stay in the clear.
+    const encoded = this.cipher
+      ? canonicalize(await sealEnvelope(message, this.cipher))
+      : encodeEnvelope(message);
     if (this.mode === 'host') {
       await this.tauri.invoke('lan_host_send', { message: encoded });
     } else {
       await this.tauri.invoke('lan_join_send', { message: encoded });
+    }
+  }
+
+  /**
+   * Phase A / A3 — install (or clear) the session cipher.
+   *
+   * The transport is the only layer that touches the wire bytes, so it
+   * is the only layer that encrypts and decrypts them.
+   *
+   * Installing a cipher also flushes any encrypted frame that arrived
+   * while the handshake was still in flight.
+   */
+  setSessionCipher(cipher: SessionCipher | null): void {
+    this.cipher = cipher;
+    if (cipher) {
+      void this.flushPendingFrames();
+    }
+  }
+
+  /**
+   * Phase C / C3 § 6 — tear the session key down with the link.
+   *
+   * Two things die here, and both of them belong to the peer that just
+   * went away:
+   *
+   *   - the **cipher** — a session key is only valid for the link it
+   *     was negotiated on. Reusing it on the next connection would
+   *     mean the new peer receives frames it cannot decrypt, and that
+   *     our outbound frames are sealed with a key it does not have.
+   *   - the **pending frames** — encrypted frames that arrived before
+   *     the cipher was installed belong to the *old* peer. Decrypting
+   *     them with the *next* peer's key would be meaningless at best
+   *     and a confusion at worst.
+   *
+   * Called from `handlePeerClosed` (the peer dropped), from
+   * `disconnect()` (we dropped it), and from `startHost` / `startJoin`
+   * (a new connection is starting).
+   */
+  private destroySessionCipher(): void {
+    this.cipher?.destroy();
+    this.cipher = null;
+    this.pendingFrames = [];
+  }
+
+  /**
+   * Phase A / A3 — decrypt the frames that were waiting for the cipher.
+   *
+   * A frame that fails to authenticate is dropped: it is either
+   * corrupt or was tampered with on the wire.
+   */
+  private async flushPendingFrames(): Promise<void> {
+    if (this.pendingFrames.length === 0) return;
+    const cipher = this.cipher;
+    if (!cipher) return;
+    const pending = this.pendingFrames;
+    this.pendingFrames = [];
+    for (const frame of pending) {
+      let decoded: KsaMessage | null = null;
+      try {
+        decoded = await openFrame(frame, cipher);
+      } catch (err) {
+        console.warn('[lan] a queued session frame failed to decrypt:', err);
+      }
+      if (!decoded) continue;
+      for (const h of this.handlers) {
+        try {
+          h(decoded);
+        } catch (err) {
+          console.warn('[lan] message handler threw:', err);
+        }
+      }
+    }
+  }
+
+  /**
+   * Phase A / A3 — turn a raw wire frame into an envelope.
+   *
+   * An encrypted frame is decrypted with the session cipher; a plain
+   * envelope is parsed as before. A frame that arrives without a
+   * cipher is **queued**, not dropped: the cipher is installed
+   * asynchronously once the peer's `hello` has been verified, and a
+   * frame that lands in that window is legitimate.
+   */
+  private async decodeWire(raw: string): Promise<KsaMessage | null> {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      return null;
+    }
+    if (isSessionFrame(parsed)) {
+      if (!this.cipher) {
+        if (this.pendingFrames.length >= MAX_PENDING_ENCRYPTED_FRAMES) {
+          this.pendingFrames.shift();
+        }
+        this.pendingFrames.push(parsed);
+        return null;
+      }
+      try {
+        return await openFrame(parsed, this.cipher);
+      } catch (err) {
+        console.warn('[lan] could not decrypt an inbound session frame:', err);
+        return null;
+      }
+    }
+    try {
+      return decodeEnvelope(raw);
+    } catch {
+      return null;
     }
   }
 
@@ -420,7 +655,7 @@ export class LanTransport implements Transport {
       queueMicrotask(() => {
         if (this.closedByPeer && this.generation === myGen) {
           try {
-            handler();
+            handler(this.lastCloseReason);
           } catch (e) {
             // Don't let one late subscriber crash the dispatch.
             console.warn('[lan] onClose handler threw:', e);
@@ -466,6 +701,10 @@ export class LanTransport implements Transport {
     // starts clean. See Task 2.
     this.closedByPeer = false;
     this.closeHandlers.clear();
+    // Phase A / A3: tear the session key down with the link.
+    // Phase C / C3 § 6: same helper as the peer-close path — the key
+    // and any queued frames die with the link they belonged to.
+    this.destroySessionCipher();
   }
 
   // ---------- internals ----------
@@ -571,9 +810,11 @@ export class LanTransport implements Transport {
    * `startJoin` / `disconnect` can await it instead of racing
    * the in-flight IPC. See Task 1.
    */
-  private handlePeerClosed(): void {
+  private handlePeerClosed(reason: CloseReason = 'peer-closed'): void {
     if (this.closedByPeer) return;
     this.closedByPeer = true;
+    // Phase C / C2: remember why, so a late subscriber can be told.
+    this.lastCloseReason = reason;
     // Phase 16.6: bump the generation BEFORE firing handlers.
     // Any late-subscriber microtask scheduled by `onClose`
     // (because `closedByPeer` is now true) will capture this
@@ -590,7 +831,7 @@ export class LanTransport implements Transport {
     const handlers = Array.from(this.closeHandlers);
     for (const h of handlers) {
       try {
-        h();
+        h(reason);
       } catch (e) {
         // Don't let one bad handler silence the rest.
         console.warn('[lan] onClose handler threw:', e);
@@ -605,6 +846,12 @@ export class LanTransport implements Transport {
     const cleanupMode = this.mode;
     this.mode = 'idle';
     this.peer = null;
+    // Phase C / C3 § 6: the session key dies with the link. Without
+    // this, a reconnect on the same transport instance would inherit
+    // the dead peer's key — the new peer could not decrypt what we
+    // send, and the frames the old peer sent would be decrypted with
+    // the wrong key.
+    this.destroySessionCipher();
     // Phase 16.5: track the cleanup promise. `startHost` /
     // `startJoin` / `disconnect` await this so a re-bind never
     // races the in-flight cleanup. Best-effort — failures are
@@ -646,7 +893,7 @@ export class LanTransport implements Transport {
         }
       }
       for (const raw of messages) {
-        const env = decodeEnvelope(raw);
+        const env = await this.decodeWire(raw);
         if (!env) continue;
         for (const h of this.handlers) {
           try {
@@ -676,9 +923,19 @@ export class LanTransport implements Transport {
       // transient or local; we log at debug and let the next tick
       // retry. This is the same retry behaviour as before — only
       // the peer-close path is new.
+      //
+      // Phase C / C2: two more rejections are terminal, not
+      // transient. `LimitExceeded` (the peer broke a resource
+      // limit) and `Invalid` (the peer sent a frame we could not
+      // decode) both mean the Rust side has already dropped the
+      // link — polling again would fail forever and the user would
+      // see a connection that is "connected" but dead. Both carry
+      // an explicit reason, which C2 § 5 requires the frontend to
+      // receive.
       const lanErr = LanError.from(err);
-      if (lanErr.isPeerClosed()) {
-        this.handlePeerClosed();
+      const terminal = terminalCloseReason(lanErr);
+      if (terminal) {
+        this.handlePeerClosed(terminal);
         return;
       }
       // Don't let one bad poll kill the rest.

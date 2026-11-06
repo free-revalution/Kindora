@@ -40,11 +40,7 @@
  * See 开发手册.md Phase 7.
  */
 import type { KsaMessage } from '@kindora/protocol';
-import {
-  createBlock,
-  createConsentAccept,
-  createConsentReject,
-} from '@kindora/protocol';
+import { createBlock, createConsentAccept, createConsentReject } from '@kindora/protocol';
 import type { PairingSession } from '@kindora/transport';
 
 /** How long to wait for the peer's `consent_accept` after the local accept. */
@@ -302,10 +298,7 @@ export class ConsentOrchestrator {
     // a long timeout for accept (so the local user isn't hung if the
     // peer takes time).
     const peerMsg = await queue.next(
-      (m) =>
-        m.type === 'consent_accept' ||
-        m.type === 'consent_reject' ||
-        m.type === 'block',
+      (m) => m.type === 'consent_accept' || m.type === 'consent_reject' || m.type === 'block',
       this.state === 'accepted_local' ? this.peerConsentTimeoutMs : null,
     );
 
@@ -374,9 +367,7 @@ export class ConsentOrchestrator {
     return s === 'rejected' || s === 'blocked' || s === 'accepted_both';
   }
 
-  private resolveOutcome(patch: {
-    peerAcceptTimedOut?: boolean;
-  }): void {
+  private resolveOutcome(patch: { peerAcceptTimedOut?: boolean }): void {
     if (!this.resolvePromise) return;
     const resolve = this.resolvePromise;
     this.resolvePromise = null;

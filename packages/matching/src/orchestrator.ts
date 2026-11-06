@@ -1,52 +1,67 @@
 /**
- * MatchOrchestrator — drives the Phase 6 wire flow on top of a
+ * MatchOrchestrator — drives the KSA wire flow on top of a
  * `PairingSession` whose transport is up.
  *
- * Phase 15 tightening: the orchestrator no longer accepts a "degrade
- * gracefully on missed hello" fallback. The peer's `hello` envelope
- * is a HARD GATE: if it doesn't arrive within `helloTimeoutMs`, is
- * malformed, or its `sender` is the local agent id, the orchestrator
- *   (1) calls `session.failHandshake(reason)` to close the session,
- *   (2) throws a typed error (HandshakeTimeoutError /
- *       HandshakeValidationError / HandshakeClosedError), and
- *   (3) does NOT run the LLM, the `match_request`, or the
- *       `match_response` flow.
+ * ## Phase B (2026-11-05) — the flow is now TWO-PHASE
  *
- * Only after a valid `hello` is received and validated does the
- * orchestrator call `session.notifyHelloReceived(peerAgentId)` and
- * proceed with the `profile_exchange` / `match_request` /
- * `match_response` flow. The `earlyWaitTimeoutMs` still applies to
- * the `profile_exchange` wait — that envelope is informational, not
- * a handshake gate — and the `peerAnalysisTimeoutMs` still bounds
- * the `match_response` wait.
+ * Before Phase B a single `start()` did everything in one go:
  *
- * Flow (per 开发手册.md § 22–23, § 44, Phase 15):
+ *   hello → profile_exchange (FULL profile) → match_request (FULL profile again) → analysis
  *
- *   1. send `hello`                          → handshake (HARD GATE)
- *   2. await peer's `hello` (helloTimeoutMs) → validate sender / type / payload
- *   3. session.notifyHelloReceived(peerAgentId) — tcp-connected → connected
- *   4. send `profile_exchange`               → share identity (soft wait)
- *   5. await peer's `profile_exchange`       → learn peer's identity
- *   6. send `match_request`                  → request analysis
- *   7. concurrently:
- *        a) run local `analyzeMatch` (LLM)
- *        b) await peer's `match_response`
- *   8. send `match_response`                 → share our analysis
- *   9. resolve with the final outcome
+ * That shipped the user's complete profile to a peer **before** the
+ * human consent step, shipped it **twice** (once as `payload.profile`
+ * and once nested in `payload.agent.profile`, then a third time as
+ * `match_request.selfProfile`), and ran the block-list guard only
+ * *after* the profile had already left the device.
  *
- * The orchestrator is **stateless** between `start()` calls. It does
- * not own timers — the caller controls the lifecycle. Incoming
- * envelopes that don't match the expected `sender === peer.agentId`
- * are dropped defensively (§ 50).
+ * Task book § 五 B2 requires the opposite order:
  *
- * Implementation note — `PairingSession.onMessage` only stores the
- * most recent handler. To sequence several awaits on the same
- * session, we install a SINGLE handler that pushes every incoming
- * message into a queue, and `awaitMessage` consumes the queue under
- * a filter. This keeps ordering stable even if the peer sends
- * faster than we await.
+ *   1. `identify()`         — hello, then the **minimal public card**
+ *   2. human consent       — the desktop shows the card, the user decides
+ *   3. `exchangeAndMatch()` — the **authorised profile**, then the analysis
  *
- * See 开发手册.md Phase 6 + Phase 15.
+ * `start()` is gone on purpose. With a single entry point a caller
+ * could skip the consent step, and the whole point of Phase B is that
+ * the consent step *cannot* be skipped: `exchangeAndMatch()` refuses to
+ * send the authorised profile without a peer-specific, mutual consent.
+ *
+ * ## What is on the wire, and when
+ *
+ * | stage | envelope | profile content |
+ * |---|---|---|
+ * | `identify()` | `hello` | none (display name + capabilities only) |
+ * | `identify()` | `profile_exchange` | the **public card** (nickname + authorised social intent / conversation style) |
+ * | `exchangeAndMatch()` | `match_request` | the **authorised profile** (every field the user did not authorise removed) |
+ * | `exchangeAndMatch()` | `match_response` | the analysis (computed from the authorised profiles only) |
+ *
+ * The public card is built by `buildPublicCard` and the authorised
+ * profile by `filterProfileForOutbound` — both live in
+ * `@kindora/protocol`'s `profile-privacy-filter`. This module never
+ * builds a profile itself; it only decides *when* to send which one
+ * and asserts, immediately before the send, that the copy really does
+ * respect the user's authorisation.
+ *
+ * ## The invariant this module upholds
+ *
+ * **A peer's message can never widen the local user's authorisation.**
+ *
+ * Every filter decision reads the **local** boundaries. The peer's
+ * `consent_accept` is treated as *evidence that the peer agreed*, never
+ * as *permission for us to disclose more* — the disclosure scope is
+ * fixed by the local user before the peer is even known.
+ *
+ * ## Implementation note — multiple handlers on one session
+ *
+ * `PairingSession.onMessage` supports **multiple** simultaneous
+ * handlers (it is a `Set`, and it returns an unsubscribe function).
+ * The `ConsentOrchestrator` installs its own queue on the same
+ * session, and both queues see every inbound envelope. That is what
+ * lets the MatchOrchestrator's queue survive the phase-1 → consent →
+ * phase-2 gap: the peer's `consent_accept` arrives while the consent
+ * screen is up, is buffered by the MatchOrchestrator's queue, and is
+ * picked up in phase 2.
+ *
+ * See 开发手册.md § 22–23, § 44, Phase 6, Phase 15, and docs/修复.md § 五 B2.
  */
 import type { LLMProvider } from '@kindora/llm';
 import {
@@ -59,20 +74,31 @@ import {
 import type {
   AgentCapabilities,
   KsaHello,
+  KsaMatchRequest,
   KsaMessage,
   KsaProfileExchange,
   MatchAnalysis,
   SocialAgent,
+  SocialBoundaries,
   SocialProfile,
 } from '@kindora/protocol';
 import {
+  assertProfileWithinBoundaries,
+  buildPublicCard,
   createHello,
   createMatchRequest,
   createMatchResponse,
   createProfileExchange,
+  filterProfileForOutbound,
+  resolveBoundaries,
   type HelloPayload,
 } from '@kindora/protocol';
 import type { MessageHandler, PairingSession } from '@kindora/transport';
+import { DEFAULT_PEER_CONSENT_TIMEOUT_MS, type ConsentState } from './consent-orchestrator';
+
+/* ------------------------------------------------------------------ */
+/* Errors                                                              */
+/* ------------------------------------------------------------------ */
 
 /** Throw when the peer does not send a `hello` envelope in time. */
 export class HandshakeTimeoutError extends Error {
@@ -98,12 +124,107 @@ export class HandshakeClosedError extends Error {
   }
 }
 
+/**
+ * Throw when the connected peer is on the local block list.
+ *
+ * Phase B: this is raised in phase 1 (`identify()`) — **before** any
+ * profile data is sent. The old flow ran the guard *after* the profile
+ * exchange, so a blocked peer still received the full profile; the
+ * refusal only showed up in the UI.
+ *
+ * The `hello` envelope has necessarily been exchanged by the time the
+ * peer's id is known (the id is what the block list is keyed by). The
+ * hello carries the display name, the capability flags and the public
+ * keys — **no profile fields at all** — so nothing the user gated is
+ * disclosed to a blocked peer.
+ */
+export class PeerBlockedError extends Error {
+  readonly peerAgentId: string;
+
+  constructor(peerAgentId: string, reason?: string) {
+    super(
+      reason
+        ? `Peer ${peerAgentId} is on the local block list: ${reason}`
+        : `Peer ${peerAgentId} is on the local block list.`,
+    );
+    this.name = 'PeerBlockedError';
+    this.peerAgentId = peerAgentId;
+  }
+}
+
+/**
+ * Throw when the authorised profile would be sent without a valid,
+ * peer-specific, mutual human consent.
+ *
+ * Phase B: this is the enforcement point of task book § 五 B2
+ * requirement 6 — 「未经过用户明确同意，不得发送完整资料」. The
+ * orchestrator refuses to disclose rather than trusting the caller to
+ * have shown the consent screen.
+ */
+export class ConsentRequiredError extends Error {
+  /** Why the disclosure was refused. */
+  readonly reason: 'no-local-consent' | 'peer-refused' | 'peer-timeout';
+
+  constructor(reason: ConsentRequiredError['reason'], message: string) {
+    super(message);
+    this.name = 'ConsentRequiredError';
+    this.reason = reason;
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* Public shapes                                                       */
+/* ------------------------------------------------------------------ */
+
+/**
+ * The peer's public card — everything we know about them **before**
+ * the human consent step.
+ *
+ * This is the only profile data that may cross the wire before the
+ * user has agreed to talk to this peer.
+ */
+export interface PeerIntroduction {
+  /** The peer's full agent id. */
+  readonly peerAgentId: string;
+  /** The peer's display name (from their `hello` or their card). */
+  readonly peerDisplayName: string;
+  /** The peer's public card, or null when the peer sent none. */
+  readonly peerCard: SocialProfile | null;
+  /** The peer's public agent view, or null when the peer sent none. */
+  readonly peerAgent: SocialAgent | null;
+}
+
+/**
+ * The proof that the local user agreed to this specific peer.
+ *
+ * Phase B: `exchangeAndMatch()` requires one of these. It is the
+ * consent state machine's own outcome — the desktop passes the
+ * `ConsentOutcome` it got from the `ConsentOrchestrator`, which
+ * satisfies this shape structurally.
+ *
+ * Two independent facts are checked:
+ *
+ *   - `state === 'accepted_both'` — the local user accepted **and**
+ *     the peer accepted. A consent that only covers one side is not
+ *     enough to exchange profiles.
+ *   - `peerAgentId` — the consent must be about **this** peer. A
+ *     consent recorded for a different agent cannot be replayed here.
+ */
+export interface LocalConsent {
+  /** The consent state machine's final state. */
+  readonly state: ConsentState;
+  /** The peer the consent was given to. */
+  readonly peerAgentId: string;
+  /** True iff both sides accepted. */
+  readonly bothAccepted: boolean;
+}
+
 export interface MatchOrchestratorSelf {
   /** Local agent UUID — placed in `sender` on every outgoing envelope. */
   readonly agentId: string;
   /** Local display name — surfaced to the peer in `hello` and `match_response`. */
   readonly displayName: string;
-  /** Local profile — shared in `profile_exchange` and `match_request`. */
+  /** Local profile — filtered before it is shared (see `boundaries`). */
   readonly profile: SocialProfile;
   /** Local public agent view (without private key) — shared in `profile_exchange`. */
   readonly agent: SocialAgent;
@@ -116,21 +237,46 @@ export interface MatchOrchestratorSelf {
   /** Optional LLM call overrides. */
   readonly llmOptions?: AnalyzeMatchOptions;
   /**
-   * Optional guard called once the peer's id is known. Throw to abort
-   * the match (e.g. peer is on the local block list). The orchestrator
-   * catches the throw and surfaces a `peerRefused` outcome.
+   * Optional guard called once the peer's id is known and **before any
+   * profile data is sent**. Throw a `PeerBlockedError` to refuse the
+   * peer; any other throw is propagated unchanged (it is a real
+   * failure, not a block).
    */
   readonly peerGuard?: (peerAgentId: string) => void | Promise<void>;
+  /**
+   * The privacy boundaries in force **right now**.
+   *
+   * Phase B: this is a callback, not a snapshot, so that a
+   * revocation the user makes mid-session takes effect on the next
+   * message (task book § 五 B2 requirement 8: 「用户撤销授权后，应阻止
+   * 后续相关数据传输」). Defaults to `self.profile.boundaries`.
+   *
+   * It may be async: the desktop reads the boundaries from the
+   * persisted profile on every send, because that is the only copy
+   * that reflects a revocation the user just made in another window
+   * (or on another screen).
+   */
+  readonly boundaries?: () =>
+    Partial<SocialBoundaries> | undefined | Promise<Partial<SocialBoundaries> | undefined>;
 }
 
 export interface MatchOutcome {
-  /** The peer's display name (from their `hello` or `profile_exchange`). */
+  /** The peer's display name (from their `hello` or their card). */
   readonly peerDisplayName: string;
   /** The peer's full agent id. */
   readonly peerAgentId: string;
-  /** The peer's public view (from their `profile_exchange`). */
+  /**
+   * The peer's public view (from their `profile_exchange`), with the
+   * profile replaced by the **authorised** profile they sent in their
+   * `match_request` (falling back to their public card).
+   */
   readonly peerAgent: SocialAgent | null;
-  /** The peer's profile (from their `profile_exchange`). */
+  /**
+   * The peer's profile. After Phase B this is the **authorised**
+   * profile from their `match_request` — the same copy that went into
+   * the local analysis. It falls back to their public card when they
+   * sent no `match_request`.
+   */
   readonly peerProfile: SocialProfile | null;
   /** Local analysis (from `analyzeMatch`). Always present. */
   readonly localAnalysis: MatchAnalysis;
@@ -142,23 +288,30 @@ export interface MatchOutcome {
   readonly peerAnalysisTimeoutMs: number;
   /** True iff we gave up waiting for the peer's `match_response`. */
   readonly peerAnalysisTimedOut: boolean;
-  /**
-   * True iff the peer was refused by a `peerGuard` (e.g. on the local
-   * block list). When true, the session is closed before any match
-   * analysis runs.
-   */
-  readonly peerRefused: boolean;
+}
+
+export interface MatchOrchestratorOptions {
+  /** How long to wait for the peer's `match_response`. */
+  readonly peerAnalysisTimeoutMs?: number;
+  /** How long to wait for the peer's `profile_exchange` / `match_request`. */
+  readonly earlyWaitTimeoutMs?: number;
+  /** How long to wait for the peer's `hello` (hard gate). */
+  readonly helloTimeoutMs?: number;
+  /** Grace window for the peer's `hello` when the session is already connected. */
+  readonly peerHelloGraceMs?: number;
+  /** How long to wait for the peer's `consent_accept` in phase 2. */
+  readonly peerConsentTimeoutMs?: number;
 }
 
 /** How long to wait for the peer's `match_response` before giving up. */
 export const DEFAULT_PEER_ANALYSIS_TIMEOUT_MS = 30_000;
 
 /**
- * How long to wait for the peer's `profile_exchange` envelope before
- * falling back to a minimal peer profile and continuing with the
- * local analysis. The `profile_exchange` is informational, NOT a
- * handshake gate — a silent peer is treated as "no profile", not as
- * a hang.
+ * How long to wait for the peer's `profile_exchange` / `match_request`
+ * envelope before falling back to a minimal peer profile and continuing
+ * with the local analysis. Those envelopes are informational, NOT a
+ * handshake gate — a silent peer is treated as "no profile", not as a
+ * hang.
  *
  * Note: this is NOT the hello timeout. The hello wait is a hard
  * gate governed by `DEFAULT_HELLO_TIMEOUT_MS` — see Phase 15.
@@ -173,6 +326,30 @@ export const DEFAULT_EARLY_WAIT_TIMEOUT_MS = 2_000;
  * The match analysis is NOT run.
  */
 export const DEFAULT_HELLO_TIMEOUT_MS = 5_000;
+
+/**
+ * How long the orchestrator waits for the peer's `hello` *envelope*
+ * when the session already reports `connected`.
+ *
+ * In that state a prior consumer called `session.notifyHelloReceived`,
+ * so the peer's id is already locked in and the envelope is only
+ * needed for the peer's display name (and, on a signed session, the
+ * identity key the transport layer verifies).
+ *
+ * We still give the envelope a window because it may be in flight — our
+ * own hello send is asynchronous (Phase A / A3 derives an ephemeral key
+ * before the envelope goes out), so the peer's hello can arrive *after*
+ * we sent ours. But we must not wait the full `helloTimeoutMs`: an
+ * external consumer may already have consumed the envelope, in which
+ * case it will never arrive and we would stall the whole match for
+ * five seconds. 250 ms is far longer than a loopback round trip and
+ * short enough to be invisible in the UI.
+ */
+export const DEFAULT_PEER_HELLO_GRACE_MS = 250;
+
+/* ------------------------------------------------------------------ */
+/* Internals                                                           */
+/* ------------------------------------------------------------------ */
 
 interface Waiter {
   readonly predicate: (m: KsaMessage) => boolean;
@@ -215,7 +392,10 @@ function validatePeerHello(
   // Reject non-UUID senders — agent ids are UUIDs in KSA 0.1.
   const UUID_LIKE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
   if (!UUID_LIKE.test(env.sender)) {
-    return { ok: false, error: `hello sender is not a UUID-shaped string (got ${JSON.stringify(env.sender)})` };
+    return {
+      ok: false,
+      error: `hello sender is not a UUID-shaped string (got ${JSON.stringify(env.sender)})`,
+    };
   }
   const payload = env.payload as Partial<HelloPayload> | undefined;
   if (!payload || typeof payload !== 'object') {
@@ -227,8 +407,14 @@ function validatePeerHello(
   if (!payload.capabilities || typeof payload.capabilities !== 'object') {
     return { ok: false, error: 'hello payload.capabilities is missing or not an object' };
   }
-  if (typeof payload.capabilities.protocolVersion !== 'string' || !payload.capabilities.protocolVersion) {
-    return { ok: false, error: 'hello payload.capabilities.protocolVersion is missing or empty' };
+  if (
+    typeof payload.capabilities.protocolVersion !== 'string' ||
+    !payload.capabilities.protocolVersion
+  ) {
+    return {
+      ok: false,
+      error: 'hello payload.capabilities.protocolVersion is missing or not an object',
+    };
   }
   return { ok: true };
 }
@@ -236,6 +422,11 @@ function validatePeerHello(
 /**
  * A small in-process queue that wraps `PairingSession.onMessage` so
  * we can `await nextMatching(predicate)` deterministically.
+ *
+ * The queue is installed once per orchestrator and **survives across
+ * the two phases** — that is what lets the peer's `consent_accept`
+ * (which arrives while the consent screen is up) be picked up in
+ * phase 2.
  */
 class SessionQueue {
   private readonly queue: KsaMessage[] = [];
@@ -282,10 +473,7 @@ class SessionQueue {
     predicate: (m: KsaMessage) => m is T,
     timeoutMs: number | null,
   ): Promise<T | null>;
-  next(
-    predicate: (m: KsaMessage) => boolean,
-    timeoutMs: number | null,
-  ): Promise<KsaMessage | null>;
+  next(predicate: (m: KsaMessage) => boolean, timeoutMs: number | null): Promise<KsaMessage | null>;
   next(
     predicate: ((m: KsaMessage) => boolean) | ((m: KsaMessage) => m is KsaMessage),
     timeoutMs: number | null,
@@ -324,6 +512,10 @@ class SessionQueue {
   }
 }
 
+/* ------------------------------------------------------------------ */
+/* The orchestrator                                                    */
+/* ------------------------------------------------------------------ */
+
 export class MatchOrchestrator {
   private readonly self: MatchOrchestratorSelf;
   /**
@@ -336,68 +528,84 @@ export class MatchOrchestrator {
   private readonly peerAnalysisTimeoutMs: number;
   private readonly earlyWaitTimeoutMs: number;
   private readonly helloTimeoutMs: number;
-  /**
-   * Reentrancy guard. A single MatchOrchestrator instance must be
-   * `start()`ed at most once per (session, self) — calling it again
-   * would register a second queue handler, ship a duplicate
-   * `match_request`, and call the LLM twice. We throw on the second
-   * call instead of silently double-driving the wire.
-   */
-  private started = false;
+  private readonly peerHelloGraceMs: number;
+  private readonly peerConsentTimeoutMs: number;
+  /** Installed once, in phase 1, and reused in phase 2. */
+  private queue: SessionQueue | null = null;
+  /** Reentrancy guards for the two phases. */
+  private identified = false;
+  private exchanged = false;
+  /** What phase 1 learned about the peer. */
+  private peerCard: SocialProfile | null = null;
+  private peerAgent: SocialAgent | null = null;
+  private peerDisplayName = '';
 
   constructor(
     self: MatchOrchestratorSelf,
     peerAgentId: string,
-    options: {
-      peerAnalysisTimeoutMs?: number;
-      earlyWaitTimeoutMs?: number;
-      helloTimeoutMs?: number;
-    } = {},
+    options: MatchOrchestratorOptions = {},
   ) {
     this.self = self;
     this.peerAgentId = peerAgentId;
-    this.peerAnalysisTimeoutMs =
-      options.peerAnalysisTimeoutMs ?? DEFAULT_PEER_ANALYSIS_TIMEOUT_MS;
+    this.peerAnalysisTimeoutMs = options.peerAnalysisTimeoutMs ?? DEFAULT_PEER_ANALYSIS_TIMEOUT_MS;
     this.earlyWaitTimeoutMs = options.earlyWaitTimeoutMs ?? DEFAULT_EARLY_WAIT_TIMEOUT_MS;
     this.helloTimeoutMs = options.helloTimeoutMs ?? DEFAULT_HELLO_TIMEOUT_MS;
+    this.peerHelloGraceMs = options.peerHelloGraceMs ?? DEFAULT_PEER_HELLO_GRACE_MS;
+    this.peerConsentTimeoutMs = options.peerConsentTimeoutMs ?? DEFAULT_PEER_CONSENT_TIMEOUT_MS;
   }
 
+  /* ---------------------------------------------------------------- */
+  /* Phase 1 — identify                                                */
+  /* ---------------------------------------------------------------- */
+
   /**
-   * Drive the match flow against a `PairingSession` whose wire is up.
-   * Accepts either `tcp-connected` (the orchestrator will send the
-   * local `hello` and wait for the peer's `hello`) or `connected`
-   * (the peer's `hello` was already validated by a previous step;
-   * the orchestrator proceeds straight to `profile_exchange`).
+   * Phase 1: say hello, refuse blocked peers, and exchange the
+   * **minimal public card**.
+   *
+   * Nothing but the card may leave the device in this phase, and the
+   * card carries only the fields the user authorised for the
+   * pre-consent stage (nickname, social intent, conversation style).
+   *
+   * Accepts either `tcp-connected` (the orchestrator sends the local
+   * `hello` and waits for the peer's) or `connected` (the peer's
+   * `hello` was already validated by a previous step; the orchestrator
+   * proceeds straight to the card).
    *
    * Throws:
    *   - `HandshakeTimeoutError`     if the peer's `hello` doesn't arrive in `helloTimeoutMs`
    *   - `HandshakeValidationError`  if the peer's `hello` is malformed
    *   - `HandshakeClosedError`      if the session is closed before handshake completes
+   *   - `PeerBlockedError`          if the peer is on the local block list
    *
-   * On any of those failures, the orchestrator calls
-   * `session.failHandshake(reason)` and does NOT run `analyzeMatch`,
-   * the `match_request` / `match_response` flow, or `createMatchResponse`.
-   * The `MatchOutcome` is the success shape; handshake failure throws.
+   * On a handshake failure the orchestrator calls
+   * `session.failHandshake(reason)` and does NOT run `analyzeMatch` or
+   * send any profile data.
    */
-  async start(session: PairingSession): Promise<MatchOutcome> {
-    if (this.started) {
+  async identify(session: PairingSession): Promise<PeerIntroduction> {
+    if (this.exchanged) {
       throw new Error(
-        'MatchOrchestrator.start has already been called on this instance. ' +
+        'MatchOrchestrator.exchangeAndMatch has already run on this instance. ' +
           'Create a new MatchOrchestrator per pairing attempt.',
       );
     }
-    this.started = true;
+    if (this.identified) {
+      throw new Error(
+        'MatchOrchestrator.identify has already been called on this instance. ' +
+          'Create a new MatchOrchestrator per pairing attempt.',
+      );
+    }
+    this.identified = true;
+
     const initialState = session.current().state;
     if (initialState !== 'connected' && initialState !== 'tcp-connected') {
       throw new Error(
-        `MatchOrchestrator.start requires a tcp-connected or connected PairingSession (got "${initialState}").`,
+        `MatchOrchestrator.identify requires a tcp-connected or connected PairingSession (got "${initialState}").`,
       );
     }
 
-    const queue = new SessionQueue();
-    queue.install(session);
+    const queue = this.ensureQueue(session);
 
-    // Yield twice so that a peer whose `start()` was scheduled
+    // Yield twice so that a peer whose `identify()` was scheduled
     // concurrently can install its own queue handler before we send.
     // (LoopbackTransport delivers messages synchronously; without
     // this barrier, the first side to run sends before the other has
@@ -410,36 +618,57 @@ export class MatchOrchestrator {
     // 1) Send our own hello. This is allowed from `tcp-connected` —
     // the session is honest about the fact that the wire is up but
     // the peer's hello has not yet been validated.
+    //
+    // Phase A / A2 + A3: the hello carries our long-term identity
+    // public key (so the peer can verify this message's signature) and
+    // our ephemeral session key (so the peer can run ECDH with us).
+    // Both are optional on the wire — a peer that predates them still
+    // parses — but without them the session cannot be authenticated
+    // or encrypted, and the peer says so through its capability flags.
+    //
+    // The hello carries NO profile fields — that is what makes it safe
+    // to send before the block-list check has run.
     await session.send(
       createHello(this.self.agentId, {
         displayName: this.self.displayName,
         capabilities: this.self.capabilities,
+        publicKey: this.self.agent.publicKey,
+        sessionKeyExchange: (await session.sessionKeyExchange()) ?? undefined,
       }),
     );
 
     // 2) HARD GATE: wait for the peer's `hello`. If the session is
     //    already `connected` (a prior consumer validated the hello),
-    //    we can drain any buffered hello from the queue without a
-    //    wait. Otherwise we wait up to `helloTimeoutMs` and FAIL on
-    //    timeout, invalid hello, or session close.
+    //    we take the peer's id from the session and give the peer's
+    //    hello envelope a short grace window. Otherwise we wait up to
+    //    `helloTimeoutMs` and FAIL on timeout, invalid hello, or
+    //    session close.
     let peerHello: KsaHello | null = null;
+    const helloPredicate = (m: KsaMessage): m is KsaHello =>
+      m.type === 'hello' && isFromPeer(m, this.peerAgentId, this.self.agentId);
+
     if (initialState === 'connected') {
-      // Session says hello was already validated. Drain a buffered
-      // hello if it's there; otherwise the peer must have called
-      // `session.notifyHelloReceived` from the outside, which means
-      // they already received ours. We proceed.
-      peerHello = await queue.next<KsaHello>(
-        (m): m is KsaHello =>
-          m.type === 'hello' && isFromPeer(m, this.peerAgentId, this.self.agentId),
-        0, // non-blocking drain
-      );
+      // The session says the hello was already validated — a prior
+      // consumer called `session.notifyHelloReceived(peerAgentId)`.
+      //
+      // This used to be a *non-blocking* drain, and that was racy: our
+      // own hello send is asynchronous (Phase A / A3 derives an
+      // ephemeral key before the envelope goes out), so the peer's
+      // hello could arrive *after* the drain — and a message that
+      // arrives after the drain is never seen again. The peer id then
+      // stayed empty, and every downstream consumer that filters by
+      // sender (the chat and the consent orchestrators) dropped the
+      // peer's messages silently, which looks exactly like a lost
+      // connection.
+      //
+      // So we wait a short grace window instead. The envelope carries
+      // the peer's display name; the peer id itself no longer depends
+      // on it, because step 3 falls back to the id the session already
+      // locked in.
+      peerHello = await queue.next<KsaHello>(helloPredicate, this.peerHelloGraceMs);
     } else {
       // Hard gate.
-      const candidate = await queue.next<KsaHello>(
-        (m): m is KsaHello =>
-          m.type === 'hello' && isFromPeer(m, this.peerAgentId, this.self.agentId),
-        this.helloTimeoutMs,
-      );
+      const candidate = await queue.next<KsaHello>(helloPredicate, this.helloTimeoutMs);
       if (!candidate) {
         // Either timeout or session closed. Distinguish BEFORE we
         // call failHandshake — once failHandshake runs, the session
@@ -453,9 +682,7 @@ export class MatchOrchestrator {
         // disconnected" instead of "timed out".
         const wasClosedMidWait = session.current().state === 'closed';
         if (wasClosedMidWait && session.current().closeReason === 'peer-closed') {
-          throw new HandshakeClosedError(
-            'Peer closed the connection before hello was received.',
-          );
+          throw new HandshakeClosedError('Peer closed the connection before hello was received.');
         }
         if (!wasClosedMidWait) {
           await session.failHandshake('hello-timeout').catch(() => undefined);
@@ -485,18 +712,50 @@ export class MatchOrchestrator {
       if (session.current().state === 'tcp-connected') {
         session.notifyHelloReceived(peerHello.sender);
       }
+    } else if (!this.peerAgentId) {
+      // We have no hello envelope to learn the peer's id from — but
+      // the session may still know it: `notifyHelloReceived(peerAgentId)`
+      // locks the id in, and 'connected' is only reachable through it.
+      //
+      // We must take it from here. An empty peer id makes every
+      // downstream consumer that filters by sender (the chat and the
+      // consent orchestrators) drop the peer's messages silently —
+      // which looks exactly like a lost connection.
+      this.peerAgentId = session.current().peerAgentId ?? '';
     }
 
-    // 4) Send profile exchange. Allowed now because the session is
-    //    `connected` (or was already so before this call).
+    // 4) PHASE B: the block-list check runs HERE — before any profile
+    //    data leaves the device. The old flow ran the guard after the
+    //    profile exchange, so a blocked peer still received the full
+    //    profile.
+    //
+    //    A blocked peer is disconnected on the spot: the peer must not
+    //    be left waiting for a card that will never come.
+    try {
+      await this.assertPeerAllowed();
+    } catch (err) {
+      await session.disconnect('peer-blocked').catch(() => undefined);
+      throw err;
+    }
+
+    // 5) Send the **public card** — not the full profile. The card is
+    //    the minimal disclosure that lets the consent screen be a real
+    //    decision.
+    const boundaries = await this.currentBoundaries();
+    const card = buildPublicCard(this.self.profile, boundaries);
+    assertProfileWithinBoundaries(card, boundaries, 'profile_exchange.profile');
     await session.send(
       createProfileExchange(this.self.agentId, {
-        profile: this.self.profile,
-        agent: this.self.agent,
+        profile: card,
+        // The agent view carries the SAME card. Before Phase B this
+        // was `this.self.agent`, whose `profile` was the full local
+        // profile — the profile crossed the wire twice, once in the
+        // clear and once nested.
+        agent: { ...this.self.agent, profile: card },
       }),
     );
 
-    // 5) Wait for the peer's `profile_exchange` (soft wait — this is
+    // 6) Wait for the peer's `profile_exchange` (soft wait — this is
     //    NOT a handshake gate). A silent peer is treated as "no
     //    profile" and we proceed with a minimal fallback.
     const peerProfileExchange = await queue.next<KsaProfileExchange>(
@@ -505,34 +764,140 @@ export class MatchOrchestrator {
       this.earlyWaitTimeoutMs,
     );
 
-    // Peer guard — runs once we know who they are. The caller uses
-    // this to refuse a blocked peer; the orchestrator captures the
-    // refusal in `peerRefused` and short-circuits to a "none" result.
-    let peerRefused = false;
-    if (this.self.peerGuard) {
-      try {
-        await this.self.peerGuard(this.peerAgentId);
-      } catch {
-        peerRefused = true;
-        // We still ship our own hello/profile so the peer gets a
-        // well-formed exchange — the refusal surfaces on the UI.
-      }
-    }
-
-    const peerProfile = peerProfileExchange?.payload.profile ?? null;
-    const peerAgent = peerProfileExchange?.payload.agent ?? null;
-    const peerDisplayName =
+    this.peerCard = peerProfileExchange?.payload.profile ?? null;
+    this.peerAgent = peerProfileExchange?.payload.agent ?? null;
+    this.peerDisplayName =
       peerHello?.payload.displayName ??
-      peerAgent?.displayName ??
-      peerProfile?.nickname ??
+      this.peerAgent?.displayName ??
+      this.peerCard?.nickname ??
       this.peerAgentId.slice(0, 8);
 
-    // 6) Send match_request.
-    await session.send(
-      createMatchRequest(this.self.agentId, { selfProfile: this.self.profile }),
+    return {
+      peerAgentId: this.peerAgentId,
+      peerDisplayName: this.peerDisplayName,
+      peerCard: this.peerCard,
+      peerAgent: this.peerAgent,
+    };
+  }
+
+  /* ---------------------------------------------------------------- */
+  /* Phase 2 — exchange the authorised profile and analyse             */
+  /* ---------------------------------------------------------------- */
+
+  /**
+   * Phase 2: exchange the **authorised profile** and run the match
+   * analysis.
+   *
+   * The order inside this method is the enforcement of task book
+   * § 五 B2 requirement 6:
+   *
+   *   1. the local consent must be a mutual, peer-specific accept —
+   *      otherwise `ConsentRequiredError` is thrown and **nothing is
+   *      sent**;
+   *   2. the peer's `consent_accept` must be on the wire — a peer
+   *      that rejected or blocked ends the flow here;
+   *   3. only then is the authorised profile built, asserted against
+   *      the local boundaries, and sent in a `match_request`;
+   *   4. the analysis runs on the **authorised** profiles only, so
+   *      the `match_response` we ship cannot leak a field the user
+   *      withheld.
+   *
+   * Throws `ConsentRequiredError` when the consent is missing,
+   * peer-specifically wrong, refused by the peer, or never given.
+   */
+  async exchangeAndMatch(session: PairingSession, consent: LocalConsent): Promise<MatchOutcome> {
+    if (!this.identified) {
+      throw new Error(
+        'MatchOrchestrator.exchangeAndMatch requires identify() to have run first — ' +
+          'the public card must be exchanged before the consent step.',
+      );
+    }
+    if (this.exchanged) {
+      throw new Error(
+        'MatchOrchestrator.exchangeAndMatch has already been called on this instance. ' +
+          'Create a new MatchOrchestrator per pairing attempt.',
+      );
+    }
+    this.exchanged = true;
+
+    // 0) The block list is checked AGAIN here, not only in phase 1.
+    //    Phase B / B3 requirement 7 (「对黑名单用户拒绝后续匹配请求」):
+    //    a peer blocked while the consent screen was up must not get
+    //    the authorised profile afterwards.
+    try {
+      await this.assertPeerAllowed();
+    } catch (err) {
+      await session.disconnect('peer-blocked').catch(() => undefined);
+      throw err;
+    }
+
+    // 1) The local consent must be a mutual, peer-specific accept.
+    if (!consent) {
+      throw new ConsentRequiredError(
+        'no-local-consent',
+        'Refusing to send the authorised profile: no consent was recorded.',
+      );
+    }
+    if (consent.state !== 'accepted_both' || consent.bothAccepted !== true) {
+      throw new ConsentRequiredError(
+        'no-local-consent',
+        `Refusing to send the authorised profile: the consent state is "${consent.state}", not "accepted_both".`,
+      );
+    }
+    if (!this.peerAgentId || consent.peerAgentId !== this.peerAgentId) {
+      throw new ConsentRequiredError(
+        'no-local-consent',
+        `Refusing to send the authorised profile: the consent was given to "${consent.peerAgentId}", but the connected peer is "${this.peerAgentId}".`,
+      );
+    }
+
+    const queue = this.ensureQueue(session);
+
+    // 2) The peer must have accepted too — on the wire, not merely in
+    //    the local state machine. The envelope may already be buffered
+    //    (it typically arrives while the consent screen is up), in
+    //    which case this returns immediately.
+    const peerConsent = await queue.next(
+      (m) =>
+        isFromPeer(m, this.peerAgentId, this.self.agentId) &&
+        (m.type === 'consent_accept' || m.type === 'consent_reject' || m.type === 'block'),
+      this.peerConsentTimeoutMs,
+    );
+    if (!peerConsent) {
+      throw new ConsentRequiredError(
+        'peer-timeout',
+        `Refusing to send the authorised profile: the peer did not answer the consent request within ${this.peerConsentTimeoutMs}ms.`,
+      );
+    }
+    if (peerConsent.type !== 'consent_accept') {
+      throw new ConsentRequiredError(
+        'peer-refused',
+        `Refusing to send the authorised profile: the peer sent "${peerConsent.type}".`,
+      );
+    }
+
+    // 3) Build the authorised profile from the boundaries that are in
+    //    force RIGHT NOW, and assert it before it goes on the wire.
+    const boundaries = await this.currentBoundaries();
+    const authorised = filterProfileForOutbound(this.self.profile, boundaries);
+    assertProfileWithinBoundaries(authorised, boundaries, 'match_request.selfProfile');
+
+    await session.send(createMatchRequest(this.self.agentId, { selfProfile: authorised }));
+
+    // 4) Wait for the peer's authorised profile (soft wait).
+    const peerMatchRequest = await queue.next<KsaMatchRequest>(
+      (m): m is KsaMatchRequest =>
+        m.type === 'match_request' && isFromPeer(m, this.peerAgentId, this.self.agentId),
+      this.earlyWaitTimeoutMs,
     );
 
-    // 7) Run local analysis + wait for the peer's match_response
+    const peerProfile =
+      peerMatchRequest?.payload.selfProfile ??
+      this.peerCard ??
+      minimalProfile(this.peerDisplayName);
+    const peerAgent = this.peerAgent ? { ...this.peerAgent, profile: peerProfile } : null;
+
+    // 5) Run local analysis + wait for the peer's match_response
     //    concurrently. Per § 23, each side runs its OWN analysis; the
     //    peer's `match_response` is purely informational.
     //
@@ -541,20 +906,30 @@ export class MatchOrchestrator {
     //    own `match_response` and then keep waiting for the peer —
     //    this breaks the symmetric-timeout deadlock where both sides
     //    time out before either has shipped its reply.
+    //
+    //    PHASE B: the analysis is computed from the **authorised**
+    //    profiles — our own filtered copy, not the raw local profile.
+    //    The `match_response` is peer-visible, so an analysis derived
+    //    from a withheld field (say the bio) would leak exactly what
+    //    the user gated.
     const analyzeInput: AnalyzeMatchInput = {
-      selfProfile: this.self.profile,
+      selfProfile: authorised,
       selfDisplayName: this.self.displayName,
-      peerProfile: peerProfile ?? minimalProfile(peerDisplayName),
-      peerDisplayName,
+      peerProfile,
+      peerDisplayName: this.peerDisplayName,
     };
-    const analyzeConfig: AgentRuntimeConfig = this.self.config ?? { maxMatchTokens: 2000, maxAgentMessages: 6, maxIcebreakerTokens: 500, maxChatAssistTokens: 500 };
+    const analyzeConfig: AgentRuntimeConfig = this.self.config ?? {
+      maxMatchTokens: 2000,
+      maxAgentMessages: 6,
+      maxIcebreakerTokens: 500,
+      maxChatAssistTokens: 500,
+    };
 
     let peerAnalysis: MatchAnalysis | null = null;
     let peerAnalysisTimedOut = false;
     const peerWaitPromise = queue
       .next(
-        (m) =>
-          m.type === 'match_response' && isFromPeer(m, this.peerAgentId, this.self.agentId),
+        (m) => m.type === 'match_response' && isFromPeer(m, this.peerAgentId, this.self.agentId),
         this.peerAnalysisTimeoutMs,
       )
       .then((msg) => {
@@ -568,34 +943,14 @@ export class MatchOrchestrator {
         peerAnalysisTimedOut = true;
       });
 
-    // Short-circuit: if the peer was refused by the guard, don't run
-    // the LLM — return a 'none' analysis immediately.
-    let localResult: AnalyzeMatchResult;
-    if (peerRefused) {
-      localResult = {
-        analysis: {
-          compatibilitySignal: 'none',
-          commonGround: [],
-          recommendedTopics: [],
-          potentialFriction: ['peer is on the local block list'],
-          explanation: 'This peer is on your block list. The conversation is refused.',
-        },
-        messages: [],
-        estimatedTokens: 0,
-        rawResponse: '',
-        degraded: false,
-        degradationNote: null,
-      };
-    } else {
-      localResult = await analyzeMatch(
-        this.self.llm,
-        analyzeInput,
-        analyzeConfig,
-        this.self.llmOptions ?? {},
-      );
-    }
+    const localResult = await analyzeMatch(
+      this.self.llm,
+      analyzeInput,
+      analyzeConfig,
+      this.self.llmOptions ?? {},
+    );
 
-    // 8) Ship our analysis immediately so the peer can stop waiting.
+    // 6) Ship our analysis immediately so the peer can stop waiting.
     await session.send(
       createMatchResponse(this.self.agentId, {
         analysis: localResult.analysis,
@@ -603,13 +958,13 @@ export class MatchOrchestrator {
       }),
     );
 
-    // 9) Now wait for the peer (bounded). If they never respond we
+    // 7) Now wait for the peer (bounded). If they never respond we
     //    still return our local result — the user can decide to
     //    accept/reject/block on local signal alone.
     await peerWaitPromise;
 
     return {
-      peerDisplayName,
+      peerDisplayName: this.peerDisplayName,
       peerAgentId: this.peerAgentId,
       peerAgent,
       peerProfile,
@@ -618,12 +973,59 @@ export class MatchOrchestrator {
       localResult,
       peerAnalysisTimeoutMs: this.peerAnalysisTimeoutMs,
       peerAnalysisTimedOut,
-      peerRefused,
     };
+  }
+
+  /* ---------------------------------------------------------------- */
+  /* Internals                                                          */
+  /* ---------------------------------------------------------------- */
+
+  private ensureQueue(session: PairingSession): SessionQueue {
+    if (!this.queue) {
+      this.queue = new SessionQueue();
+      this.queue.install(session);
+    }
+    return this.queue;
+  }
+
+  /**
+   * The boundaries in force right now.
+   *
+   * Read through the `boundaries` callback when one is supplied so a
+   * mid-session revocation takes effect on the next send; otherwise
+   * fall back to the profile's own boundaries.
+   */
+  private async currentBoundaries(): Promise<Partial<SocialBoundaries>> {
+    const live = await this.self.boundaries?.();
+    if (live) return live;
+    return this.self.profile.boundaries;
+  }
+
+  /**
+   * Phase B: refuse a blocked peer **before** any profile is sent.
+   *
+   * The guard is injected by the caller (the desktop wires it to the
+   * block-list store). A `PeerBlockedError` from the guard means
+   * "blocked" and is re-thrown as-is; any other error is a genuine
+   * failure and is propagated unchanged.
+   */
+  private async assertPeerAllowed(): Promise<void> {
+    if (!this.self.peerGuard) return;
+    // A `PeerBlockedError` from the guard means "blocked" and travels
+    // out unchanged; any other error is a genuine failure (a store
+    // that could not be read, say) and is propagated as-is too — we
+    // must not silently treat "we could not check" as "allowed".
+    await this.self.peerGuard(this.peerAgentId);
   }
 }
 
-/** Fallback profile when the peer's `profile_exchange` is somehow missing. */
+/**
+ * Fallback profile when the peer's profile never arrived.
+ *
+ * Phase B: the boundaries use the protocol defaults rather than the
+ * pre-Phase-B literal, so a silent peer is treated exactly like a peer
+ * that sent the conservative default card.
+ */
 function minimalProfile(displayName: string): SocialProfile {
   return {
     nickname: displayName,
@@ -632,12 +1034,6 @@ function minimalProfile(displayName: string): SocialProfile {
     currentActivities: [],
     socialIntent: [],
     conversationStyle: [],
-    boundaries: {
-      allowAgentConversation: true,
-      allowContactExchange: false,
-      allowOfflineMeeting: false,
-      allowProjectDetails: false,
-      allowCurrentActivity: true,
-    },
+    boundaries: resolveBoundaries(),
   };
 }

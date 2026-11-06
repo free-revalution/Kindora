@@ -2,17 +2,25 @@
 
 **Status (Phase 16.5):**
 
-| Layer | Outcome |
-|-------|---------|
-| Two-LanState protocol test (`cargo test --test lan_protocol_e2e`) | **PASS** (13/13 unchanged from Phase 16.3) |
-| Single-LanState regression (`cargo test --test lan_e2e`) | **PASS** (15/15 unchanged from Phase 16.3) |
-| Rust unit tests (`cargo test --lib`) | **PASS** (3/3 NEW in Phase 16.5 — `peer_closed_display_matches_ipc_contract`, `not_connected_display_matches_ipc_contract`, `lan_error_serialises_to_display_string` in `apps/desktop/src-tauri/src/lan.rs`) |
-| Vitest full workspace | **PASS** (533/533 — was 523/523 in Phase 16.4; +10 from new Task 1 cleanup-promise tests + Task 2 closedByPeer lifecycle tests + Task 3 IPC contract constants in `lan-error.ts`) |
-| `pnpm -r typecheck` | **PASS** |
-| `pnpm -r build` | **PASS** |
-| `cargo check --lib` | **PASS** (requires Rust ≥ 1.99 because of `idna_adapter v1.2.2`'s `edition2024`; run via `rustup run stable cargo check --lib`) |
-| Real two-OS-process run on two physical machines | **NOT_RUN** (no GUI driver + no LLM API key in the Claude session) — see § 6 manual below |
-| Phase 16.5 § 5.5 fixes | landed — (Task 1) `cleanupPromise: Promise<void>` on `LanTransport` tracks the in-flight `lan_host_stop` / `lan_join_disconnect`; `startHost` / `startJoin` / `disconnect` all await it via `awaitCleanup()`. (Task 2) `closedByPeer` is now **connection-scoped** (reset to `false` on every new connection); `closeHandlers` is cleared on every new connection. (Task 3) `LAN_ERROR_PEER_CLOSED_DISPLAY = 'peer closed'` and `LAN_ERROR_NOT_CONNECTED_DISPLAY = 'not connected'` are exported from `@kindora/transport`; the `LanError.from()` classifier keys off these constants. The Rust side pins the same strings via 3 unit tests in `lan.rs` (`#[cfg(test)] mod tests`). |
+**Status (updated 2026-11-06):**
+
+| Layer                                                             | Kind                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                | Outcome                                                                                                                         |
+| ----------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| Two-LanState protocol test (`cargo test --test lan_protocol_e2e`) | **automated**                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       | **PASS** (13/13)                                                                                                                |
+| Single-LanState regression (`cargo test --test lan_e2e`)          | **automated**                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       | **PASS** (18/18 — was 15/15)                                                                                                    |
+| LAN resource-limit tests (`cargo test --test lan_limits`)         | **automated**                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       | **PASS** (4/4)                                                                                                                  |
+| Rust unit tests (`cargo test --lib`)                              | **automated**                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       | **PASS** (13/13 — was 3/3)                                                                                                      |
+| Vitest workspace (7 suites)                                       | **automated**                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       | **PASS** (1035 cases)                                                                                                           |
+| `pnpm -r typecheck`                                               | **automated**                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       | **PASS** (2026-11-06)                                                                                                           |
+| `pnpm lint` (ESLint)                                              | **automated**                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       | **PASS** (2026-11-06)                                                                                                           |
+| `pnpm -r build`                                                   | **automated**                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       | **PASS** (2026-11-06)                                                                                                           |
+| `cargo fmt --check`                                               | **automated**                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       | **PASS** (2026-11-06)                                                                                                           |
+| `cargo clippy -- -D warnings`                                     | **automated**                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       | **PASS** (2026-11-06)                                                                                                           |
+| `pnpm format:check`                                               | **automated**                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       | **FAIL** — 111 files have never been Prettier-formatted. Pre-existing, not a regression; the fix is `pnpm format`               |
+| Tauri production build (`tauri build`)                            | **automated**                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       | **PASS** (2026-11-06 — `Kindora.app` + `Kindora_0.1.0_aarch64.dmg` built)                                                       |
+| `cargo check --lib`                                               | **automated**                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       | **PASS** (requires Rust ≥ 1.99 because of `idna_adapter v1.2.2`'s `edition2024`; run via `rustup run stable cargo check --lib`) |
+| **Real two-OS-process run on two physical machines**              | **MANUAL — not automated**                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          | **NOT_RUN** (no GUI driver + no LLM API key in the Claude session) — see § 6 manual below                                       |
+| Phase 16.5 § 5.5 fixes                                            | landed — (Task 1) `cleanupPromise: Promise<void>` on `LanTransport` tracks the in-flight `lan_host_stop` / `lan_join_disconnect`; `startHost` / `startJoin` / `disconnect` all await it via `awaitCleanup()`. (Task 2) `closedByPeer` is now **connection-scoped** (reset to `false` on every new connection); `closeHandlers` is cleared on every new connection. (Task 3) `LAN_ERROR_PEER_CLOSED_DISPLAY = 'peer closed'` and `LAN_ERROR_NOT_CONNECTED_DISPLAY = 'not connected'` are exported from `@kindora/transport`; the `LanError.from()` classifier keys off these constants. The Rust side pins the same strings via 3 unit tests in `lan.rs` (`#[cfg(test)] mod tests`). |
 
 **Bottom line:** the wire-level LAN protocol (UDP discover + TCP length-prefixed
 JSON envelope flow) plus its out-of-band peer-drop detection is now
@@ -21,6 +29,37 @@ no LoopbackHub). The above-the-wire layer (TS `PairingSession` FSM,
 `MatchOrchestrator`, the React `ConnectView` / `MatchView`) still
 needs a human on two physical machines because it requires a GUI
 driver and a real LLM API key.
+
+> ### An automated test is **not** a two-device acceptance
+>
+> This is the single most important thing to read before quoting any number
+> from this file.
+>
+> **What the automated suites can prove.** Real UDP datagrams and real TCP
+> sockets on one machine; the envelope format; the replay guard; the rate
+> limiter; the frame-size and queue limits; the session-key exchange; the
+> consent state machine; the privacy filter; the SQLite schema and its
+> migrations. All of it runs in **one process on one machine**, with the LLM
+> mocked and the secret store mocked.
+>
+> **What only a human on two machines can prove.** That the packaged app
+> starts on a second, real computer; that discovery crosses the real
+> broadcast domain (routers that block broadcast between APs break it); that
+> the keychain prompts behave; that the two screens agree; and that the whole
+> thing works against a **real** LLM provider.
+>
+> **The task book is explicit about this** (`docs/修复.md`, Phase H3): 「自动化
+> 模拟测试不能代替真实双设备验收」 — an automated simulation **cannot** stand in
+> for the real two-device acceptance. So **no phase of this remediation may be
+> marked `VERIFIED` on the strength of the automated suites alone.**
+>
+> **What has changed since this document was first written (2026-11-06):** the
+> LAN path now carries a **consent gate** (the peer profile is not sent until
+> the local user consents), an **end-to-end encrypted session** (ECDH P-256 +
+> HKDF-SHA256 + AES-256-GCM), **resource limits** on frames, queues and message
+> rates, and a **SQLite business database**. **None of that has been driven by
+> hand on two devices.** The automated suites cover the new code; § 1–§ 6 below
+> is still the plan for covering it the other way.
 
 > **Frame format reminder for manual testers (this is the corrected
 > expectation per the actual code):** every envelope on the TCP wire is
@@ -76,16 +115,16 @@ driver and a real LLM API key.
 
 ## § 1 — Happy path (both sides connect, exchange, match)
 
-| # | Step | Machine A (host) | Machine B (joiner) | Expected |
-|---|------|------------------|--------------------|----------|
-| 1 | Home screen | click "Connect" | click "Connect" | ConnectView shows |
-| 2 | Pick transport | choose "LAN" | choose "LAN" | LAN buttons active |
-| 3 | Pick role | click "Host" | click "Join" | host shows pairing code; joiner shows input |
-| 4 | Type the code | (wait) | type the 6-char code from A; click "Join" | joiner shows "Searching LAN…" |
-| 5 | Auto-connect | UDP/TCP handshake on LAN | sees host; dials TCP | both transition to MatchView within ~2 s |
-| 6 | MatchView | shows "preparing match…" for ≤ 10 s | same | both sides display the 5 result fields (compatibility signal, common ground, recommended topics, potential friction, explanation) |
-| 7 | Cross-check | A's peer display name = "Bob"; peer agent id = B's UUID | B's peer display name = "Alice"; peer agent id = A's UUID | values match; both agents visible |
-| 8 | Cleanup | click "Disconnect" in MatchView | click "Disconnect" | both return to Home; no zombie Rust processes (`ps aux | grep lan_`) |
+| #   | Step           | Machine A (host)                                        | Machine B (joiner)                                        | Expected                                                                                                                          |
+| --- | -------------- | ------------------------------------------------------- | --------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | Home screen    | click "Connect"                                         | click "Connect"                                           | ConnectView shows                                                                                                                 |
+| 2   | Pick transport | choose "LAN"                                            | choose "LAN"                                              | LAN buttons active                                                                                                                |
+| 3   | Pick role      | click "Host"                                            | click "Join"                                              | host shows pairing code; joiner shows input                                                                                       |
+| 4   | Type the code  | (wait)                                                  | type the 6-char code from A; click "Join"                 | joiner shows "Searching LAN…"                                                                                                     |
+| 5   | Auto-connect   | UDP/TCP handshake on LAN                                | sees host; dials TCP                                      | both transition to MatchView within ~2 s                                                                                          |
+| 6   | MatchView      | shows "preparing match…" for ≤ 10 s                     | same                                                      | both sides display the 5 result fields (compatibility signal, common ground, recommended topics, potential friction, explanation) |
+| 7   | Cross-check    | A's peer display name = "Bob"; peer agent id = B's UUID | B's peer display name = "Alice"; peer agent id = A's UUID | values match; both agents visible                                                                                                 |
+| 8   | Cleanup        | click "Disconnect" in MatchView                         | click "Disconnect"                                        | both return to Home; no zombie Rust processes (`ps aux                                                                            | grep lan_`) |
 
 **Verdict:** **NOT_RUN** (no GUI in the Claude session). The wire-level
 analogue — the two-LanState test
@@ -117,17 +156,17 @@ For each scenario below, run from a fresh state (close both apps or click
 > over `nc` will not work (the receiver will interpret the first 4 bytes
 > of the JSON as the length and either truncate or fail to parse).
 
-| § | Scenario | A (host) action | B (joiner) action | Expected (both) | Verdict (Phase 16.3) |
-|---|----------|-----------------|-------------------|-----------------|----------------------|
-| 2.1 | **Wrong pairing code** | (none) | type a wrong 6-char code; click Join | joiner shows "No peer found on the LAN for code \"XXXXXX\". Check that both devices are on the same network and that the host is running." host stays on "Waiting for the other person to enter this code…". No LLM call, no match screen, no false-positive match result. | **NOT_RUN** (manual). Wire-level analogue: `join_with_no_host_returns_empty` (single-instance, `lan_e2e.rs`) **PASS**es. The two-instance analogue: `join_discover` for an unknown code returns `[]` (covered by `two_instance_cancel_and_repair` first half — **PASS**). |
-| 2.2 | **No host running** | (host app closed) | type a code; click Join | joiner shows the same "No peer found on the LAN for code …" error within ~2.5 s. No LLM call. | **NOT_RUN** (manual). Wire-level analogue: same as 2.1. |
-| 2.3 | **UDP discoverable, TCP fails** | start host, then block the host's random TCP port at the firewall (or take the host's IP offline right after UDP announce) | type the code; click Join | joiner gets either a TCP connect timeout (≤ 8 s) or the discover-then-link-failed error. joiner stays on ConnectView; never enters MatchView; LLM not called. host (if reachable) stays on "Waiting for the other person to enter this code…" until timeout. | **NOT_RUN** (manual). No automated coverage (LAN test uses loopback; firewall rules can't be exercised in-process). |
-| 2.4 | **TCP up, no `hello` from peer** | start host | open a stub TCP listener (use § 4.5 helper) on B's side AFTER link is up; do NOT send any envelope | host's MatchView shows "preparing match…" for ≤ 5 s, then an error banner: "Peer did not send a hello envelope within 5000 ms." No match result. Session returns to "closed". The stub TCP gets disconnected by host. No LLM call. | **NOT_RUN** (manual). Wire-level analogue: `two_instance_host_silent_then_link_drops` — the joiner side does not get any envelopes while the host is silent — **PASS**. The 5-second hello gate is enforced on the TS side (`MatchOrchestrator`, `helloTimeoutMs = 5000`); not re-tested in the two-process suite. |
-| 2.5 | **Malformed `hello`** | start host | use § 4.5 helper to send a properly framed `hello` whose `sender` is a non-UUID, or whose `payload.displayName` is missing | host's MatchView shows the typed error (`HandshakeValidationError` surfaced as a user-readable banner) within ≤ 5 s. No match result. Session closed. No LLM call. | **NOT_RUN** (manual). Wire-level analogue: `two_instance_malformed_hello_is_delivered` — the wire passes the bytes through verbatim; validation is the TS-side `validatePeerHello`'s job. **PASS**. |
-| 2.6 | **Peer exits during handshake** | start host, both linked, host in MatchView | quit B's app (Cmd+Q / Alt+F4) | host's MatchView shows a transport-disconnect error within ≤ 1 s; session is "closed"; no match result; no zombie `lan_` processes. | **NOT_RUN** (manual). The § 5.1 documented gap is now closed — Phase 16.3 added `peer_closed: Arc<AtomicBool>` on `TcpLink`; the host's next `host_poll` returns `Err(PeerClosed)`. Wire-level analogues: `two_instance_mid_handshake_disconnect` (existing) **PASS** + `two_instance_tcp_drop_joiner_perspective` + `two_instance_tcp_drop_host_perspective` (Phase 16.3) **PASS**. The TS-side `PairingSession` propagates `PeerClosed` via `try/catch` to a `HandshakeClosedError` in `MatchView`. |
-| 2.7 | **Peer exits after match** | both reached MatchView, both see results | B quits the app | A's MatchView shows the peer-disconnect error; A returns to Home cleanly. | **NOT_RUN** (manual). Same machinery as 2.6 — `PeerClosed` surfaces within ≤ 1 s. Wire-level analogue: `two_instance_tcp_drop_joiner_perspective` (Phase 16.3) **PASS**. |
-| 2.8 | **LLM API key invalid** | both with an invalid LLM key (e.g. wrong region) | (normal) | both reach MatchView; the orchestrator's local LLM call throws; the `MatchView` shows the LLM error message (an `analyzeMatch` error). No false-positive match shown. | **NOT_RUN** (manual). **Observed code path:** `provider.chat` throws → `analyzeMatch` throws → `MatchOrchestrator.start` throws → `MatchView` shows the error in the `error` phase. *Note:* a malformed LLM response (valid HTTP, bad JSON) is a different path — `parseMatchAnalysis` returns a **degraded** result with `compatibilitySignal: 'none'` and a "match analysis unavailable" explanation; the orchestrator does NOT throw, and `MatchView` shows the degraded result rather than an error. (Covered in `packages/matching/src/__tests__/match-orchestrator.test.ts`.) |
-| 2.9 | **Cancel + re-pair** | start host, get code | start joiner; on ConnectView, click "Cancel" | joiner returns to Home; host sees TCP disconnect, returns to "Waiting for the other person…". Restart the joiner, type the same code, repeat § 1 — must succeed. | **NOT_RUN** (manual). The § 5.2 fix landed in Phase 16.2: the joiner side now calls `disconnect('cancelled')` on its `LanJoinHandle` when the user cancels, releasing the UDP socket, the TCP writer/reader, and the 200ms poll loop. The new regression test `ConnectView.cancel-during-disconnect` (in `apps/desktop/src/views/__tests__/ConnectView.test.tsx`) **PASS**es; the wire-level analogue `two_instance_cancel_and_repair` **PASS**es. |
+| §   | Scenario                         | A (host) action                                                                                                            | B (joiner) action                                                                                                          | Expected (both)                                                                                                                                                                                                                                                            | Verdict (Phase 16.3)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| --- | -------------------------------- | -------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 2.1 | **Wrong pairing code**           | (none)                                                                                                                     | type a wrong 6-char code; click Join                                                                                       | joiner shows "No peer found on the LAN for code \"XXXXXX\". Check that both devices are on the same network and that the host is running." host stays on "Waiting for the other person to enter this code…". No LLM call, no match screen, no false-positive match result. | **NOT_RUN** (manual). Wire-level analogue: `join_with_no_host_returns_empty` (single-instance, `lan_e2e.rs`) **PASS**es. The two-instance analogue: `join_discover` for an unknown code returns `[]` (covered by `two_instance_cancel_and_repair` first half — **PASS**).                                                                                                                                                                                                                                                                                                           |
+| 2.2 | **No host running**              | (host app closed)                                                                                                          | type a code; click Join                                                                                                    | joiner shows the same "No peer found on the LAN for code …" error within ~2.5 s. No LLM call.                                                                                                                                                                              | **NOT_RUN** (manual). Wire-level analogue: same as 2.1.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| 2.3 | **UDP discoverable, TCP fails**  | start host, then block the host's random TCP port at the firewall (or take the host's IP offline right after UDP announce) | type the code; click Join                                                                                                  | joiner gets either a TCP connect timeout (≤ 8 s) or the discover-then-link-failed error. joiner stays on ConnectView; never enters MatchView; LLM not called. host (if reachable) stays on "Waiting for the other person to enter this code…" until timeout.               | **NOT_RUN** (manual). No automated coverage (LAN test uses loopback; firewall rules can't be exercised in-process).                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| 2.4 | **TCP up, no `hello` from peer** | start host                                                                                                                 | open a stub TCP listener (use § 4.5 helper) on B's side AFTER link is up; do NOT send any envelope                         | host's MatchView shows "preparing match…" for ≤ 5 s, then an error banner: "Peer did not send a hello envelope within 5000 ms." No match result. Session returns to "closed". The stub TCP gets disconnected by host. No LLM call.                                         | **NOT_RUN** (manual). Wire-level analogue: `two_instance_host_silent_then_link_drops` — the joiner side does not get any envelopes while the host is silent — **PASS**. The 5-second hello gate is enforced on the TS side (`MatchOrchestrator`, `helloTimeoutMs = 5000`); not re-tested in the two-process suite.                                                                                                                                                                                                                                                                  |
+| 2.5 | **Malformed `hello`**            | start host                                                                                                                 | use § 4.5 helper to send a properly framed `hello` whose `sender` is a non-UUID, or whose `payload.displayName` is missing | host's MatchView shows the typed error (`HandshakeValidationError` surfaced as a user-readable banner) within ≤ 5 s. No match result. Session closed. No LLM call.                                                                                                         | **NOT_RUN** (manual). Wire-level analogue: `two_instance_malformed_hello_is_delivered` — the wire passes the bytes through verbatim; validation is the TS-side `validatePeerHello`'s job. **PASS**.                                                                                                                                                                                                                                                                                                                                                                                 |
+| 2.6 | **Peer exits during handshake**  | start host, both linked, host in MatchView                                                                                 | quit B's app (Cmd+Q / Alt+F4)                                                                                              | host's MatchView shows a transport-disconnect error within ≤ 1 s; session is "closed"; no match result; no zombie `lan_` processes.                                                                                                                                        | **NOT_RUN** (manual). The § 5.1 documented gap is now closed — Phase 16.3 added `peer_closed: Arc<AtomicBool>` on `TcpLink`; the host's next `host_poll` returns `Err(PeerClosed)`. Wire-level analogues: `two_instance_mid_handshake_disconnect` (existing) **PASS** + `two_instance_tcp_drop_joiner_perspective` + `two_instance_tcp_drop_host_perspective` (Phase 16.3) **PASS**. The TS-side `PairingSession` propagates `PeerClosed` via `try/catch` to a `HandshakeClosedError` in `MatchView`.                                                                               |
+| 2.7 | **Peer exits after match**       | both reached MatchView, both see results                                                                                   | B quits the app                                                                                                            | A's MatchView shows the peer-disconnect error; A returns to Home cleanly.                                                                                                                                                                                                  | **NOT_RUN** (manual). Same machinery as 2.6 — `PeerClosed` surfaces within ≤ 1 s. Wire-level analogue: `two_instance_tcp_drop_joiner_perspective` (Phase 16.3) **PASS**.                                                                                                                                                                                                                                                                                                                                                                                                            |
+| 2.8 | **LLM API key invalid**          | both with an invalid LLM key (e.g. wrong region)                                                                           | (normal)                                                                                                                   | both reach MatchView; the orchestrator's local LLM call throws; the `MatchView` shows the LLM error message (an `analyzeMatch` error). No false-positive match shown.                                                                                                      | **NOT_RUN** (manual). **Observed code path:** `provider.chat` throws → `analyzeMatch` throws → `MatchOrchestrator.start` throws → `MatchView` shows the error in the `error` phase. _Note:_ a malformed LLM response (valid HTTP, bad JSON) is a different path — `parseMatchAnalysis` returns a **degraded** result with `compatibilitySignal: 'none'` and a "match analysis unavailable" explanation; the orchestrator does NOT throw, and `MatchView` shows the degraded result rather than an error. (Covered in `packages/matching/src/__tests__/match-orchestrator.test.ts`.) |
+| 2.9 | **Cancel + re-pair**             | start host, get code                                                                                                       | start joiner; on ConnectView, click "Cancel"                                                                               | joiner returns to Home; host sees TCP disconnect, returns to "Waiting for the other person…". Restart the joiner, type the same code, repeat § 1 — must succeed.                                                                                                           | **NOT_RUN** (manual). The § 5.2 fix landed in Phase 16.2: the joiner side now calls `disconnect('cancelled')` on its `LanJoinHandle` when the user cancels, releasing the UDP socket, the TCP writer/reader, and the 200ms poll loop. The new regression test `ConnectView.cancel-during-disconnect` (in `apps/desktop/src/views/__tests__/ConnectView.test.tsx`) **PASS**es; the wire-level analogue `two_instance_cancel_and_repair` **PASS**es.                                                                                                                                  |
 
 > **Important:** in every failure scenario, the UI must NOT show a
 > successful match result. A passing failure scenario is one where the
@@ -146,14 +185,14 @@ Open the desktop dev tools (right-click → Inspect) and watch the React
 state, the `PairingSession` state, and the browser console across a
 single § 1 happy path.
 
-| § | Check | Expected | Verdict (Phase 16.1) |
-|---|-------|----------|----------------------|
-| 3.1 | ConnectView mounts once; click Host; observe session state changes | `idle → hosting → tcp-connected → connected`. `connected` fires ONCE. (Phase 16 patch closes the bug where the listener fired on BOTH `tcp-connected` and `connected`.) | **NOT_RUN** (manual). Patches landed in `apps/desktop/src/views/ConnectView.tsx` (the `fired` guard in `HostPanel`'s second `useEffect` for both LAN and loopback). |
-| 3.2 | Watch `MatchOrchestrator` in dev tools | One instance per pairing. Re-renders do NOT spawn a second orchestrator. (Phase 16 patch caches the orchestrator on the bridged handle and the orchestrator itself throws on a second `start()`.) | **NOT_RUN** (manual). Patches landed: `cachedOrchestrator` in `ConnectView.tsx` + `started: boolean` reentrancy guard in `packages/matching/src/orchestrator.ts`. Reentrancy test in `match-orchestrator.test.ts` **PASS**es. |
-| 3.3 | Network panel / app log | Exactly ONE `match_request` outbound, ONE `match_response` inbound, per side. | **NOT_RUN** (manual). Two-process test `two_instance_match_request_response_order` **PASS**es (verified ordering: `match_request` first, then `match_response`, in each direction). |
-| 3.4 | Click "Disconnect" in MatchView | session goes to `closed`; Rust `lan_host_poll` / `lan_join_poll` invocations stop; `setInterval` cleared; no leftover timers in the Chrome devtools "Performance" → "Timers" view. | **NOT_RUN** (manual). |
-| 3.5 | Repeat § 1 three times in a row (Disconnect → Connect → Disconnect → Connect) | Each cycle is clean. No listener / timer accumulation. The host's Rust process exits cleanly on each cycle (`ps aux | grep lan_` should be empty). | **NOT_RUN** (manual). |
-| 3.6 | Kill A's app from the OS while in MatchView | B's MatchView shows peer-disconnect error within ≤ 1 s. B's session is `closed`. B's `lan_join_poll` stops. | **NOT_RUN** (manual). Wire-level covered by `two_instance_tcp_drop_joiner_perspective` and `two_instance_reconnect_after_tcp_drop` (Phase 16.3). UI NOT_RUN — § 4.7 step 6 drives the same scenario on a real GUI. |
+| §   | Check                                                                         | Expected                                                                                                                                                                                          | Verdict (Phase 16.1)                                                                                                                                                                                                          |
+| --- | ----------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 3.1 | ConnectView mounts once; click Host; observe session state changes            | `idle → hosting → tcp-connected → connected`. `connected` fires ONCE. (Phase 16 patch closes the bug where the listener fired on BOTH `tcp-connected` and `connected`.)                           | **NOT_RUN** (manual). Patches landed in `apps/desktop/src/views/ConnectView.tsx` (the `fired` guard in `HostPanel`'s second `useEffect` for both LAN and loopback).                                                           |
+| 3.2 | Watch `MatchOrchestrator` in dev tools                                        | One instance per pairing. Re-renders do NOT spawn a second orchestrator. (Phase 16 patch caches the orchestrator on the bridged handle and the orchestrator itself throws on a second `start()`.) | **NOT_RUN** (manual). Patches landed: `cachedOrchestrator` in `ConnectView.tsx` + `started: boolean` reentrancy guard in `packages/matching/src/orchestrator.ts`. Reentrancy test in `match-orchestrator.test.ts` **PASS**es. |
+| 3.3 | Network panel / app log                                                       | Exactly ONE `match_request` outbound, ONE `match_response` inbound, per side.                                                                                                                     | **NOT_RUN** (manual). Two-process test `two_instance_match_request_response_order` **PASS**es (verified ordering: `match_request` first, then `match_response`, in each direction).                                           |
+| 3.4 | Click "Disconnect" in MatchView                                               | session goes to `closed`; Rust `lan_host_poll` / `lan_join_poll` invocations stop; `setInterval` cleared; no leftover timers in the Chrome devtools "Performance" → "Timers" view.                | **NOT_RUN** (manual).                                                                                                                                                                                                         |
+| 3.5 | Repeat § 1 three times in a row (Disconnect → Connect → Disconnect → Connect) | Each cycle is clean. No listener / timer accumulation. The host's Rust process exits cleanly on each cycle (`ps aux                                                                               | grep lan_` should be empty).                                                                                                                                                                                                  | **NOT_RUN** (manual). |
+| 3.6 | Kill A's app from the OS while in MatchView                                   | B's MatchView shows peer-disconnect error within ≤ 1 s. B's session is `closed`. B's `lan_join_poll` stops.                                                                                       | **NOT_RUN** (manual). Wire-level covered by `two_instance_tcp_drop_joiner_perspective` and `two_instance_reconnect_after_tcp_drop` (Phase 16.3). UI NOT_RUN — § 4.7 step 6 drives the same scenario on a real GUI.            |
 
 **Mark § 3 as `PASS` if no state / listener / timer / log anomalies.**
 
@@ -263,23 +302,23 @@ real LLM API key. Phase 16.2 of the brief was explicit: do not
 configure a key, do not run the LLM-dependent rows. Anything below
 that says "needs LLM" stays NOT_RUN for this phase.
 
-| § | Scenario | Needs LLM? | Phase 16.3 status |
-|---|----------|-----------|-------------------|
-| § 1 (rows 1-5) | ConnectView renders, host code visible, peer discovery, TCP connect, state transitions to `tcp-connected` / `connected` | NO | NOT_RUN (no GUI driver in the Claude session); wire-level analogue `two_instance_discovery_and_link` **PASS** |
-| § 1 (rows 6-7) | MatchOrchestrator runs `analyzeMatch`, MatchView shows the 5 result fields, peer display name + agent id match | YES | NOT_RUN |
-| § 1 (row 8) | Disconnect cleans up the session | NO | wire-level: `lan_e2e.host_linked_becomes_false_after_stop` **PASS** |
-| § 2.1, § 2.2 | Wrong code / no host (joiner-only flow, no peer involved) | NO | NOT_RUN (needs GUI); wire-level analogues **PASS** (`two_instance_cancel_and_repair` proves the empty-discover path) |
-| § 2.3 | UDP discoverable, TCP fails (firewall block) | NO | NOT_RUN (firewall needs OS access) |
-| § 2.4 | TCP up, no hello from peer | NO | NOT_RUN (needs GUI); `two_instance_host_silent_then_link_drops` **PASS** |
-| § 2.5 | Malformed hello | NO | NOT_RUN (needs GUI); `two_instance_malformed_hello_is_delivered` **PASS** |
-| § 2.6 | Peer exits during handshake | NO | wire-level analogue `two_instance_mid_handshake_disconnect` **PASS** (joiner's send still ok; the new `peer_closed` machinery means the next `host_poll` returns `Err(PeerClosed)`); manual UI version NOT_RUN (needs GUI) |
-| § 2.7 | Peer exits after match — peer-side drop detection | NO | wire-level analogue `two_instance_tcp_drop_*` **PASS** (4 new tests in `lan_protocol_e2e.rs`); manual UI version NOT_RUN (needs GUI) |
-| § 2.8 | LLM API key invalid | YES | NOT_RUN |
-| § 2.9 | Cancel + re-pair (Cancel fix verified in Phase 16.2) | NO | new `ConnectView.test.tsx` **PASS** (now 10/10 with the Phase 16.3 transport-failure-contract additions); wire-level analogue `two_instance_cancel_and_repair` **PASS** |
-| § 3.1, § 3.2 | State transitions fire once, one orchestrator per pairing | NO | NOT_RUN (DevTools); fix is in code (Phase 16 patch + reentrancy guard); `match-orchestrator.test.ts` reentrancy test **PASS** |
-| § 3.3 | Exactly one match_request/response per side | YES (for the response) | NOT_RUN |
-| § 3.4, § 3.5 | Disconnect cleanup, three cycles | NO | NOT_RUN (needs GUI) |
-| § 3.6 | Hard kill propagates — drop detection end-to-end | NO | wire-level `two_instance_tcp_drop_joiner_perspective` and `two_instance_tcp_drop_host_perspective` **PASS**; UI NOT_RUN |
+| §              | Scenario                                                                                                                | Needs LLM?             | Phase 16.3 status                                                                                                                                                                                                          |
+| -------------- | ----------------------------------------------------------------------------------------------------------------------- | ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| § 1 (rows 1-5) | ConnectView renders, host code visible, peer discovery, TCP connect, state transitions to `tcp-connected` / `connected` | NO                     | NOT_RUN (no GUI driver in the Claude session); wire-level analogue `two_instance_discovery_and_link` **PASS**                                                                                                              |
+| § 1 (rows 6-7) | MatchOrchestrator runs `analyzeMatch`, MatchView shows the 5 result fields, peer display name + agent id match          | YES                    | NOT_RUN                                                                                                                                                                                                                    |
+| § 1 (row 8)    | Disconnect cleans up the session                                                                                        | NO                     | wire-level: `lan_e2e.host_linked_becomes_false_after_stop` **PASS**                                                                                                                                                        |
+| § 2.1, § 2.2   | Wrong code / no host (joiner-only flow, no peer involved)                                                               | NO                     | NOT_RUN (needs GUI); wire-level analogues **PASS** (`two_instance_cancel_and_repair` proves the empty-discover path)                                                                                                       |
+| § 2.3          | UDP discoverable, TCP fails (firewall block)                                                                            | NO                     | NOT_RUN (firewall needs OS access)                                                                                                                                                                                         |
+| § 2.4          | TCP up, no hello from peer                                                                                              | NO                     | NOT_RUN (needs GUI); `two_instance_host_silent_then_link_drops` **PASS**                                                                                                                                                   |
+| § 2.5          | Malformed hello                                                                                                         | NO                     | NOT_RUN (needs GUI); `two_instance_malformed_hello_is_delivered` **PASS**                                                                                                                                                  |
+| § 2.6          | Peer exits during handshake                                                                                             | NO                     | wire-level analogue `two_instance_mid_handshake_disconnect` **PASS** (joiner's send still ok; the new `peer_closed` machinery means the next `host_poll` returns `Err(PeerClosed)`); manual UI version NOT_RUN (needs GUI) |
+| § 2.7          | Peer exits after match — peer-side drop detection                                                                       | NO                     | wire-level analogue `two_instance_tcp_drop_*` **PASS** (4 new tests in `lan_protocol_e2e.rs`); manual UI version NOT_RUN (needs GUI)                                                                                       |
+| § 2.8          | LLM API key invalid                                                                                                     | YES                    | NOT_RUN                                                                                                                                                                                                                    |
+| § 2.9          | Cancel + re-pair (Cancel fix verified in Phase 16.2)                                                                    | NO                     | new `ConnectView.test.tsx` **PASS** (now 10/10 with the Phase 16.3 transport-failure-contract additions); wire-level analogue `two_instance_cancel_and_repair` **PASS**                                                    |
+| § 3.1, § 3.2   | State transitions fire once, one orchestrator per pairing                                                               | NO                     | NOT_RUN (DevTools); fix is in code (Phase 16 patch + reentrancy guard); `match-orchestrator.test.ts` reentrancy test **PASS**                                                                                              |
+| § 3.3          | Exactly one match_request/response per side                                                                             | YES (for the response) | NOT_RUN                                                                                                                                                                                                                    |
+| § 3.4, § 3.5   | Disconnect cleanup, three cycles                                                                                        | NO                     | NOT_RUN (needs GUI)                                                                                                                                                                                                        |
+| § 3.6          | Hard kill propagates — drop detection end-to-end                                                                        | NO                     | wire-level `two_instance_tcp_drop_joiner_perspective` and `two_instance_tcp_drop_host_perspective` **PASS**; UI NOT_RUN                                                                                                    |
 
 **Bottom line for a no-LLM manual run (Phase 16.3 § 4.7 below expands
 this):** you can drive the full discovery + TCP connect + state-
@@ -301,17 +340,17 @@ machines (or two VMs on one host — see § 0) WITHOUT configuring a
 real LLM API key. It validates the Phase 16.3 fixes end-to-end on a
 real GUI:
 
-| Step | Machine A (host) | Machine B (joiner) | Pass criterion |
-|------|------------------|--------------------|----------------|
-| 0 | Open Settings → LLM. Pick provider `"none"` (or any provider without a real key). Save. | Same. | Both apps boot without crashing; LLM banner may say "not configured", that's expected. |
-| 1 | Home screen → click **Connect**. | Same. | ConnectView appears. |
-| 2 | Mode toggle: pick **LAN**. Transport toggle: pick **Host**. | Mode toggle: pick **LAN**. Transport toggle: pick **Join**. | Host shows the 6-character pairing code; joiner shows the input. |
-| 3 | (wait) | Type A's code into the input; click **Join**. | Joiner shows "Searching LAN…" → within ~3 s, both transition to MatchView. The "preparing match…" banner appears. |
-| 4 | (none) | Click **Cancel** in ConnectView **BEFORE** A's code is typed. | Joiner returns to Home; A's host stays on "Waiting…"; no Rust zombie process (`ps aux | grep lan_`). This is the § 5.2 fix verified manually. |
-| 5 | (none) | Re-open ConnectView, type A's code again, click Join. | Both go to MatchView again. |
-| 6 | Once both are in MatchView, on B: Cmd-Q / Alt-F4 (or just kill the process). | (killed) | Within ≤ 1 s, A's MatchView flips to an error banner (`HandshakeClosedError` or `PeerDisconnected`). A's session is `closed`. A's Rust side reports `Err(LanError::PeerClosed)` on `host_poll` (visible in the dev console). This is the Phase 16.3 § 5.1 drop detection verified end-to-end. |
-| 7 | Restart A's host from Home → Connect → Host. Get a fresh code. | Restart B. Connect → Join → type the new code. | Both go to MatchView again. This is the § 2.9 reconnect verified manually. |
-| 8 | Click **Disconnect** in MatchView. | Click **Disconnect** in MatchView. | Both return to Home. No Rust zombies (`ps aux | grep lan_` returns nothing). |
+| Step | Machine A (host)                                                                        | Machine B (joiner)                                            | Pass criterion                                                                                                                                                                                                                                                                                |
+| ---- | --------------------------------------------------------------------------------------- | ------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 0    | Open Settings → LLM. Pick provider `"none"` (or any provider without a real key). Save. | Same.                                                         | Both apps boot without crashing; LLM banner may say "not configured", that's expected.                                                                                                                                                                                                        |
+| 1    | Home screen → click **Connect**.                                                        | Same.                                                         | ConnectView appears.                                                                                                                                                                                                                                                                          |
+| 2    | Mode toggle: pick **LAN**. Transport toggle: pick **Host**.                             | Mode toggle: pick **LAN**. Transport toggle: pick **Join**.   | Host shows the 6-character pairing code; joiner shows the input.                                                                                                                                                                                                                              |
+| 3    | (wait)                                                                                  | Type A's code into the input; click **Join**.                 | Joiner shows "Searching LAN…" → within ~3 s, both transition to MatchView. The "preparing match…" banner appears.                                                                                                                                                                             |
+| 4    | (none)                                                                                  | Click **Cancel** in ConnectView **BEFORE** A's code is typed. | Joiner returns to Home; A's host stays on "Waiting…"; no Rust zombie process (`ps aux                                                                                                                                                                                                         | grep lan_`). This is the § 5.2 fix verified manually. |
+| 5    | (none)                                                                                  | Re-open ConnectView, type A's code again, click Join.         | Both go to MatchView again.                                                                                                                                                                                                                                                                   |
+| 6    | Once both are in MatchView, on B: Cmd-Q / Alt-F4 (or just kill the process).            | (killed)                                                      | Within ≤ 1 s, A's MatchView flips to an error banner (`HandshakeClosedError` or `PeerDisconnected`). A's session is `closed`. A's Rust side reports `Err(LanError::PeerClosed)` on `host_poll` (visible in the dev console). This is the Phase 16.3 § 5.1 drop detection verified end-to-end. |
+| 7    | Restart A's host from Home → Connect → Host. Get a fresh code.                          | Restart B. Connect → Join → type the new code.                | Both go to MatchView again. This is the § 2.9 reconnect verified manually.                                                                                                                                                                                                                    |
+| 8    | Click **Disconnect** in MatchView.                                                      | Click **Disconnect** in MatchView.                            | Both return to Home. No Rust zombies (`ps aux                                                                                                                                                                                                                                                 | grep lan_` returns nothing).                          |
 
 Record per step:
 
@@ -325,7 +364,7 @@ both machines (`~/Library/Logs/kindora/*.log` on macOS, or the
 
 - Step 3: `lan_announce`, `lan_discover`, `lan_invite` (or the
   equivalent log lines), `linked=true`, `PairingSession hosting →
-  tcp-connected`.
+tcp-connected`.
 - Step 6: A's `host_poll` returns `Err(PeerClosed)` (visible in
   the dev console as the error trace). B's session is gone.
 - Step 7: A fresh `lan_announce`, fresh join, fresh link.
@@ -576,13 +615,13 @@ fall through to the existing "handshake failed" banner.
   plain-object defensive path.
 - `packages/transport/src/__tests__/lan-transport.test.ts` — 6
   new tests under the Tauri-shim block: `host: peer-closed
-  from lan_host_poll fires onClose exactly once`, `joiner:
-  peer-closed from lan_join_poll fires onClose exactly once`,
+from lan_host_poll fires onClose exactly once`, `joiner:
+peer-closed from lan_join_poll fires onClose exactly once`,
   `local disconnect does NOT fire onClose (only peer-side drops
-  do)`, `onClose handler is unsubscribed correctly`, `onClose
-  handler that throws does not block the dispatch`, and `after
-  peer-closed, a fresh LanTransport can start a new host on the
-  same LanState`.
+do)`, `onClose handler is unsubscribed correctly`, `onClose
+handler that throws does not block the dispatch`, and `after
+peer-closed, a fresh LanTransport can start a new host on the
+same LanState`.
 - `packages/transport/src/__tests__/pairing-session.test.ts` — 5
   new tests under `peer-close hook (Transport.onClose)`:
   session drives to `closed` with `closeReason: 'peer-closed'`
@@ -658,7 +697,7 @@ to complete; the new `lan_host_start` could land on the Rust
 side before the old `host_stop` had cleared the state, hitting
 `AlreadyRunning`. The same race existed for an immediate
 `disconnect()` after a peer-close (the disconnect would
-dispatch a *second* `host_stop` instead of awaiting the
+dispatch a _second_ `host_stop` instead of awaiting the
 in-flight one).
 
 **Fix (Phase 16.5 § 5.5.1):** a single `cleanupPromise:
@@ -670,7 +709,7 @@ IPC. The promise is single-shot — it resolves to `undefined`
 whether the underlying IPC succeeded or failed, and is then
 replaced. `runRustCleanup(atMode)` captures the connection
 role at the time of the call because the peer-close path
-resets `this.mode` synchronously *before* the IPC is
+resets `this.mode` synchronously _before_ the IPC is
 dispatched; without the snapshot, a synchronous
 `disconnect()` driven by the close handler would observe
 `mode === 'idle'` and skip the actual `lan_host_stop`,
@@ -712,7 +751,7 @@ leaving the Rust state half-torn-down.
    failure does not block subsequent startHost" — the next
    `startHost` still resolves to a `LanHostInfo`, the
    `console.debug` is the only visible side effect, and a
-   *real* `AlreadyRunning` would have been raised by the
+   _real_ `AlreadyRunning` would have been raised by the
    mock's `host_start` switch arm. The transport does not
    make a false claim; it makes a transparent promise that
    the cleanup completed (because the Promise is settled),
@@ -742,13 +781,13 @@ silently drop a real new peer-close event?
 instance-scoped. Once set to `true` by a peer drop, it was
 never reset. A subsequent `startHost` on the same instance
 left the flag sticky. The poll loop would only stop on the
-*next* `Err(PeerClosed)`, but if the new connection
+_next_ `Err(PeerClosed)`, but if the new connection
 gracefully saw the peer arrive and then drop, the second
 drop would still be observed (the flag is just a "did the
 LAST connection end?" memo; new poll ticks clear it
-implicitly). However, a *different* code path — the
+implicitly). However, a _different_ code path — the
 late-subscriber microtask in `onClose()` — would still fire
-the handler on the *new* connection's behalf, because the
+the handler on the _new_ connection's behalf, because the
 late-subscriber path checks the instance-scoped
 `closedByPeer` flag, which was set by the OLD connection.
 The visible bug: a new connection's `onClose` handler
@@ -762,8 +801,8 @@ sets `this.closedByPeer = false` and clears
 `this.closeHandlers`. The late-subscriber microtask still
 exists (it is the documented contract for subscribers to a
 close event that already happened) but it can only fire on
-handlers registered *after* a close, not on handlers
-registered *before* the new connection starts. The
+handlers registered _after_ a close, not on handlers
+registered _before_ the new connection starts. The
 clear-then-reset order in `startHost` is:
 
 ```
@@ -814,7 +853,7 @@ reused one.
 #### § 5.5.3 — PeerClosed classification contract (Task 3)
 
 **Question:** the TS-side `LanError.from(err)` classifier
-keys off the *exact* `Display` string of the Rust
+keys off the _exact_ `Display` string of the Rust
 `LanError::PeerClosed` variant (`"peer closed"`) and the
 `NotConnected` variant (`"not connected"`). If either side
 changes its string without the other, peer-closed events
@@ -871,7 +910,7 @@ new `#[cfg(test)] mod tests` block with three tests:
   `LanError::NotConnected.to_string() == "not connected"`.
 - `lan_error_serialises_to_display_string` — asserts
   `serde_json::to_string(&LanError::PeerClosed) ==
-  "\"peer closed\""`. This pins the actual IPC wire
+"\"peer closed\""`. This pins the actual IPC wire
   format: `impl Serialize for LanError` uses
   `serialize_str(&self.to_string())`, so the rejection
   that lands in the JS `Promise<T>.catch` is a
@@ -1237,7 +1276,7 @@ concurrent `startHost` / `disconnect` / `onClose`).
 
 Fill this in after running § 1, § 2, § 3 on two physical machines.
 Append the wire-level PASS/FAIL summary from `cargo test --test
-lan_protocol_e2e` (already known: 13/13 PASS as of Phase 16.5;
+lan_protocol_e2e` (already known: 13/13 PASS as of 2026-11-06;
 the 8 new Phase 16.6 concurrency tests are mock-IPC unit tests
 and do not need a live two-machine run — they are gated on
 the vitest suite, see `pnpm vitest run` line below).
@@ -1245,14 +1284,21 @@ the vitest suite, see `pnpm vitest run` line below).
 ```
 PHASE 16.6 VERDICT — <your name>, <date>, <host OS / version>, <joiner OS / version>
 
+--- automated, ONE machine. Reference numbers; not an acceptance. ---
 Wire-level (cargo test --test lan_protocol_e2e):           PASS (13/13)
-Single-LanState regression (cargo test --test lan_e2e):    PASS (15/15)
-Rust unit tests (cargo test --lib):                        PASS (3/3)
-Vitest workspace:                                         PASS (541/541)
+Single-LanState regression (cargo test --test lan_e2e):    PASS (18/18)
+LAN resource limits (cargo test --test lan_limits):        PASS (4/4)
+Rust unit tests (cargo test --lib):                        PASS (13/13)
+Vitest workspace (7 suites):                              PASS (1035)
 pnpm -r typecheck:                                        PASS
+pnpm lint:                                                PASS
 pnpm -r build:                                            PASS
+cargo fmt --check:                                       PASS
+cargo clippy -- -D warnings:                             PASS
+pnpm format:check:                                       FAIL (111 files) | PASS
 cargo check --lib (Rust ≥ 1.99, edition2024):              PASS
 
+--- MANUAL, TWO physical machines. This is the acceptance. ---
 § 1 Happy path                              : PASS / FAIL
 § 2.1 Wrong code                            : PASS / FAIL
 § 2.2 No host running                       : PASS / FAIL
@@ -1276,5 +1322,10 @@ cargo check --lib (Rust ≥ 1.99, edition2024):              PASS
 Overall: PASS / FAIL / PARTIAL
 Notes: <paste log excerpts of any failure; reference § 5 for known gaps>
 ```
+
+> **Do not fill in the automated block from a previous run and call it
+> today's result.** The automated numbers are a sanity check that the tree you
+> are about to test by hand is the tree you think it is. The **manual** block
+> is the one that may move a phase from `IMPLEMENTED` to `VERIFIED`.
 
 Save as `docs/phase16/results-<date>-<initials>.md` and commit.

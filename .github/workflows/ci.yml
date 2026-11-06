@@ -2,18 +2,72 @@ name: CI
 
 # Workspace-level CI for Kindora V0.1.
 #
-# We deliberately keep the desktop-app `tauri` build OUT of the
-# required checks: it needs platform-specific dependencies and a
-# full Rust toolchain, and the `pnpm -r build` + `pnpm -r test` +
-# `pnpm -r typecheck` jobs below already cover the TypeScript /
-# Rust-lib surface. A tagged-release build workflow does not exist
-# yet — installers are not published (see README § Status).
+# ## What changed and why (the Phase H1 remediation, 2026-11-06)
 #
-# `pnpm lint` and `pnpm format:check` are intentionally NOT gating:
-# they are useful locally (`pnpm lint`, `pnpm format`) but were not
-# green across the whole tree when this workflow was written, and
-# adding a permanently-red required check helps nobody. They become
-# gating once the tree is clean.
+# The task book (`docs/修复.md` § 十一 Phase H, H1「完善 CI」) lists ten
+# requirements. This workflow now covers all ten:
+#
+#   1. TypeScript type checking ................ `pnpm -r typecheck`
+#   2. ESLint .................................. `pnpm lint`
+#   3. Prettier check .......................... `pnpm format:check`
+#   4. Rust format check ....................... `cargo fmt --check`
+#   5. Rust Clippy ............................. `cargo clippy -- -D warnings`
+#   6. Rust unit tests ......................... `cargo test --lib`
+#   7. TypeScript unit tests ................... `pnpm -r test`
+#   8. Tauri build check ....................... `pnpm -C apps/desktop tauri build --no-bundle`
+#   9. Dependency security check ............... `pnpm audit` + `cargo audit`
+#  10. The key checks are **blocking** .......... every step in `build` and
+#                                               `tauri-build` fails the job.
+#
+# **The earlier version of this file deliberately left `pnpm lint` and
+# `pnpm format:check` non-gating**, with the reasoning "they were not green
+# across the whole tree when this workflow was written, and adding a
+# permanently-red required check helps nobody". The task book overrides that
+# judgement: requirement 10 says the key checks must be *blocking*, and
+# § 2.2 of the same task book forbids manufacturing a PASS by suppressing
+# lint. A red lint **is** the finding. Making the tree green is the fix, and
+# the tree has to be made green anyway before any phase may be called
+# `VERIFIED` (the rule already in use across `docs/REMEDIATION_*.md`).
+#
+# **Requirement 9 is recorded, not blocking — deliberately.** Task book line
+# 149 says verbatim: 「记录依赖漏洞和过期依赖，但不要在本阶段批量升级」
+# (record the dependency vulnerabilities and the outdated dependencies, but do
+# not batch-upgrade in this stage). A blocking audit would fail the build
+# *because of* known, recorded, deliberately-unfixed vulnerabilities — that is
+# not a finding, that is a policy violation. So the audit runs in its own
+# job, with `continue-on-error: true`, and its output is recorded in the job
+# log. It becomes blocking once the dependency baseline is clean.
+#
+# Every step here mirrors a step in `.cache/verify.sh`, so the maintainer can
+# reproduce exactly what CI does, locally, before pushing. The mapping:
+#
+#   CI step                          verify.sh step
+#   -------------------------------  -------------------------------------
+#   pnpm -r typecheck                08a-typecheck
+#   pnpm lint                        08c-lint
+#   pnpm format:check                08d-format-check
+#   pnpm -r build                    08b-build-packages
+#   pnpm -r test                     01…06 (one step per package)
+#   cargo fmt --check                09d-cargo-fmt
+#   cargo clippy                     09e-cargo-clippy
+#   cargo test --lib                 09a-cargo-lib
+#   cargo test --test lan_*          09b / 09c / 09c2
+#   tauri build --no-bundle          09f-tauri-build
+#   pnpm audit / cargo audit         09g-audit / 09h-cargo-audit
+#   pnpm outdated                    09i-pnpm-outdated
+#
+# The **order** differs on one step on purpose: CI runs `pnpm
+# format:check` **last** in the `build` job (see the comment there),
+# while `.cache/verify.sh` runs it as `08d-format-check`. Both are
+# blocking; CI just makes sure a red format check cannot hide the
+# result of the nine checks before it.
+#
+# The `tauri build` check lives in its own job so the fast feedback loop
+# (typecheck → lint → test) is not serialised behind a full Rust release
+# build. `--no-bundle` builds the binary and the frontend but skips the
+# installer packaging (deb/rpm/AppImage), which needs `linuxdeploy` and is
+# slow and flaky on a CI runner; installers are not published anyway (see
+# README § Status).
 
 on:
   push:
@@ -29,7 +83,7 @@ jobs:
   build:
     name: Build & test
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -40,6 +94,139 @@ jobs:
         # `packageManager` from the root package.json (pnpm@10.32.1).
         # Pinning `version: 9` here would install pnpm 9 against a
         # pnpm-10 lockfile.
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Setup Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          # The repository pins `stable` in `rust-toolchain.toml` because
+          # the dependency tree needs edition2024 (Rust ≥ 1.85). Reading
+          # the same channel here keeps local and CI on one toolchain.
+          toolchain: stable
+          components: rustfmt, clippy
+
+      - name: Cache cargo registry & target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            apps/desktop/src-tauri/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('apps/desktop/src-tauri/Cargo.toml', 'apps/desktop/src-tauri/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # --- H1 #1: TypeScript type checking -------------------------------
+      # This is the check that caught the `SocialIntent[] | string[]` union
+      # wart on `SocialProfile.interests` (see docs/REMEDIATION_TEST_REPORT.md
+      # § 8.8.17). It must stay blocking, and it must stay **first** — a
+      # type error anywhere makes every later step's output noise.
+      - name: Typecheck
+        run: pnpm -r typecheck
+
+      # --- H1 #2: ESLint ---------------------------------------------------
+      - name: Lint
+        run: pnpm lint
+
+      - name: Build
+        run: pnpm -r build
+
+      # --- H1 #7: TypeScript unit tests -----------------------------------
+      # `pnpm -r test` covers **every** workspace package, including
+      # `@kindora/llm` — the Phase E suite. The local step-by-step runner
+      # (`.cache/verify.sh`) has to name each package explicitly; CI does
+      # not, which is why CI never had the `packages/llm` blind spot.
+      - name: Test
+        run: pnpm -r test
+
+      # --- H1 #4: Rust format check ---------------------------------------
+      - name: Rust format check
+        working-directory: apps/desktop/src-tauri
+        run: cargo fmt --check
+
+      # --- H1 #5: Rust Clippy ---------------------------------------------
+      # `-D warnings` turns every lint into an error, so this is a real
+      # PASS/FAIL and not a warning dump.
+      - name: Rust Clippy
+        working-directory: apps/desktop/src-tauri
+        run: cargo clippy --all-targets --all-features --message-format=short -- -D warnings
+
+      - name: Rust lib check (real PASS/FAIL)
+        working-directory: apps/desktop/src-tauri
+        # `cargo check --lib --message-format=short` validates the Rust
+        # library + lan.rs + secrets.rs. Exits non-zero on compile
+        # failure; CI must surface this as a real FAIL.
+        run: cargo check --lib --message-format=short
+
+      # --- H1 #6: Rust unit tests -----------------------------------------
+      # The `--lib` target's own #[test] fns (error -> display-string
+      # contracts in lan.rs). No sockets, no timing — safe to run in
+      # parallel.
+      - name: Rust unit tests
+        working-directory: apps/desktop/src-tauri
+        run: cargo test --lib --message-format=short
+
+      - name: LAN end-to-end Rust tests
+        working-directory: apps/desktop/src-tauri
+        # Exercises the production LanState (host_start, host_poll,
+        # host_send, join_discover, join_connect, host_linked) on real
+        # UDP + TCP loopback. The tests allocate unique UDP ports
+        # per LanState, but parallel test execution is unreliable on
+        # the macOS/Linux kernel UDP buffer pool, so we force
+        # --test-threads=1. cargo exits non-zero on any test failure.
+        run: cargo test --test lan_e2e --message-format=short -- --test-threads=1
+
+      - name: LAN protocol end-to-end Rust tests
+        working-directory: apps/desktop/src-tauri
+        # The KSA 0.1 envelope contract over a real socket: build,
+        # validate, serialise, replay-guard, rate-limit.
+        run: cargo test --test lan_protocol_e2e --message-format=short -- --test-threads=1
+
+      - name: LAN resource-limit Rust tests
+        working-directory: apps/desktop/src-tauri
+        # Phase C / C1 + C2: frame-size limit, message-rate limit,
+        # invalid-UTF-8 exit state and reconnect-after-disconnect.
+        # These speak the wire format by hand, so they need exclusive
+        # access to the shared UDP port.
+        run: cargo test --test lan_limits --message-format=short -- --test-threads=1
+
+      # --- H1 #3: Prettier check ------------------------------------------
+      # `pnpm format` rewrites the tree; `format:check` only reports.
+      #
+      # **This step is deliberately the LAST one in the job.** It is still
+      # **blocking** — requirement 10 says a failing key check must fail
+      # CI, not just warn — but running it earlier would mean that a
+      # single red check **hides the result of every check after it**.
+      # The Prettier backlog in this repository is real but pre-existing
+      # (the baseline commit's own files are unformatted too), so until it
+      # is cleared the format step is guaranteed to be the one that goes
+      # red; running it last means the log still tells you the truth
+      # about the type check, the linter, the build, the tests and all
+      # four Rust suites.
+      #
+      # The fix is `pnpm format` — **not** adding `docs/` to
+      # `.prettierignore`, which would be manufacturing a PASS.
+      - name: Format check
+        run: pnpm format:check
+
+  tauri-build:
+    name: Tauri build check
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -63,48 +250,111 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-
 
+      # Tauri v2 on Ubuntu needs the WebKitGTK stack, the appindicator
+      # tray library and a few build essentials. The list is the one from
+      # https://tauri.app/start/prerequisites/ for Debian/Ubuntu.
+      - name: Install Tauri Linux prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            build-essential \
+            curl \
+            wget \
+            file \
+            libssl-dev \
+            libxdo-dev
+
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Typecheck
-        run: pnpm -r typecheck
+      # The workspace packages first. The desktop app imports them by
+      # their `main` (`./src/index.ts`), so this is not strictly
+      # required for the type check — but it is what the root `pnpm build`
+      # script does, and building the packages here means a broken
+      # package build fails in *this* job rather than silently inside the
+      # Tauri build's `beforeBuildCommand`.
+      - name: Build the workspace packages
+        run: pnpm -r --filter './packages/*' build
 
-      - name: Build
-        run: pnpm -r build
+      # --- H1 #8: the desktop app really builds ----------------------------
+      # `--no-bundle` skips the deb/rpm/AppImage packaging (which needs
+      # `linuxdeploy` and is slow and flaky on a runner). It still runs
+      # the real Tauri build: the Vite frontend, the Rust binary and the
+      # `tauri.conf.json` processing. Installers are not published, so
+      # the packaging step is not what needs proving here.
+      - name: Build the Tauri app
+        run: pnpm -C apps/desktop tauri build --no-bundle
 
-      - name: Test
-        run: pnpm -r test
+  dependency-audit:
+    name: Dependency audit (record only — not gating)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # Deliberately non-blocking. Task book line 149: 「记录依赖漏洞和过期依赖，
+    # 但不要在本阶段批量升级」. The job still runs on every push and its
+    # output is recorded in the log; it just does not fail the workflow.
+    continue-on-error: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - name: Rust lib check (real PASS/FAIL)
-        working-directory: apps/desktop/src-tauri
-        # `cargo check --lib --message-format=short` validates the Rust
-        # library + lan.rs + secrets.rs. Exits non-zero on compile
-        # failure; CI must surface this as a real FAIL. We do NOT
-        # gate CI on the full `tauri build` because that requires
-        # platform-specific tauri-build assets (icons, tauri.conf.json
-        # processed by tauri-build) and is verified locally before
-        # release tagging.
-        run: cargo check --lib --message-format=short
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
 
-      - name: Rust unit tests
-        working-directory: apps/desktop/src-tauri
-        # The `--lib` target's own #[test] fns (error -> display-string
-        # contracts in lan.rs). No sockets, no timing — safe to run in
-        # parallel.
-        run: cargo test --lib --message-format=short
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
 
-      - name: LAN end-to-end Rust tests
-        working-directory: apps/desktop/src-tauri
-        # Exercises the production LanState (host_start, host_poll,
-        # host_send, join_discover, join_connect, host_linked) on real
-        # UDP + TCP loopback. The tests allocate unique UDP ports
-        # per LanState, but parallel test execution is unreliable on
-        # the macOS/Linux kernel UDP buffer pool, so we force
-        # --test-threads=1. cargo exits non-zero on any test failure.
-        run: cargo test --test lan_e2e --message-format=short -- --test-threads=1
+      - name: Setup Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
 
-      - name: LAN protocol end-to-end Rust tests
-        working-directory: apps/desktop/src-tauri
-        # The KSA 0.1 envelope contract over a real socket: build,
-        # validate, serialise, replay-guard, rate-limit.
-        run: cargo test --test lan_protocol_e2e --message-format=short -- --test-threads=1
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # --- H1 #9a: the npm dependency tree ---------------------------------
+      # `pnpm audit` exits 1 when it finds something — that is a *result*,
+      # not a crash, and the step is `continue-on-error` on purpose.
+      - name: Audit the npm dependency tree
+        continue-on-error: true
+        run: pnpm audit --audit-level=moderate --registry=https://registry.npmjs.org
+
+      # --- H1 #9b: the Rust dependency tree -------------------------------
+      # `cargo audit` reads a `Cargo.lock`, and this repository has **no
+      # root `Cargo.lock`** — the Rust crate lives in
+      # `apps/desktop/src-tauri`. `cargo audit` does not accept
+      # `--manifest-path`, so the lockfile is named explicitly. This is
+      # the exact command `.cache/verify.sh` runs (step `09h`), so CI and
+      # the local runner cannot drift apart.
+      #
+      # `cargo audit` exits **1 when it finds an advisory** — that is a
+      # result, not a crash, and the step is `continue-on-error` on
+      # purpose (task book line 149: record, do not batch-upgrade).
+      - name: Install cargo-audit
+        continue-on-error: true
+        run: cargo install cargo-audit --locked
+
+      - name: Audit the Rust dependency tree
+        continue-on-error: true
+        run: cargo audit --file apps/desktop/src-tauri/Cargo.lock
+
+      # --- 0.5b: the outdated-dependency list -----------------------------
+      # The other half of task book line 149. `pnpm outdated` exits 1 when
+      # something is behind — again a *result*, not a crash.
+      #
+      # The registry is set through the **environment variable**, not a
+      # `--registry` flag: `pnpm outdated` does not accept that flag in
+      # pnpm 10 (`ERROR Unknown option: 'registry'`, exit 1 — a usage
+      # error, which would look exactly like "there are outdated
+      # packages"). `npm_config_registry` is honoured by every pnpm
+      # subcommand. A clean CI runner already defaults to npmjs, but
+      # pinning it keeps the result identical to a local run.
+      - name: List the outdated npm dependencies
+        continue-on-error: true
+        run: npm_config_registry=https://registry.npmjs.org pnpm outdated -r

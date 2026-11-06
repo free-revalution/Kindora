@@ -1,8 +1,17 @@
 # Kindora V0.1 — Real-Usability & Security Audit
 
+> **This is a point-in-time audit record** (2026-10-10). It describes the
+> repository as it stood then. **Several findings it reports have since been
+> fixed** — notably the plaintext private key (now in the OS keychain), the
+> missing envelope signatures (now ES256), and the unencrypted LAN payloads
+> (now E2E-encrypted). See
+> [REMEDIATION_PROGRESS.md](REMEDIATION_PROGRESS.md) for the current state of
+> each item, and [SECURITY.md](../SECURITY.md) for the up-to-date limitations.
+
 **Audit date:** 2026-10-10
 **Auditor:** Claude (miniMax-M3 via Claude Code)
 **Scope:** Per task brief — verify V0.1 against the four "real-world" acceptance axes:
+
 1. Real transport (LAN + WebRTC DataChannel)
 2. Secure storage (OS keychain)
 3. Formal persistence (SQLite)
@@ -21,6 +30,7 @@ Every audit item is tagged **VERIFIED / PARTIAL / NOT_IMPLEMENTED / NOT_VERIFIED
 - Did **not** modify any code. The working tree is `clean` at `git status`.
 
 Git baseline:
+
 - Branch: `main`, HEAD = `009f8fa` "Phase 12: testing (scenarios §60 A-E, App e2e, credential sanitiser)".
 
 ---
@@ -28,6 +38,7 @@ Git baseline:
 ## 1. Real Transport (LAN / WebRTC DataChannel)
 
 ### 1.1 LAN discovery + LAN transport
+
 **Status: NOT_IMPLEMENTED**
 
 - **Files inspected:** `packages/transport/src/index.ts`, `packages/transport/src/loopback-transport.ts`, `packages/transport/src/webrtc-transport.ts`, `apps/desktop/src/lib/connect-service.ts`.
@@ -37,6 +48,7 @@ Git baseline:
 - **Acceptance:** Two `tauri dev` processes on the same LAN (or even same host, different processes) can host + join via the existing 6-char pairing code and exchange a `hello` envelope. Verified by a Vitest process-pair harness (see § 5.1).
 
 ### 1.2 WebRTC DataChannel transport
+
 **Status: NOT_IMPLEMENTED**
 
 - **File:** [`packages/transport/src/webrtc-transport.ts:37-58`](packages/transport/src/webrtc-transport.ts)
@@ -46,6 +58,7 @@ Git baseline:
 - **Acceptance:** Two Tauri processes can exchange an SDP offer (copied from one clipboard to the other), and after the second SDP/ICE-trickle exchange the DataChannel opens. Envelopes flow end-to-end. Verified by a process-pair harness with a mock signaling copy/paste stub.
 
 ### 1.3 Wire-format & session semantics over the real transport
+
 **Status: VERIFIED**
 
 - **Files:** [`packages/protocol/src/index.ts`](packages/protocol/src/index.ts), [`packages/transport/src/pairing-session.ts`](packages/transport/src/pairing-session.ts), [`packages/protocol/src/__tests__/validation.test.ts`](packages/protocol/src/__tests__/validation.test.ts).
@@ -58,11 +71,12 @@ Git baseline:
 ## 2. Secure Storage (OS Keychain / Credential Manager / Secret Service)
 
 ### 2.1 macOS Keychain / Windows Credential Manager / Linux Secret Service integration
+
 **Status: NOT_IMPLEMENTED**
 
 - **Files:** [`apps/desktop/src-tauri/Cargo.toml`](apps/desktop/src-tauri/Cargo.toml), [`apps/desktop/src-tauri/src/lib.rs`](apps/desktop/src-tauri/src/lib.rs), [`packages/storage/src/encrypted-local-storage-secret-store.ts`](packages/storage/src/encrypted-local-storage-secret-store.ts).
-- **Current state:** The Tauri Cargo manifest has **only** `tauri-plugin-store = "2"`. There is no `keyring`, `keyring-rs`, `tauri-plugin-stronghold`, or `tauri-plugin-keyring` dependency. `lib.rs:5` has the comment *"Real Tauri commands (`create_agent`, `save_profile`, …) land in Phase 1"* — the Rust side is a Phase 0 bootstrap stub.
-- **Risk:** `SECURITY.md:23` claims *"API keys are stored only in the OS-native secret store (macOS Keychain / Windows Credential Manager / Linux Secret Service)."* This is **aspirational**, not true. In the current Tauri build, secrets flow through `BrowserLocalStorageEncryptedSecretStore` (see 2.2), which is plain browser localStorage inside the Tauri webview — i.e. AES-GCM with a **fixed app secret** embedded in the bundle.
+- **Current state:** The Tauri Cargo manifest has **only** `tauri-plugin-store = "2"`. There is no `keyring`, `keyring-rs`, `tauri-plugin-stronghold`, or `tauri-plugin-keyring` dependency. `lib.rs:5` has the comment _"Real Tauri commands (`create_agent`, `save_profile`, …) land in Phase 1"_ — the Rust side is a Phase 0 bootstrap stub.
+- **Risk:** `SECURITY.md:23` claims _"API keys are stored only in the OS-native secret store (macOS Keychain / Windows Credential Manager / Linux Secret Service)."_ This is **aspirational**, not true. In the current Tauri build, secrets flow through `BrowserLocalStorageEncryptedSecretStore` (see 2.2), which is plain browser localStorage inside the Tauri webview — i.e. AES-GCM with a **fixed app secret** embedded in the bundle.
 - **Fix plan (Phase 3.1):**
   1. Add `keyring = { version = "3", features = ["apple-native", "windows-native", "linux-native-sync-persistent"] }` to `Cargo.toml`.
   2. Implement a Tauri command `secret_set(key, value)`, `secret_get(key)`, `secret_delete(key)` in `src-tauri/src/lib.rs` that delegates to `keyring::Entry::new("kindora", &key)`.
@@ -71,6 +85,7 @@ Git baseline:
 - **Acceptance:** Running `pnpm tauri:dev`, opening Settings, saving an Anthropic key, then inspecting macOS Keychain Access.app shows an entry `com.kindora.app / kindora / llm:anthropic:api-key`. Windows Credential Manager and `secret-tool search service kindora` on Linux behave equivalently. A Vitest process-pair harness (see § 5.1) verifies the key never lands in `localStorage`.
 
 ### 2.2 Browser dev fallback (encrypted localStorage)
+
 **Status: VERIFIED for what it claims**
 
 - **File:** [`packages/storage/src/encrypted-local-storage-secret-store.ts`](packages/storage/src/encrypted-local-storage-secret-store.ts).
@@ -79,6 +94,7 @@ Git baseline:
 - **Caveat:** The file itself self-documents as **"NOT for production: a fixed app secret protects against casual disk inspection, not against an attacker who controls the device"** (line 13). It is acceptable as a dev fallback; production **must** route through OS keychain (see 2.1).
 
 ### 2.3 `privateKey` storage
+
 **Status: PARTIAL**
 
 - **File:** [`packages/storage/src/profile-store.ts`](packages/storage/src/profile-store.ts), [`packages/agent/src/identity.ts`](packages/agent/src/identity.ts).
@@ -90,6 +106,7 @@ Git baseline:
 - **Acceptance:** `tauri:dev` build, dump the webview's localStorage — no `BEGIN PRIVATE KEY`, no PKCS8 base64, no raw private key bytes. Signing still works end-to-end (send a `hello` envelope from a test process).
 
 ### 2.4 Tauri capabilities / CSP / IPC surface
+
 **Status: PARTIAL**
 
 - **Files:** [`apps/desktop/src-tauri/tauri.conf.json`](apps/desktop/src-tauri/tauri.conf.json), [`apps/desktop/src-tauri/capabilities/default.json`](apps/desktop/src-tauri/capabilities/default.json).
@@ -107,6 +124,7 @@ Git baseline:
 ## 3. Formal Persistence (SQLite)
 
 ### 3.1 SQLite backend
+
 **Status: NOT_IMPLEMENTED**
 
 - **Files:** [`packages/storage/src/index.ts`](packages/storage/src/index.ts), [`packages/storage/src/browser-store.ts`](packages/storage/src/browser-store.ts), [`packages/storage/src/encrypted-local-storage-secret-store.ts`](packages/storage/src/encrypted-local-storage-secret-store.ts).
@@ -120,6 +138,7 @@ Git baseline:
 - **Acceptance:** Running `tauri:dev`, create an agent, host a pairing, exchange a chat message, force-quit the app, restart. The agent, the chat transcript, the LLM config, and the block-list are all recovered. Schema is queryable via `sqlite3 ~/.local/share/com.kindora.app/kindora.db ".schema"`.
 
 ### 3.2 Persistent chat history (Phase 9)
+
 **Status: NOT_IMPLEMENTED**
 
 - **Files:** [`packages/matching/src/chat-orchestrator.ts`](packages/matching/src/chat-orchestrator.ts) (deferred to read), [`apps/desktop/src/views/ChatView.tsx`](apps/desktop/src/views/ChatView.tsx) (deferred to read).
@@ -132,6 +151,7 @@ Git baseline:
 ## 4. Real Environment Acceptance Tests
 
 ### 4.1 Multi-process / multi-process pair harness
+
 **Status: NOT_IMPLEMENTED**
 
 - **Current state:** Every existing test is single-process. `LoopbackHub` is process-local. `apps/desktop/src/__tests__/e2e-flow.test.tsx` and `packages/matching/src/__tests__/integration.test.ts` use the in-process `LoopbackTransport`.
@@ -139,6 +159,7 @@ Git baseline:
 - **Fix plan (Phase 5.1):** A Vitest test that `child_process.fork()`s two Node harnesses, each creating a real `LoopbackTransport` that talks via Tauri-style `process.send`/`process.on('message')`. Each child asserts it received the expected envelopes. Smoke-check that the `tauri-plugin-store` Rust commands round-trip a value across processes.
 
 ### 4.2 Real LLM provider smoke test
+
 **Status: NOT_IMPLEMENTED**
 
 - **Files:** [`packages/llm/src/__tests__/providers.test.ts`](packages/llm/src/__tests__/providers.test.ts), [`apps/desktop/src/__tests__/llm-service.test.ts`](apps/desktop/src/__tests__/llm-service.test.ts).
@@ -151,6 +172,7 @@ Git baseline:
 - **Acceptance:** Locally, with real keys, `LIVE_LLM=1 pnpm test:live` passes. Without keys, the test suite skips gracefully with a console message.
 
 ### 4.3 Desktop E2E (Playwright / WebdriverIO against `tauri:dev`)
+
 **Status: NOT_IMPLEMENTED**
 
 - **Current state:** `apps/desktop/src/__tests__/e2e-flow.test.tsx` runs **inside jsdom**. It does not touch a real browser, a real CSP, or a real Tauri window.
@@ -159,6 +181,7 @@ Git baseline:
 - **Acceptance:** `pnpm e2e` exits 0 in CI. The same test run against `tauri:dev` (manual) also passes.
 
 ### 4.4 Cross-platform desktop build matrix
+
 **Status: NOT_VERIFIED**
 
 - **Current state:** Repo has no GitHub Actions / CI configuration in `.github/` (not inspected in this audit — would require additional reading). `Cargo.toml` is present; Tauri config is present; `tauri:dev` script is present. No evidence of a successful `tauri:build` having ever been run for macOS / Windows / Linux artefacts.
@@ -171,6 +194,7 @@ Git baseline:
 ## 5. Cross-cutting Observations
 
 ### 5.1 API key handling hygiene
+
 **Status: VERIFIED**
 
 - **Evidence:**
@@ -183,12 +207,14 @@ Git baseline:
   - `apps/desktop/src/__tests__/e2e-flow.test.tsx:60-62` and `apps/desktop/src/__tests__/llm-service.test.ts:35-48` assert keys never land in plaintext storage.
 
 ### 5.2 No log leakage of secrets
+
 **Status: VERIFIED**
 
 - **Evidence:** `grep -rn "console\." packages apps/desktop/src` returns **no `console.log` / `console.error` calls** anywhere in production code. The only matches are in JSDoc comments.
 - **Caveat:** `fetch()` errors propagate as `Error` objects with the upstream provider's `error.message` (e.g. Anthropic includes the API key region in some error bodies). These are surfaced to the UI as banners. Not strictly "logs", but should be reviewed in Phase 3.
 
 ### 5.3 Process-level singletons
+
 **Status: PARTIAL**
 
 - **Files:** [`apps/desktop/src/lib/connect-service.ts:47`](apps/desktop/src/lib/connect-service.ts#L47), [`apps/desktop/src/lib/llm-service.ts:23-24`](apps/desktop/src/lib/llm-service.ts#L23).
@@ -197,6 +223,7 @@ Git baseline:
 - **Fix plan:** No immediate change. Document as a known constraint in `docs/ARCHITECTURE.md`.
 
 ### 5.4 Existing test suite passes
+
 **Status: VERIFIED (this session will not re-run)**
 
 - **Evidence (last test run, Phase 12 commit):** `009f8fa Phase 12: testing (scenarios §60 A-E, App e2e, credential sanitiser)` adds:
@@ -210,25 +237,25 @@ Git baseline:
 
 ## 6. Summary Table
 
-| # | Item | Status |
-|---|------|--------|
-| 1.1 | LAN discovery + LAN transport | NOT_IMPLEMENTED |
-| 1.2 | WebRTC DataChannel transport | NOT_IMPLEMENTED |
-| 1.3 | Wire format / FSM semantics | VERIFIED (in-process only) |
-| 2.1 | OS keychain integration | NOT_IMPLEMENTED |
-| 2.2 | Browser dev fallback (encrypted localStorage) | VERIFIED |
-| 2.3 | Private key storage | PARTIAL (plaintext localStorage in Tauri) |
-| 2.4 | Tauri CSP / capabilities | PARTIAL (CSP `null`, no custom commands) |
-| 3.1 | SQLite backend | NOT_IMPLEMENTED |
-| 3.2 | Persistent chat history | NOT_IMPLEMENTED |
-| 4.1 | Multi-process test harness | NOT_IMPLEMENTED |
-| 4.2 | Real LLM provider smoke test | NOT_IMPLEMENTED |
-| 4.3 | Desktop E2E (Playwright) | NOT_IMPLEMENTED |
-| 4.4 | Cross-platform build matrix CI | NOT_VERIFIED |
-| 5.1 | API key handling hygiene | VERIFIED |
-| 5.2 | No log leakage | VERIFIED |
-| 5.3 | Process-level singletons | PARTIAL (documented constraint) |
-| 5.4 | Existing test suite | VERIFIED (re-run deferred to Phase 2) |
+| #   | Item                                          | Status                                    |
+| --- | --------------------------------------------- | ----------------------------------------- |
+| 1.1 | LAN discovery + LAN transport                 | NOT_IMPLEMENTED                           |
+| 1.2 | WebRTC DataChannel transport                  | NOT_IMPLEMENTED                           |
+| 1.3 | Wire format / FSM semantics                   | VERIFIED (in-process only)                |
+| 2.1 | OS keychain integration                       | NOT_IMPLEMENTED                           |
+| 2.2 | Browser dev fallback (encrypted localStorage) | VERIFIED                                  |
+| 2.3 | Private key storage                           | PARTIAL (plaintext localStorage in Tauri) |
+| 2.4 | Tauri CSP / capabilities                      | PARTIAL (CSP `null`, no custom commands)  |
+| 3.1 | SQLite backend                                | NOT_IMPLEMENTED                           |
+| 3.2 | Persistent chat history                       | NOT_IMPLEMENTED                           |
+| 4.1 | Multi-process test harness                    | NOT_IMPLEMENTED                           |
+| 4.2 | Real LLM provider smoke test                  | NOT_IMPLEMENTED                           |
+| 4.3 | Desktop E2E (Playwright)                      | NOT_IMPLEMENTED                           |
+| 4.4 | Cross-platform build matrix CI                | NOT_VERIFIED                              |
+| 5.1 | API key handling hygiene                      | VERIFIED                                  |
+| 5.2 | No log leakage                                | VERIFIED                                  |
+| 5.3 | Process-level singletons                      | PARTIAL (documented constraint)           |
+| 5.4 | Existing test suite                           | VERIFIED (re-run deferred to Phase 2)     |
 
 ---
 
@@ -257,6 +284,7 @@ Low risk / acceptable
 This is the staged plan I'll propose after this audit, awaiting your sign-off. **No code changes yet.**
 
 ### Phase 2 — Real Transport
+
 **Goal:** Replace the single-process `LoopbackHub` with a real transport that crosses process boundaries.
 **Order matters** — LAN first lets us validate the IPC + serialisation before adding WebRTC complexity.
 
@@ -278,6 +306,7 @@ This is the staged plan I'll propose after this audit, awaiting your sign-off. *
    - WebRTC manual signaling test using a paste-stub `SignalingChannel`.
 
 ### Phase 3 — Secure Storage
+
 **Goal:** API keys and private key live in the OS keychain on production builds.
 
 1. **3.1 OS keychain via `keyring` crate**
@@ -298,6 +327,7 @@ This is the staged plan I'll propose after this audit, awaiting your sign-off. *
    - Acceptance: external script blocked; only declared providers reachable.
 
 ### Phase 4 — Formal Persistence (SQLite)
+
 **Goal:** Conversations, matches, settings, block-list, chat history survive across restarts.
 
 1. **4.1 SQLite backend (`tauri-plugin-sql`)**
@@ -313,6 +343,7 @@ This is the staged plan I'll propose after this audit, awaiting your sign-off. *
    - Acceptance: close + reopen app → previous chat visible.
 
 ### Phase 5 — Real Environment Acceptance
+
 **Goal:** CI that catches real-world issues.
 
 1. **5.1 Multi-process harness** (Vitest + `child_process.fork`).
@@ -336,7 +367,7 @@ These need your direction before I start writing code:
 
 ## 10. What I Did Not Touch
 
-Per the Phase 1 instruction *"完成审计后停止，不要修改任何代码，先汇报结论和分阶段实施计划"*:
+Per the Phase 1 instruction _"完成审计后停止，不要修改任何代码，先汇报结论和分阶段实施计划"_:
 
 - **No source file modified.**
 - **No test modified.**

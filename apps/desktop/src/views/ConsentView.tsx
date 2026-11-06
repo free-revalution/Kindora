@@ -8,24 +8,44 @@
  *   - Disconnect — close without a verdict
  *   - Block     — decline + persist the peer's id to the local block list
  *
- * Sits on top of a `LiveMatchView`'s result: the user sees the match
- * outcome first, then chooses what to do. Until both sides accept, the
- * chat is locked.
+ * ## Phase B — the consent comes BEFORE the match
  *
- * The view consumes a `decide(decision, note?)` callback the parent
- * supplies (typically wrapping `ConsentOrchestrator.decide`). The view
- * is purely presentational — no transport, no LLM, no I/O.
+ * Before Phase B this screen sat on top of a `LiveMatchView`'s result:
+ * the user saw the compatibility analysis first, then decided. That
+ * order meant the peer's **full profile** had already been exchanged —
+ * the analysis was computed from it — before the user had agreed to
+ * anything.
+ *
+ * Task book § 五 B2 reverses it:
+ *
+ *   1. the public cards are exchanged (see `IdentifyView`);
+ *   2. the user decides, here, seeing only the peer's **public card**;
+ *   3. only after both sides accept are the authorised profiles
+ *      exchanged and the analysis run.
+ *
+ * So this view consumes a `PeerIntroduction`, not a `MatchOutcome`.
+ * There is no compatibility signal to show yet — and that is the
+ * honest state of the world at this point in the flow.
+ *
+ * The view is purely presentational — no transport, no LLM, no I/O.
  */
 
 import { useEffect, useRef, useState } from 'react';
-import type { MatchOutcome } from '@kindora/matching';
+import type { PeerIntroduction } from '@kindora/matching';
 import type { ConsentDecision, ConsentOutcome, ConsentState } from '@kindora/matching';
-import { summariseAnalysis } from '@kindora/matching';
-import { COMPATIBILITY_SIGNAL_KEYS, useTranslate, type TranslationKey } from '../i18n';
+import {
+  CONVERSATION_STYLE_KEYS,
+  SOCIAL_INTENT_SHORT_KEYS,
+  useTranslate,
+  type TranslationKey,
+} from '../i18n';
 
 export interface ConsentViewProps {
-  /** Match outcome from Phase 6 — needed to render the analysis header. */
-  readonly outcome: MatchOutcome;
+  /**
+   * The peer's public card — everything we know about them at the
+   * moment the user is asked to decide.
+   */
+  readonly peer: PeerIntroduction;
   /** Current consent state. The view disables buttons once terminal. */
   readonly state: ConsentState;
   /** Called when the user clicks Accept / Reject / Block. */
@@ -41,20 +61,18 @@ export interface ConsentViewProps {
 }
 
 export function ConsentView({
-  outcome,
+  peer,
   state,
   onDecide,
   onDisconnect,
   finalOutcome,
 }: ConsentViewProps) {
   const t = useTranslate();
-  const local = summariseAnalysis(outcome.localAnalysis);
   // "Terminal" means we hide the action buttons. This happens when:
   //   - A final outcome is set (state-machine finished), OR
   //   - The state itself is terminal (rejected / blocked / accepted_both)
   //     even before the outcome object is wired through.
-  const stateIsTerminal =
-    state === 'rejected' || state === 'blocked' || state === 'accepted_both';
+  const stateIsTerminal = state === 'rejected' || state === 'blocked' || state === 'accepted_both';
   const terminal = finalOutcome !== undefined || stateIsTerminal;
   const isBlocked = finalOutcome?.state === 'blocked' || state === 'blocked';
   const isRejected = finalOutcome?.state === 'rejected' || state === 'rejected';
@@ -73,14 +91,12 @@ export function ConsentView({
                   ? 'consent.eyebrowBlocked'
                   : isRejected
                     ? 'consent.eyebrowClosed'
-                    : 'consent.eyebrowMatchFound',
+                    : 'consent.eyebrowPeerFound',
             )}
           </p>
-          <h1 className="mt-1 text-3xl font-semibold tracking-tight">
-            {outcome.peerDisplayName}
-          </h1>
+          <h1 className="mt-1 text-3xl font-semibold tracking-tight">{peer.peerDisplayName}</h1>
           <p className="text-kindora-500 dark:text-kindora-400 mt-1 font-mono text-xs">
-            {outcome.peerAgentId.slice(0, 8)}…
+            {peer.peerAgentId.slice(0, 8)}…
           </p>
         </div>
         <button type="button" className="kindora-button-ghost" onClick={onDisconnect}>
@@ -88,48 +104,38 @@ export function ConsentView({
         </button>
       </header>
 
-      {/* Compatibility signal — quick recap so the user remembers the context. */}
-      <section className="kindora-card flex flex-col gap-2">
-        <p className="text-kindora-500 dark:text-kindora-400 text-xs uppercase tracking-wide">
-          {t('consent.compatibility')}
-        </p>
-        <p
-          className={`inline-flex w-fit items-center gap-1 rounded-full border px-3 py-1 text-sm ${signalClass(local.signalTone)}`}
-        >
-          {t(COMPATIBILITY_SIGNAL_KEYS[outcome.localAnalysis.compatibilitySignal])}
-        </p>
-      </section>
+      {/* The peer's public card — the only thing that has been shared
+          so far, and the basis of the decision. */}
+      <PublicCardSection peer={peer} />
 
       {/* Live status banner */}
-      {!terminal && (
-        <ConsentStatusBanner state={state} peerName={outcome.peerDisplayName} />
-      )}
+      {!terminal && <ConsentStatusBanner state={state} peerName={peer.peerDisplayName} />}
 
       {isTimedOut && (
         <section className="kindora-card flex flex-col gap-2">
-          <h2 className="text-rose-600 dark:text-rose-400 text-xs uppercase tracking-wide">
+          <h2 className="text-xs uppercase tracking-wide text-rose-600 dark:text-rose-400">
             {t('consent.peerNoResponse')}
           </h2>
           <p className="text-sm leading-relaxed">
-            {t('consent.peerNoResponseBody', { peer: outcome.peerDisplayName })}
+            {t('consent.peerNoResponseBody', { peer: peer.peerDisplayName })}
           </p>
         </section>
       )}
 
       {isAccepted && (
         <section className="kindora-card flex flex-col gap-2">
-          <h2 className="text-emerald-600 dark:text-emerald-400 text-xs uppercase tracking-wide">
+          <h2 className="text-xs uppercase tracking-wide text-emerald-600 dark:text-emerald-400">
             {t('consent.unlocked')}
           </h2>
           <p className="text-sm leading-relaxed">
-            {t('consent.unlockedBody', { peer: outcome.peerDisplayName })}
+            {t('consent.unlockedBody', { peer: peer.peerDisplayName })}
           </p>
         </section>
       )}
 
       {isBlocked && (
         <section className="kindora-card flex flex-col gap-2">
-          <h2 className="text-rose-600 dark:text-rose-400 text-xs uppercase tracking-wide">
+          <h2 className="text-xs uppercase tracking-wide text-rose-600 dark:text-rose-400">
             {t(finalOutcome?.blockedByLocal ? 'consent.blockedLocal' : 'consent.blockedByPeer')}
           </h2>
           <p className="text-sm leading-relaxed">
@@ -137,7 +143,7 @@ export function ConsentView({
               finalOutcome?.blockedByLocal
                 ? 'consent.blockedLocalBody'
                 : 'consent.blockedByPeerBody',
-              { peer: outcome.peerDisplayName },
+              { peer: peer.peerDisplayName },
             )}
           </p>
         </section>
@@ -153,6 +159,65 @@ export function ConsentView({
         />
       )}
     </main>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* Public card section                                                 */
+/* ------------------------------------------------------------------ */
+
+/**
+ * What the peer has shared so far.
+ *
+ * Phase B: the card carries the peer's nickname and — only if the peer
+ * authorised them — the social intent and the conversation style. The
+ * note underneath is the point of the whole screen: the rest of their
+ * profile is not here, and will not be shared unless the user agrees.
+ */
+function PublicCardSection({ peer }: { peer: PeerIntroduction }) {
+  const t = useTranslate();
+  const card = peer.peerCard;
+  if (!card) {
+    return (
+      <section className="kindora-card flex flex-col gap-2">
+        <p className="text-kindora-500 dark:text-kindora-400 text-xs uppercase tracking-wide">
+          {t('consent.publicCard')}
+        </p>
+        <p className="text-sm leading-relaxed">{t('consent.publicCardEmpty')}</p>
+      </section>
+    );
+  }
+  return (
+    <section className="kindora-card flex flex-col gap-3" data-testid="consent-public-card">
+      <p className="text-kindora-500 dark:text-kindora-400 text-xs uppercase tracking-wide">
+        {t('consent.publicCard')}
+      </p>
+      <dl className="flex flex-col gap-2 text-sm">
+        <div className="flex items-baseline justify-between gap-4">
+          <dt className="text-kindora-500 dark:text-kindora-400">{t('consent.cardNickname')}</dt>
+          <dd className="font-medium">{card.nickname}</dd>
+        </div>
+        <div className="flex items-baseline justify-between gap-4">
+          <dt className="text-kindora-500 dark:text-kindora-400">{t('consent.cardIntent')}</dt>
+          <dd className="text-right">
+            {card.socialIntent.length === 0
+              ? t('consent.cardHidden')
+              : card.socialIntent.map((i) => t(SOCIAL_INTENT_SHORT_KEYS[i])).join(' · ')}
+          </dd>
+        </div>
+        <div className="flex items-baseline justify-between gap-4">
+          <dt className="text-kindora-500 dark:text-kindora-400">{t('consent.cardStyle')}</dt>
+          <dd className="text-right">
+            {card.conversationStyle.length === 0
+              ? t('consent.cardHidden')
+              : card.conversationStyle.map((s) => t(CONVERSATION_STYLE_KEYS[s])).join(' · ')}
+          </dd>
+        </div>
+      </dl>
+      <p className="text-kindora-500 dark:text-kindora-400 text-xs leading-relaxed">
+        {t('consent.publicCardNote')}
+      </p>
+    </section>
   );
 }
 
@@ -264,21 +329,9 @@ function ConsentActions({
           {t('consent.block')}
         </button>
       </div>
-      <p className="text-kindora-500 dark:text-kindora-400 text-xs">
-        {t('consent.actionsNote')}
-      </p>
+      <p className="text-kindora-500 dark:text-kindora-400 text-xs">{t('consent.actionsNote')}</p>
     </section>
   );
-}
-
-function signalClass(tone: 'positive' | 'neutral' | 'cautious'): string {
-  if (tone === 'positive') {
-    return 'border-emerald-300 bg-emerald-50 text-emerald-800 dark:border-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-100';
-  }
-  if (tone === 'cautious') {
-    return 'border-rose-300 bg-rose-50 text-rose-800 dark:border-rose-700 dark:bg-rose-900/40 dark:text-rose-100';
-  }
-  return 'border-kindora-200 bg-kindora-50 text-kindora-800 dark:border-kindora-700 dark:bg-kindora-800/40 dark:text-kindora-100';
 }
 
 /* ------------------------------------------------------------------ */
@@ -286,8 +339,8 @@ function signalClass(tone: 'positive' | 'neutral' | 'cautious'): string {
 /* ------------------------------------------------------------------ */
 
 export interface LiveConsentViewProps {
-  /** The match outcome from Phase 6. */
-  readonly outcome: MatchOutcome;
+  /** The peer's public card — the basis of the decision. */
+  readonly peer: PeerIntroduction;
   /** Async function that starts the consent orchestrator. */
   readonly start: () => Promise<ConsentOutcome>;
   /** Async function called when the user clicks Accept / Reject / Block. */
@@ -297,13 +350,13 @@ export interface LiveConsentViewProps {
   /**
    * Optional callback fired when the consent reaches a terminal state
    * (accepted_both / rejected / blocked). The parent uses this to
-   * route to the chat (Phase 9) or back to home.
+   * route to the match (Phase 6) or back to home.
    */
   readonly onFinal?: (outcome: ConsentOutcome) => void;
 }
 
 export function LiveConsentView({
-  outcome,
+  peer,
   start,
   decide,
   onDisconnect,
@@ -328,7 +381,11 @@ export function LiveConsentView({
         if (cancelled) return;
         setState(outcome.state);
         setFinal(outcome);
-        if (outcome.state !== 'awaiting_decision' && outcome.state !== 'accepted_local' && outcome.state !== 'accepted_peer') {
+        if (
+          outcome.state !== 'awaiting_decision' &&
+          outcome.state !== 'accepted_local' &&
+          outcome.state !== 'accepted_peer'
+        ) {
           onFinalRef.current?.(outcome);
         }
       })
@@ -343,7 +400,8 @@ export function LiveConsentView({
   async function handleDecide(decision: ConsentDecision, note?: string): Promise<void> {
     // Optimistic local state update so the UI feels responsive; the
     // orchestrator's `decide()` will confirm.
-    if (decision === 'accept') setState((s) => (s === 'accepted_peer' ? 'accepted_both' : 'accepted_local'));
+    if (decision === 'accept')
+      setState((s) => (s === 'accepted_peer' ? 'accepted_both' : 'accepted_local'));
     if (decision === 'reject') setState('rejected');
     if (decision === 'block') setState('blocked');
     await decideRef.current(decision, note);
@@ -351,7 +409,7 @@ export function LiveConsentView({
 
   return (
     <ConsentView
-      outcome={outcome}
+      peer={peer}
       state={state}
       onDecide={handleDecide}
       onDisconnect={onDisconnect}

@@ -5,7 +5,7 @@
  */
 
 import { useEffect, useRef, useState } from 'react';
-import type { LLMProviderKind } from '@kindora/llm';
+import type { LLMErrorCode, LLMProviderKind } from '@kindora/llm';
 import {
   PROVIDER_PRESETS,
   presetFor,
@@ -15,8 +15,16 @@ import {
   hasStoredApiKey,
   loadStoredApiKey,
   testConnection,
+  describeLlmFailure,
 } from '../lib/llm-service';
-import { SUPPORTED_LOCALES, useI18n, useTranslate, type Locale } from '../i18n';
+import {
+  SUPPORTED_LOCALES,
+  useI18n,
+  useTranslate,
+  type Locale,
+  type Translate,
+  type TranslationKey,
+} from '../i18n';
 
 export interface SettingsProps {
   onClose: () => void;
@@ -45,10 +53,7 @@ type TestState =
  * rejection with nothing rendered.
  */
 type SaveState =
-  | { kind: 'idle' }
-  | { kind: 'saving' }
-  | { kind: 'ok' }
-  | { kind: 'error'; message: string };
+  { kind: 'idle' } | { kind: 'saving' } | { kind: 'ok' } | { kind: 'error'; message: string };
 
 /**
  * Outcome of removing the stored key.
@@ -56,16 +61,41 @@ type SaveState =
  * Separate from `SaveState` so "the key was removed" never renders as
  * "Saved. API key stored locally." — the two are opposites.
  */
-type ClearState =
-  | { kind: 'idle' }
-  | { kind: 'ok' }
-  | { kind: 'error'; message: string };
+type ClearState = { kind: 'idle' } | { kind: 'ok' } | { kind: 'error'; message: string };
 
 /** Provider selected before any saved config is known. */
 const DEFAULT_PROVIDER: LLMProviderKind = 'openai-compatible';
 
-function errorMessage(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
+/**
+ * The i18n key for each unified LLM error code (Phase E / E1).
+ *
+ * The provider layer classifies every failure into one of seven codes
+ * (`LLMError.code`); this is where each code becomes a sentence in the
+ * user's language. Anything that is *not* an LLM failure (a locked
+ * keychain, for instance) keeps its own message.
+ */
+const LLM_ERROR_KEYS: Record<LLMErrorCode, TranslationKey> = {
+  AUTHENTICATION_ERROR: 'llm.error.auth',
+  RATE_LIMIT_ERROR: 'llm.error.rateLimit',
+  TIMEOUT_ERROR: 'llm.error.timeout',
+  NETWORK_ERROR: 'llm.error.network',
+  INVALID_RESPONSE: 'llm.error.invalidResponse',
+  PROVIDER_ERROR: 'llm.error.provider',
+  ABORTED: 'llm.error.aborted',
+};
+
+/**
+ * Turn a failure into something the screen can show.
+ *
+ * A classified LLM failure shows a localized sentence that says what to do,
+ * followed by the provider's own wording in brackets — the technical detail
+ * is what a bug report needs, and dropping it would lose the HTTP status.
+ * Everything else (a locked keychain, for instance) keeps its own message.
+ */
+function errorMessage(err: unknown, t: Translate): string {
+  const failure = describeLlmFailure(err);
+  if (!failure.code) return failure.message;
+  return `${t(LLM_ERROR_KEYS[failure.code])} (${failure.message})`;
 }
 
 export function Settings({ onClose, onSaved }: SettingsProps) {
@@ -141,8 +171,7 @@ export function Settings({ onClose, onSaved }: SettingsProps) {
 
   const preset = presetFor(provider);
   const needsKey = preset.requiresApiKey;
-  const canSave =
-    model.trim().length > 0 && baseUrl.trim().length > 0 && save.kind !== 'saving';
+  const canSave = model.trim().length > 0 && baseUrl.trim().length > 0 && save.kind !== 'saving';
 
   function switchProvider(next: LLMProviderKind) {
     setProvider(next);
@@ -181,7 +210,7 @@ export function Settings({ onClose, onSaved }: SettingsProps) {
       // "no LLM" state it read at startup.
       onSaved?.();
     } catch (err) {
-      setSave({ kind: 'error', message: errorMessage(err) });
+      setSave({ kind: 'error', message: errorMessage(err, t) });
     }
   }
 
@@ -195,7 +224,7 @@ export function Settings({ onClose, onSaved }: SettingsProps) {
       setClear({ kind: 'ok' });
       onSaved?.();
     } catch (err) {
-      setClear({ kind: 'error', message: errorMessage(err) });
+      setClear({ kind: 'error', message: errorMessage(err, t) });
     }
   }
 
@@ -216,7 +245,7 @@ export function Settings({ onClose, onSaved }: SettingsProps) {
       const reply = await testConnection({ provider, baseUrl, model }, key);
       setTest({ kind: 'ok', reply: reply.trim() });
     } catch (err) {
-      setTest({ kind: 'error', message: errorMessage(err) });
+      setTest({ kind: 'error', message: errorMessage(err, t) });
     }
   }
 
@@ -328,17 +357,23 @@ export function Settings({ onClose, onSaved }: SettingsProps) {
             >
               {t('settings.apiKeyClear')}
             </button>
-            {clear.kind === 'ok' && (
-              <p className="text-xs text-emerald-700 dark:text-emerald-200">
-                ✓ {t('settings.apiKeyCleared')}
-              </p>
-            )}
-            {clear.kind === 'error' && (
-              <p className="text-xs text-rose-600 dark:text-rose-400">
-                ✗ {t('settings.apiKeyClearFailed', { message: clear.message })}
-              </p>
-            )}
           </div>
+        )}
+        {/* The clear result lives OUTSIDE the `hasExistingKey` block on purpose.
+            `handleClearKey` sets `hasExistingKey` to false the moment the key
+            is gone, so a confirmation rendered inside that block is unmounted
+            by its own success: the key was deleted and the user was told
+            nothing. Same for the error case — it must survive the state change
+            that follows it. */}
+        {needsKey && clear.kind === 'ok' && (
+          <p className="text-xs text-emerald-700 dark:text-emerald-200">
+            ✓ {t('settings.apiKeyCleared')}
+          </p>
+        )}
+        {needsKey && clear.kind === 'error' && (
+          <p className="text-xs text-rose-600 dark:text-rose-400">
+            ✗ {t('settings.apiKeyClearFailed', { message: clear.message })}
+          </p>
         )}
 
         <div className="border-kindora-100 dark:border-kindora-800 flex items-center justify-between border-t pt-4">
