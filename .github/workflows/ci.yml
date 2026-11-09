@@ -69,6 +69,36 @@ name: CI
 # slow and flaky on a CI runner; installers are not published anyway (see
 # README § Status).
 
+# ## What changed and why (the P0-1 CI remediation, 2026-11-07)
+#
+# The task book (`docs/修复.md` § 三, P0-1「修复 GitHub Actions，让 Rust 检查
+# 真正执行」) required the Rust gates to actually run instead of being
+# skipped. They were not running:
+#
+#   In the latest `main` run (42228916649, head `f874944`) the `build` job
+#   failed at step 13, "Rust Clippy", and steps 14–18 — Rust lib check,
+#   Rust unit tests, LAN end-to-end, LAN protocol end-to-end, LAN
+#   resource-limit — were reported as `skipped`. GitHub Actions skips the
+#   remaining steps of a job once one of them fails, so a single early
+#   failure silently disabled five gates.
+#
+# The cause was the build environment, not the code: `apps/desktop/src-tauri`
+# depends on `tauri` with its default features (`wry` → `webkit2gtk`), and
+# `webkit2gtk-sys`'s build script aborts the whole build when its
+# pkg-config probe for `webkit2gtk-4.1` fails. The `build` job installed
+# **no** Linux system libraries; the sibling `tauri-build` job installed
+# the WebKitGTK stack and compiled the same crate successfully on the same
+# runner image.
+#
+# The fix is a single shared composite action,
+# `.github/actions/setup-tauri-linux`, called by both jobs, so the list of
+# system packages exists once and the two jobs cannot drift apart.
+#
+# Nothing else was changed: no Rust step was deleted, no step was given
+# `continue-on-error`, and no failure was made conditional. Every Rust
+# gate remains blocking. The full analysis, including what could *not* be
+# verified locally, is in `docs/audits/P0_1_CI_REMEDIATION_REPORT.md`.
+
 on:
   push:
     branches: [main]
@@ -109,6 +139,27 @@ jobs:
           # the same channel here keeps local and CI on one toolchain.
           toolchain: stable
           components: rustfmt, clippy
+
+      # --- P0-1: the Rust gates need the Linux system libraries -----------
+      # `apps/desktop/src-tauri` depends on `tauri` with its **default**
+      # features, which pull in `wry` → `webkit2gtk` → `webkit2gtk-sys`.
+      # That crate's build script runs a pkg-config probe for
+      # `webkit2gtk-4.1` and calls `process::exit(1)` when the probe
+      # fails, so cargo exits 101 and every Rust step in this job dies.
+      #
+      # This job used to install **no** system libraries at all, so the
+      # first step that actually compiles the dependency tree — Rust
+      # Clippy — failed, and GitHub Actions skipped the five Rust steps
+      # behind it (Rust lib check, Rust unit tests, LAN e2e, LAN protocol
+      # e2e, LAN resource-limit). The five Rust gates had therefore never
+      # run once in CI.
+      #
+      # The same prerequisite list is used by the `tauri-build` job, which
+      # compiles the same crate successfully on the same runner image. It
+      # is now a composite action so the two jobs cannot drift apart.
+      # Details: docs/audits/P0_1_CI_REMEDIATION_REPORT.md
+      - name: Setup Tauri Linux prerequisites
+        uses: ./.github/actions/setup-tauri-linux
 
       - name: Cache cargo registry & target
         uses: actions/cache@v4
@@ -252,21 +303,12 @@ jobs:
 
       # Tauri v2 on Ubuntu needs the WebKitGTK stack, the appindicator
       # tray library and a few build essentials. The list is the one from
-      # https://tauri.app/start/prerequisites/ for Debian/Ubuntu.
-      - name: Install Tauri Linux prerequisites
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libwebkit2gtk-4.1-dev \
-            libayatana-appindicator3-dev \
-            librsvg2-dev \
-            patchelf \
-            build-essential \
-            curl \
-            wget \
-            file \
-            libssl-dev \
-            libxdo-dev
+      # https://tauri.app/start/prerequisites/ for Debian/Ubuntu, and it
+      # lives in a composite action so that the `build` job (Rust Clippy +
+      # Rust tests) and this job always compile against the same system
+      # libraries.
+      - name: Setup Tauri Linux prerequisites
+        uses: ./.github/actions/setup-tauri-linux
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
