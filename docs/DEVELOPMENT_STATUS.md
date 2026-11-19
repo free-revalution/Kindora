@@ -4,9 +4,159 @@
 people land, and a README that overstates what works is worse than no README at
 all. Everything below is stated with the evidence that supports it.
 
+## 2026-11-19 (cont. 3) — D4 close + Rust outbound session + B1 pool
+
+What this continuation **did**:
+
+- **D4**: removed WebView `agent_sign`. Signing IPC is only
+  `agent_sign_envelope` (type+payload). Key check is
+  `agent_key_matches_public_key` (fixed probe in Rust).
+- **Rust-authoritative auth**: `outbound_session.rs` + `session_*`
+  commands; `agent_sign_envelope` reads phase/trust/consent from
+  `AppState.outbound` (not WebView args).
+- **Startup**: best-effort `agent_migrate_keychain`; B1 opens Rust
+  SQLite pool when policy is `open-canonical` (`db_status` IPC).
+- **Fail-closed**: `buildSigningBundle` throws instead of returning a
+  null signer under Tauri.
+- A-12 disable-list tests updated (69 Rust lib tests green).
+
+Still open: GUI H/J VERIFIED; P0-2B B2+ `db_*` + retire plugin SQL;
+inbound Rust session processor still not on LAN hot path; RES-13 CI.
+
+## 2026-11-19 (cont. 2) — P0-2A A10 transport + bidirectional fingerprint UI
+
+What this continuation **did**:
+
+- **A10 transport**: `PairingSession` accepts `authorizedSign`; when set,
+  `signOutbound` calls it instead of `signer.sign(bytes)`. Desktop
+  `buildSigningBundle` / `toConnectInput` / `toLanInput` wire
+  `createAuthorizedSignFn` → Rust `agent_sign_envelope` under Tauri.
+- **Auth state**: mutable `EnvelopeAuthState` on the connect handle;
+  joiner auto-marks verified after identify; host gets
+  `PeerFingerprintConfirmView` before consent; mutual consent advances
+  phase for MLA-gated chat types.
+- **IBR-5 UI**: Join panel shows local fingerprint for the host;
+  host confirm screen after identify; i18n en/zh keys added.
+- Loopback / LAN / WebRTC PairingSession construction all pass
+  `authorizedSign` when available.
+
+Still open (partially addressed in cont. 3): GUI VERIFIED; B2+ DB;
+RES-13.
+
+## 2026-11-19 (cont.) — P0-2A gaps + P0-2B B0 scaffolding
+
+What this continuation **did**:
+
+- **A2 / A11**: `signing-input-vectors.json` + Vitest golden test; Rust
+  `golden_vectors_match_shared_fixture` now has a fixture on disk.
+- **A8 IPC**: `agent_sign_envelope` Tauri command (MLA grant in
+  `AppState`, `RfdConfirmer` for chat family); TS
+  `authorized-envelope.ts` + `createAuthorizedEnvelopeSigner` alias.
+- **A6 TS glue**: `native-fingerprint.ts` + invoke mocks test.
+- **A-12**: `disable_list_tests.rs` + `registered_webview_commands()`.
+- **P0-2B B0**: `db_path.rs` (§7.1.5 candidates + `DbProbe` classification).
+
+Still open (superseded in part by cont. 2): full B0 migration/open not
+wired; GUI acceptance still open.
+
+## 2026-11-19 — P0-2A full push (code complete; GUI/CI verification open)
+
+What this round **did**:
+
+- **Foundation**: A-39 MSRV 1.90; A0/A1/A-RFD/A-LLM-0; A-40/A-42.
+- **A2–A5**: `envelope` signing input; `Keychain` trait; M1 migration
+  (`keyring_migration`, HD-1=abort / HD-2=confirm); secret allow-list +
+  `secret_exists`; **`secret_get` / `secret_list` / `agent_key_get` removed
+  from IPC**.
+- **A6–A9 / A-MLA**: fingerprint + trust store; inbound session gates;
+  `agent_sign_envelope` five gates + `SendGrant`; `rfd` confirmer;
+  sensitive_guard; A-MLA-T matrix (exhaust/expire/revoke/concurrent).
+- **A-LLM / A-SSRF**: `llm_chat` / `llm_test_connection`; SSRF unit tests;
+  TS Settings/llm-service use exists + Rust chat (no plaintext key in Tauri).
+- **A-41**: CI job `rust-e3b` on ubuntu/macos/windows (D-3 = hosted).
+- **A-MB**: checklist at [P0_2A_MB_CHECKLIST.md](security/P0_2A_MB_CHECKLIST.md).
+- Rust lib **53** passed (incl. MLA-T); desktop **201** passed after TS glue.
+
+What this round **did not** do / must not over-claim:
+
+- **GUI VERIFIED** (H-1…H-9 / J-1…J-9) — needs a real two-device session.
+- **RES-13 closed** — needs green `rust-e3b` on all three OSes in CI.
+- **Live LLM** credentials still untested end-to-end.
+- **P0-2B** not started (by design, after P0-2A merge).
+- RES-11 (`zenity` on Linux) remains an accepted residual risk.
+
+## 2026-11-18 — Interest taxonomy + WebRTC Mode B / QR / recovery
+
+What this round **did**:
+
+- **Interest-tag taxonomy** (`packages/agent/src/interest-taxonomy.ts`):
+  canonical ids + cross-locale aliases (e.g. AI / 人工智能 / ml → `ai`).
+  `computeHeuristics` Jaccard now runs on canonicalised interests so
+  localisation does not hide overlap; `analyzeMatch` seeds empty
+  `commonGround` from that overlap when the model already claims a match
+  (never invents a signal when the parse says `none`). Heuristics also
+  score conversation-style overlap; `AnalyzeMatchResult.heuristics` is
+  shown as overlap bars on MatchView.
+- Create-Agent suggestion chips are **category-grouped** and driven by the
+  same taxonomy (tech / creative / outdoors / games / learning / social),
+  with i18n labels that still alias-match in heuristics.
+- Host fingerprint has a **Copy fingerprint** control (LAN / loopback /
+  WebRTC host).
+- **WebRTC DataChannel transport** (`packages/transport/src/webrtc-transport.ts`)
+  with Mode B **manual SDP copy/paste** (`manual-signalling.ts`). Without
+  `RTCPeerConnection` or a signalling adapter, `connect()` still throws
+  typed `WebRtcNotImplementedError` (capability honesty preserved).
+- ConnectView **WebRTC** transport toggle + host/join blob UI; desktop glue
+  in `webrtc-connect-service.ts` now owns a **`ConnectionStateMachine`**
+  (connecting / connected / disconnected / failed — no auto-reconnect for
+  Mode B). Runtime `supportsWebRtc` follows `RTCPeerConnection`.
+- **Same-device lab**: `BroadcastSignallingAdapter` + Connect “同机双窗 /
+  Same device” mode so two windows on one PC pair without SDP paste.
+- **Pairing QR + link** (`PairingLink` + zero-dep `qr-matrix.ts`): host
+  shows a scannable QR and `kindora://pair?…`; Join accepts that URL.
+- Settings **Transport diagnostics**: WebRTC availability + local
+  `runWebRtcLoopbackSelfTest` (in-process offer/answer; never leaves device).
+- **Configurable ICE servers** (STUN/TURN URLs) in Settings; WebRTC connect
+  reads them. **60s connect timeout** marks the connection lifecycle failed.
+- **Unsaved LLM settings** confirm-on-leave in Settings.
+- **Dead-peer recovery**: connection bar “Back to home” when the link drops
+  and reconnect is unavailable (WebRTC); ICE/DataChannel failures close the
+  transport; `beforeunload` warns mid-session.
+- **Keychain error screen**: `classifyAgentKeyError` keeps the structured
+  kind; the screen shows i18n body + unlock/deny/missing hints and a
+  “create new agent” path for missing/corrupt keys.
+- **Icebreaker / chat-assist heuristic seed**: empty LLM topics or
+  suggestions fall back to `recommendedTopics` or taxonomy-shared interest
+  starters (local wording).
+- **Match / Icebreaker / Chat-assist honesty**: degraded analysis banner;
+  peer timeout copy; icebreaker “fallback starters” note; Ask My Agent
+  uses a soft notice (not a hard error) for heuristic-seed drafts.
+- **WebRTC restart**: failed / disconnected Mode B offers Reconnect,
+  which mints a fresh offer (host) or resets the join form — not silent
+  ICE restart.
+- **`agent_sign` (P0-2 partial)**: Rust ECDSA P-256 signs canonical bytes;
+  desktop connect uses it when the key is in the OS keychain.
+- **WebRTC Mode C**: HTTP long-poll signalling adapter + local helper server;
+  Settings stores the signalling base URL.
+- Agent suite **161** cases green; matching **87**; desktop **200** cases
+  green; transport **217** green (includes Mode C HTTP signalling).
+- Earlier same day: shell UI, Demo, UI-01/02/03, Ollama CSP — see prior notes.
+
+What this round **did not** do / still open:
+
+- **No phase marked `VERIFIED`.** Two-device GUI LAN / WebRTC acceptance still unrun
+  (same-device lab is the single-PC path).
+- **P0-2A incomplete.** Foundation (MSRV / deps / JCS / CI) is in; still
+  missing envelope auth gates, keyring service migration (HD-1/HD-2),
+  LLM-via-Rust end-to-end, IPC ACL, A-41 E3b.
+- **Live LLM providers** still need real credentials to verify.
+- **Real SQLite restart path** in a packaged app still needs a hand drive.
+- Mode C signalling is **self-hosted only** (`tools/kindora-signalling-server.mjs`);
+  TURN still requires your own URL; no Kindora-operated relay.
+
 - Last reviewed against `main` at commit `020b15d`, plus the **uncommitted
-  Phase B – Phase G remediation work** in the working tree (see
-  [REMEDIATION_PROGRESS.md](REMEDIATION_PROGRESS.md)).
+  Phase B – Phase G remediation work** and the **2026-11-18 UI ship** in the
+  working tree (see [REMEDIATION_PROGRESS.md](REMEDIATION_PROGRESS.md)).
 - Test counts are a **static inventory of the test cases declared in the source
   tree** — counted, not inferred. They are _not_ a claim that the suite was
   run and passed at this commit; the CI badge in the README is the record of
@@ -473,13 +623,13 @@ it in the real thing:**
 
 | Capability                                    | Evidence                                                                                                                                                                                                                                                                                                        |
 | --------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| WebRTC / cross-network pairing                | `packages/transport/src/webrtc-transport.ts` — `connect()` / `send()` / `onMessage()` / `onClose()` all throw a typed `WebRtcNotImplementedError` (stable code `WEBRTC_NOT_IMPLEMENTED`); there is **no code path** in which `connect()` resolves, so a fake "connected" state cannot occur. **Same-LAN only.** |
+| Full P0-2A (envelope auth gates / keyring migration / LLM-via-Rust) | `agent_sign` hot path ships; remaining P0-2A items are still open (see Known limitations).                                                                                                                                                                                                                       |
 | TLS on the LAN transport                      | The TCP path is still plaintext TCP. The **payload** is encrypted by the session cipher, but the envelope header is not.                                                                                                                                                                                        |
-| A Rust-side signer (`agent_sign`)             | The private key is read back into the webview to sign there. The Rust side only stores and returns the key (`apps/desktop/src-tauri/src/secrets.rs`); it cannot sign yet.                                                                                                                                       |
 | A non-extractable identity key in the browser | Browser dev mode still keeps the private key in `localStorage` (`privateKeyStorage.kind === 'dev-localstorage'`). A non-extractable WebCrypto key in IndexedDB is the real fix.                                                                                                                                 |
-| QR-code pairing                               | `packages/transport/src/qr-payload.ts` has the payload helpers; there is no UI for them.                                                                                                                                                                                                                        |
+| Kindora-hosted signalling / public TURN       | Mode C HTTP long-poll + `tools/kindora-signalling-server.mjs` are self-hosted only; Settings accepts custom TURN URLs. No Kindora-operated relay.                                                                                                                                                              |
+| Silent WebRTC ICE restart                     | Failed / disconnected Mode B/C offer a UI Reconnect (fresh SDP / room), not in-place ICE restart.                                                                                                                                                                                                               |
 | Releases / installers                         | No git tags, no published releases. The **installer is now buildable** — `pnpm -C apps/desktop tauri build` produces `Kindora.app` and `Kindora_0.1.0_aarch64.dmg` — but nothing is published, and there is no signed build.                                                                                    |
-| DHT / rendezvous / relay / TURN               | Not started.                                                                                                                                                                                                                                                                                                    |
+| DHT / rendezvous / relay                      | Not started.                                                                                                                                                                                                                                                                                                    |
 
 ---
 
@@ -510,10 +660,11 @@ These are current, real, and worth knowing before you rely on the software.
    but the envelope **header** (protocol, type, sender, message id, timestamp)
    and the **signature** are still in the clear, so an observer can see that
    two agents are talking and how much.
-2. **The private key is read back into the webview to sign.** It is stored in
-   the OS keychain, and it is imported into WebCrypto as non-extractable, but
-   it crosses the Rust→JS boundary in the clear on the way. A Rust-side
-   `agent_sign` command needs the `p256` crate and is not implemented.
+2. **Native signing is partial.** Desktop connect prefers Rust `agent_sign`
+   when the identity key is in the OS keychain (private key is not attached
+   for signing). Full P0-2A still missing: envelope auth gates, keyring
+   service migration, LLM keys never entering the webview, IPC ACL. Browser
+   dev mode still signs in JS with a `localStorage` key.
 3. **Browser dev mode keeps the private key in `localStorage`.** There is no
    OS keychain without the Tauri runtime, so the record is tagged
    `dev-localstorage`. The shipped desktop app uses the keychain.

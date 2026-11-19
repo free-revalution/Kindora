@@ -55,6 +55,8 @@ describe('@kindora/agent — analyzeMatch', () => {
     expect(result.analysis.commonGround).toContain('typescript');
     expect(result.rawResponse).toBe(VALID_JSON);
     expect(result.estimatedTokens).toBeGreaterThan(0);
+    expect(result.heuristics.interestScore).toBeGreaterThan(0);
+    expect(result.heuristics.compositeScore).toBeGreaterThan(0);
   });
 
   it('sends exactly one system + one user message to the LLM', async () => {
@@ -131,6 +133,43 @@ describe('@kindora/agent — analyzeMatch', () => {
     expect(result.degraded).toBe(true);
     expect(result.analysis.compatibilitySignal).toBe('none');
     expect(result.analysis.explanation).toMatch(/could not be parsed/i);
+  });
+
+  it('seeds commonGround from taxonomy overlap when the model leaves it empty', async () => {
+    const provider = fakeProvider(
+      JSON.stringify({
+        compatibilitySignal: 'moderate',
+        commonGround: [],
+        recommendedTopics: ['side projects'],
+        potentialFriction: [],
+        explanation: ' overlapping tech interests.',
+      }),
+    );
+    const result = await analyzeMatch(provider, {
+      selfProfile: makeProfile({ interests: ['AI', 'hiking'] }),
+      peerProfile: makeProfile({ nickname: 'sam', interests: ['人工智能', 'hiking'] }),
+    });
+    expect(result.analysis.compatibilitySignal).toBe('moderate');
+    // Prefer the local profile's wording, not the canonical id.
+    expect(result.analysis.commonGround).toEqual(expect.arrayContaining(['AI', 'hiking']));
+  });
+
+  it('does not invent commonGround when the signal is none', async () => {
+    const provider = fakeProvider(
+      JSON.stringify({
+        compatibilitySignal: 'none',
+        commonGround: [],
+        recommendedTopics: [],
+        potentialFriction: [],
+        explanation: 'No fit.',
+      }),
+    );
+    const result = await analyzeMatch(provider, {
+      selfProfile: makeProfile({ interests: ['AI'] }),
+      peerProfile: makeProfile({ nickname: 'sam', interests: ['人工智能'] }),
+    });
+    expect(result.analysis.compatibilitySignal).toBe('none');
+    expect(result.analysis.commonGround).toEqual([]);
   });
 
   it('forwards an abort signal to the LLM provider', async () => {

@@ -13,6 +13,8 @@ export interface SecretStore {
   set(key: string, value: string): Promise<void>;
   /** Read a secret. Returns null if missing. */
   get(key: string): Promise<string | null>;
+  /** True when a value exists for `key` (optional; Tauri uses this instead of `get`). */
+  exists?(key: string): Promise<boolean>;
   /** Remove a secret. No-op if missing. */
   delete(key: string): Promise<void>;
 }

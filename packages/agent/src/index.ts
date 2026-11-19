@@ -82,6 +82,16 @@ export {
 export { renderProfileContext, type ProfileContextOptions } from './profile-context';
 export { computeHeuristics, renderHeuristics, type HeuristicHints } from './heuristics';
 export {
+  INTEREST_TAXONOMY,
+  INTEREST_CATEGORY_ORDER,
+  normaliseInterestToken,
+  canonicalInterestSet,
+  displayLabelsForSharedInterests,
+  interestsInCategory,
+  type InterestCategoryId,
+  type InterestTag,
+} from './interest-taxonomy';
+export {
   buildMatchContext,
   buildMatchContextDetailed,
   renderMatchUserMessage,

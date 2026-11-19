@@ -58,6 +58,20 @@ import {
 } from '@kindora/protocol';
 import type { MessageHandler, Transport } from './index';
 import { WireRateLimiter, type WireRateLimiterOptions } from './wire-rate-limiter';
+
+/**
+ * P0-2A / A10 — full-envelope authorisation + signing hook.
+ *
+ * The transport package stays free of Tauri; the desktop app supplies
+ * an implementation that invokes Rust `agent_sign_envelope`. Rust may
+ * mint a fresh `messageId` / `timestamp`; callers must treat the
+ * returned envelope as authoritative.
+ */
+export type AuthorizedEnvelopeSignFn = (args: {
+  readonly typeName: string;
+  readonly payload: unknown;
+  readonly peerAgentId: string | null;
+}) => Promise<KsaMessage>;
 import { type PairingCodeOptions, generatePairingCode, normalisePairingCode } from './pairing-code';
 import { fingerprintsMatch, derivePairingFingerprint } from './pairing-fingerprint';
 import {
@@ -165,6 +179,15 @@ export interface PairingSessionOptions {
    */
   readonly signer?: EnvelopeSigner | null;
   /**
+   * P0-2A / A10 — optional authorised envelope signer.
+   *
+   * When set, every outbound envelope is built and signed through this
+   * callback (desktop wires it to Rust `agent_sign_envelope` with the
+   * five authorisation gates). The byte-level `signer.sign()` path is
+   * skipped. When unset, behaviour matches the pre-A10 `signer` path.
+   */
+  readonly authorizedSign?: AuthorizedEnvelopeSignFn | null;
+  /**
    * How many inbound signature failures to tolerate before the session
    * tears the connection down with `closeReason = 'signature-invalid'`.
    * Defaults to 3.
@@ -225,6 +248,8 @@ export class PairingSession {
   private readonly guardSensitiveFields: boolean;
   /** Phase A / A2 — the local signer, or null when signing is off. */
   private readonly signer: EnvelopeSigner | null;
+  /** P0-2A / A10 — authorised full-envelope signer, or null. */
+  private readonly authorizedSign: AuthorizedEnvelopeSignFn | null;
   /** Phase A / A2 — how many bad signatures we tolerate. */
   private readonly maxSignatureFailures: number;
   /**
@@ -279,6 +304,7 @@ export class PairingSession {
         : (options.rateLimiter ?? new WireRateLimiter(options.rateLimiterOptions));
     this.guardSensitiveFields = options.guardSensitiveFields ?? true;
     this.signer = options.signer ?? null;
+    this.authorizedSign = options.authorizedSign ?? null;
     this.maxSignatureFailures = Math.max(1, options.maxSignatureFailures ?? 3);
     // Phase A / A3 — the replay guard. `replayGuard: null` disables it
     // outright; `replayGuardOptions: null` does the same; otherwise we
@@ -1009,9 +1035,23 @@ export class PairingSession {
    * identically on both sides.
    */
   private async signOutbound(message: KsaMessage): Promise<KsaMessage> {
+    const validated = validateEnvelope(message);
+    // P0-2A / A10 — prefer the authorised path when the desktop has
+    // wired Rust `agent_sign_envelope`. Rust rebuilds messageId /
+    // timestamp under the five gates; the returned envelope is wire-ready.
+    if (this.authorizedSign) {
+      const peerAgentId =
+        validated.type === 'hello'
+          ? null
+          : (this.peerAgentIdFromHello ?? this.snapshot.peerAgentId ?? null);
+      return this.authorizedSign({
+        typeName: validated.type,
+        payload: validated.payload,
+        peerAgentId,
+      });
+    }
     const signer = this.signer;
     if (!signer) return message;
-    const validated = validateEnvelope(message);
     // The signature binds the message to the session: the sender signs
     // with the **peer's** agent id, the peer verifies with **our** id.
     //

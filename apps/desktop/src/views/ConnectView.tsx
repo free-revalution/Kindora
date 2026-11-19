@@ -1,26 +1,26 @@
 /**
  * ConnectView — Phase 6 entry point for pairing.
  *
- * Two top-level modes:
- *   - Loopback (browser dev / single-machine tests): in-process pairing
- *     via `LoopbackHub`. Always available.
- *   - LAN (Tauri runtime): real UDP discovery + TCP message channel.
- *     Requires the Tauri runtime (`window.__TAURI_INTERNALS__` present).
+ * Transport modes:
+ *   - Loopback: in-process pairing via `LoopbackHub` (browser / single-machine).
+ *   - LAN: UDP discovery + TCP (Tauri runtime only).
+ *   - WebRTC: DataChannel + manual SDP copy/paste (cross-network Mode B).
  *
  * Within each transport:
- *   - Host:  generate a 6-char code, show it prominently, wait for peer
- *   - Join:  accept a typed code, attempt to pair
- *
- * On a successful host pair (peer arrived), the view transitions
- * out via `onConnected(handle)` with a `ConnectHandle` ready to run.
+ *   - Host / Join flows as before; WebRTC adds blob exchange UI.
  *
  * 开发手册.md § 18, § 44, Phase 6 + Phase 13.
  */
 
-import { useEffect, useRef, useState, type FormEvent } from 'react';
+import { useEffect, useRef, useState, type FocusEvent, type FormEvent } from 'react';
 import type { MatchOrchestrator } from '@kindora/matching';
 import type { ConnectionState } from '@kindora/transport';
-import { formatPairingFingerprint, type PairingSession } from '@kindora/transport';
+import {
+  decodeQrPayload,
+  formatPairingFingerprint,
+  type PairingSession,
+} from '@kindora/transport';
+import { PairingLink } from '../components/PairingLink';
 import { startHost, startJoin, toConnectInput, type ConnectHandle } from '../lib/connect-service';
 import {
   isLanAvailable,
@@ -29,11 +29,20 @@ import {
   toLanInput,
   type LanConnectHandle,
 } from '../lib/lan-connect-service';
+import {
+  isWebRtcConnectAvailable,
+  isWebRtcLabAvailable,
+  isWebRtcServerSignallingAvailable,
+  startWebRtcHost,
+  startWebRtcJoin,
+  type WebRtcConnectHandle,
+  type WebRtcSignallingMode,
+} from '../lib/webrtc-connect-service';
 import { ConnectionStatus } from './ConnectionStatus';
 import { useTranslate } from '../i18n';
 
 export type ConnectMode = 'host' | 'join';
-export type TransportMode = 'loopback' | 'lan';
+export type TransportMode = 'loopback' | 'lan' | 'webrtc';
 
 export interface ConnectViewProps {
   /** Whether the LLM is configured. Pairing without an LLM is meaningless. */
@@ -59,9 +68,10 @@ export function ConnectView({
   const [mode, setMode] = useState<ConnectMode>('host');
   const [transport, setTransport] = useState<TransportMode>(isLanAvailable() ? 'lan' : 'loopback');
   const lanAvailable = isLanAvailable();
+  const webrtcAvailable = isWebRtcConnectAvailable();
 
   return (
-    <main className="mx-auto flex w-full max-w-2xl flex-col gap-6 px-6 py-10">
+    <main className="kindora-page">
       <header className="flex items-start justify-between">
         <div>
           <p className="text-kindora-500 dark:text-kindora-400 text-xs uppercase tracking-wide">
@@ -105,7 +115,7 @@ export function ConnectView({
             {t('connect.join')}
           </button>
         </div>
-        <div className="ml-auto flex gap-2">
+        <div className="ml-auto flex flex-wrap justify-end gap-2">
           <button
             type="button"
             className={`kindora-toggle ${transport === 'lan' ? 'kindora-toggle-active' : 'kindora-toggle-idle'}`}
@@ -114,6 +124,17 @@ export function ConnectView({
             title={lanAvailable ? t('connect.lanTitle') : t('connect.lanUnavailableTitle')}
           >
             {t('connect.lan')}
+          </button>
+          <button
+            type="button"
+            className={`kindora-toggle ${transport === 'webrtc' ? 'kindora-toggle-active' : 'kindora-toggle-idle'}`}
+            onClick={() => setTransport('webrtc')}
+            disabled={!webrtcAvailable}
+            title={
+              webrtcAvailable ? t('connect.webrtcTitle') : t('connect.webrtcUnavailableTitle')
+            }
+          >
+            {t('connect.webrtc')}
           </button>
           <button
             type="button"
@@ -126,7 +147,13 @@ export function ConnectView({
         </div>
       </div>
 
-      {mode === 'host' ? (
+      {transport === 'webrtc' ? (
+        mode === 'host' ? (
+          <WebRtcHostPanel llmReady={llmReady} onConnected={onConnected} />
+        ) : (
+          <WebRtcJoinPanel llmReady={llmReady} onConnected={onConnected} />
+        )
+      ) : mode === 'host' ? (
         <HostPanel llmReady={llmReady} transport={transport} onConnected={onConnected} />
       ) : (
         <JoinPanel llmReady={llmReady} transport={transport} onConnected={onConnected} />
@@ -178,6 +205,10 @@ function useCloseReasonError(
       }
       if (snap.closeReason === 'peer-closed') {
         onError(t('connect.peerDisconnected'));
+        return;
+      }
+      if (snap.closeReason === 'webrtc-connect-timeout') {
+        onError(t('connect.webrtcTimeout'));
       }
     });
   }, [session, onError, t]);
@@ -237,6 +268,24 @@ function useLanConnectionState(handle: LanConnectHandle | null): {
   return { state, reconnect, error };
 }
 
+/** Phase C / C3 — WebRTC Mode B has no auto-reconnect (needs a fresh SDP). */
+function useWebRtcConnectionState(handle: WebRtcConnectHandle | null): {
+  state: ConnectionState | null;
+} {
+  const [state, setState] = useState<ConnectionState | null>(null);
+  useEffect(() => {
+    if (!handle) {
+      setState(null);
+      return undefined;
+    }
+    setState(handle.connectionState());
+    return handle.onConnectionStateChange((next) => {
+      setState(next);
+    });
+  }, [handle]);
+  return { state };
+}
+
 /* ------------------------------------------------------------------ */
 /* Host panel                                                          */
 /* ------------------------------------------------------------------ */
@@ -247,7 +296,7 @@ function HostPanel({
   onConnected,
 }: {
   llmReady: boolean;
-  transport: TransportMode;
+  transport: Exclude<TransportMode, 'webrtc'>;
   onConnected: ConnectViewProps['onConnected'];
 }) {
   const t = useTranslate();
@@ -396,6 +445,8 @@ function HostPanel({
             return lanHandle.session;
           },
           selfAgentId: lanHandle.selfAgentId,
+          envelopeAuth: lanHandle.envelopeAuth,
+          pairingRole: 'host',
           get orchestrator() {
             // The orchestrator is cached so repeated reads return the
             // SAME instance — calling `lanHandle.getOrchestrator()`
@@ -470,15 +521,8 @@ function HostPanel({
       <h2 className="text-kindora-500 dark:text-kindora-400 text-xs uppercase tracking-wide">
         {t(transport === 'lan' ? 'connect.shareCodeLan' : 'connect.shareCodeLoopback')}
       </h2>
-      <p
-        className="font-mono text-5xl font-semibold tracking-[0.4em]"
-        data-testid="host-pairing-code"
-      >
-        {/* Phase A / A3 — this is the host's *identity fingerprint*,
-            grouped for read-out. It identifies the host; it is not a
-            password and it does not open anything by itself. */}
-        {formatPairingFingerprint(code)}
-      </p>
+      {/* Phase A / A3 — host identity fingerprint (not a password). */}
+      <HostFingerprint code={code} />
       <p className="text-kindora-500 dark:text-kindora-400 text-center text-sm">
         {t('connect.waitingForPeer')}
       </p>
@@ -495,6 +539,12 @@ function HostPanel({
       >
         {t('connect.fingerprintHint')}
       </p>
+      {(handle || lanHandle) && (
+        <PairingLink
+          code={code}
+          agentId={(handle ?? lanHandle)!.selfAgentId}
+        />
+      )}
     </section>
   );
 }
@@ -509,13 +559,14 @@ function JoinPanel({
   onConnected,
 }: {
   llmReady: boolean;
-  transport: TransportMode;
+  transport: Exclude<TransportMode, 'webrtc'>;
   onConnected: ConnectViewProps['onConnected'];
 }) {
   const t = useTranslate();
   const [code, setCode] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [localFingerprint, setLocalFingerprint] = useState<string | null>(null);
   /**
    * Phase A / A3 — the session of the in-flight join, kept in state so
    * a security failure (e.g. a fingerprint that does not match) can be
@@ -533,6 +584,24 @@ function JoinPanel({
 
   // Phase C / C3 § 8 — follow the connection lifecycle.
   const lan = useLanConnectionState(lanHandle);
+
+  // IBR-5 — joiner shows local fingerprint so the host can confirm.
+  useEffect(() => {
+    if (!llmReady) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const input =
+          transport === 'lan' ? await toLanInput() : await toConnectInput();
+        if (!cancelled) setLocalFingerprint(input.fingerprint);
+      } catch {
+        /* agent / LLM not ready — form already gated */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [llmReady, transport]);
 
   // Tracks whether the panel is still mounted. The async submit
   // path (which awaits `startLanJoin` over real UDP) can race with
@@ -587,6 +656,8 @@ function JoinPanel({
             return h.session;
           },
           selfAgentId: h.selfAgentId,
+          envelopeAuth: h.envelopeAuth,
+          pairingRole: 'join',
           get orchestrator() {
             // Cache the orchestrator so repeated reads of
             // `bridged.orchestrator` return the SAME instance — calling
@@ -655,9 +726,17 @@ function JoinPanel({
         autoFocus
         placeholder={t('connect.codePlaceholder')}
         value={code}
-        onChange={(e) => setCode(e.target.value.toUpperCase())}
+        onChange={(e) => {
+          const raw = e.target.value.trim();
+          const fromUrl = decodeQrPayload(raw);
+          if (fromUrl) {
+            setCode(fromUrl.code);
+            return;
+          }
+          setCode(e.target.value.toUpperCase());
+        }}
         className="kindora-input font-mono tracking-[0.3em]"
-        maxLength={12}
+        maxLength={120}
         data-testid="join-code-input"
       />
       {error && <p className="text-sm text-rose-600 dark:text-rose-400">{error}</p>}
@@ -680,6 +759,643 @@ function JoinPanel({
       <p className="text-kindora-600 dark:text-kindora-300 text-xs leading-relaxed">
         {t('connect.fingerprintHint')}
       </p>
+      {localFingerprint && (
+        <div
+          className="border-kindora-200 dark:border-kindora-700 mt-2 flex w-full flex-col items-center gap-1 border-t pt-3"
+          data-testid="joiner-local-fingerprint"
+        >
+          <p className="text-kindora-500 dark:text-kindora-400 text-xs uppercase tracking-wide">
+            {t('connect.localFingerprintLabel')}
+          </p>
+          <p className="font-mono text-2xl font-semibold tracking-[0.3em]">
+            {formatPairingFingerprint(localFingerprint)}
+          </p>
+          <p className="text-kindora-600 dark:text-kindora-300 text-center text-xs leading-relaxed">
+            {t('connect.localFingerprintHint')}
+          </p>
+        </div>
+      )}
+    </form>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* WebRTC host panel                                                    */
+/* ------------------------------------------------------------------ */
+
+function selectAllOnFocus(e: FocusEvent<HTMLTextAreaElement>): void {
+  e.currentTarget.select();
+}
+
+function WebRtcHostPanel({
+  llmReady,
+  onConnected,
+}: {
+  llmReady: boolean;
+  onConnected: ConnectViewProps['onConnected'];
+}) {
+  const t = useTranslate();
+  const labAvailable = isWebRtcLabAvailable();
+  const serverAvailable = isWebRtcServerSignallingAvailable();
+  const [signallingMode, setSignallingMode] = useState<WebRtcSignallingMode>(
+    labAvailable ? 'lab' : serverAvailable ? 'server' : 'manual',
+  );
+  const [handle, setHandle] = useState<WebRtcConnectHandle | null>(null);
+  const [offerBlob, setOfferBlob] = useState<string | null>(null);
+  const [answerPaste, setAnswerPaste] = useState('');
+  const [fatalError, setFatalError] = useState<string | null>(null);
+  const [pasteError, setPasteError] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
+  const [answerApplied, setAnswerApplied] = useState(false);
+  /** Bump to tear down and mint a fresh offer (Mode B has no silent ICE restart). */
+  const [restartToken, setRestartToken] = useState(0);
+  const handleRef = useRef<WebRtcConnectHandle | null>(null);
+  const conn = useWebRtcConnectionState(handle);
+
+  useCloseReasonError(handle?.session, setFatalError);
+
+  useEffect(() => {
+    return () => {
+      const h = handleRef.current;
+      handleRef.current = null;
+      if (h) void h.disconnect('cancelled');
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!llmReady) return;
+    let cancelled = false;
+    setHandle(null);
+    setOfferBlob(null);
+    setAnswerApplied(false);
+    setAnswerPaste('');
+    setFatalError(null);
+    setPasteError(null);
+
+    const start = async (): Promise<void> => {
+      try {
+        const input = await toConnectInput();
+        if (cancelled) return;
+        const h = startWebRtcHost(input, { signallingMode });
+        if (cancelled) {
+          await h.disconnect('cancelled');
+          return;
+        }
+        handleRef.current = h;
+        setHandle(h);
+        if (signallingMode === 'manual') {
+          const blob = await h.takeOutboundBlob();
+          if (cancelled) {
+            await h.disconnect('cancelled');
+            return;
+          }
+          setOfferBlob(blob);
+        }
+      } catch (e: unknown) {
+        if (!cancelled) setFatalError(e instanceof Error ? e.message : String(e));
+      }
+    };
+
+    void start();
+    return () => {
+      cancelled = true;
+      const h = handleRef.current;
+      handleRef.current = null;
+      if (h) void h.disconnect('cancelled');
+    };
+  }, [llmReady, signallingMode, restartToken]);
+
+  useEffect(() => {
+    if (!handle) return undefined;
+    let fired = false;
+    const off = handle.session.onStateChange((snap) => {
+      if (fired) return;
+      if (snap.state !== 'tcp-connected' && snap.state !== 'connected') return;
+      fired = true;
+      onConnected(handle);
+    });
+    return () => {
+      off();
+    };
+  }, [handle, onConnected]);
+
+  async function copyOffer(): Promise<void> {
+    if (!offerBlob) return;
+    try {
+      await navigator.clipboard.writeText(offerBlob);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch (e: unknown) {
+      setPasteError(e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  function applyAnswer(): void {
+    if (!handle || !answerPaste.trim()) return;
+    try {
+      handle.applyInboundBlob(answerPaste.trim());
+      setAnswerApplied(true);
+      setPasteError(null);
+    } catch {
+      setPasteError(t('connect.badSignalBlob'));
+      setAnswerApplied(false);
+    }
+  }
+
+  if (!llmReady) return null;
+  if (fatalError && !handle) {
+    return (
+      <section className="kindora-card flex flex-col gap-2">
+        <h2 className="text-xs uppercase tracking-wide text-rose-600 dark:text-rose-400">
+          {t('common.error')}
+        </h2>
+        <p className="text-sm leading-relaxed">{fatalError}</p>
+      </section>
+    );
+  }
+  const preparing =
+    !handle || (signallingMode === 'manual' && !offerBlob);
+  if (preparing) {
+    return (
+      <div className="flex flex-col gap-3">
+        <WebRtcModeToggle
+          mode={signallingMode}
+          labAvailable={labAvailable}
+          serverAvailable={serverAvailable}
+          onChange={setSignallingMode}
+        />
+        <p className="text-kindora-500 dark:text-kindora-400 text-sm">
+          {t('connect.webrtcPreparing')}
+        </p>
+      </div>
+    );
+  }
+
+  return (
+    <section className="flex flex-col gap-4">
+      <WebRtcModeToggle
+        mode={signallingMode}
+        labAvailable={labAvailable}
+        serverAvailable={serverAvailable}
+        onChange={setSignallingMode}
+      />
+      {fatalError && (
+        <p className="text-sm text-rose-600 dark:text-rose-400" data-testid="webrtc-host-fatal">
+          {fatalError}
+        </p>
+      )}
+      <div className="kindora-card flex flex-col items-center gap-3">
+        <h2 className="text-kindora-500 dark:text-kindora-400 text-xs uppercase tracking-wide">
+          {t('connect.shareCodeWebRtc')}
+        </h2>
+        <HostFingerprint code={handle!.pairingCode} />
+        <p className="text-kindora-600 dark:text-kindora-300 max-w-md text-center text-xs leading-relaxed">
+          {t('connect.fingerprintHint')}
+        </p>
+        {signallingMode === 'lab' ? (
+          <p className="text-kindora-500 dark:text-kindora-400 text-center text-sm">
+            {t('connect.labWaiting')}
+          </p>
+        ) : signallingMode === 'server' ? (
+          <p className="text-kindora-500 dark:text-kindora-400 text-center text-sm">
+            {t('connect.serverWaiting')}
+          </p>
+        ) : (
+          <PairingLink code={handle!.pairingCode} agentId={handle!.selfAgentId} />
+        )}
+      </div>
+
+      {signallingMode === 'manual' && offerBlob && (
+        <>
+          <div className="kindora-card flex flex-col gap-2">
+            <div className="flex items-center justify-between gap-2">
+              <label className="text-kindora-500 dark:text-kindora-400 text-xs uppercase tracking-wide">
+                {t('connect.offerBlob')}
+              </label>
+              <button
+                type="button"
+                className="kindora-button-ghost text-xs"
+                onClick={() => void copyOffer()}
+              >
+                {copied ? t('connect.copied') : t('connect.copyBlob')}
+              </button>
+            </div>
+            <textarea
+              readOnly
+              value={offerBlob}
+              rows={4}
+              onFocus={selectAllOnFocus}
+              className="kindora-input font-mono text-xs leading-relaxed"
+              data-testid="webrtc-offer-blob"
+            />
+          </div>
+
+          <div className="kindora-card flex flex-col gap-2">
+            <label className="text-kindora-500 dark:text-kindora-400 text-xs uppercase tracking-wide">
+              {t('connect.pasteAnswer')}
+            </label>
+            <textarea
+              value={answerPaste}
+              onChange={(e) => {
+                setAnswerPaste(e.target.value);
+                if (pasteError) setPasteError(null);
+              }}
+              onFocus={selectAllOnFocus}
+              rows={4}
+              className="kindora-input font-mono text-xs leading-relaxed"
+              data-testid="webrtc-answer-paste"
+              disabled={answerApplied}
+            />
+            {pasteError && (
+              <p
+                className="text-sm text-rose-600 dark:text-rose-400"
+                data-testid="webrtc-paste-error"
+              >
+                {pasteError}
+              </p>
+            )}
+            <button
+              type="button"
+              className="kindora-button self-start"
+              onClick={applyAnswer}
+              disabled={answerApplied || answerPaste.trim().length < 8}
+            >
+              {t('connect.applyAnswer')}
+            </button>
+            {answerApplied && (
+              <p className="text-kindora-500 dark:text-kindora-400 text-sm">
+                {t('connect.webrtcConnecting')}
+              </p>
+            )}
+          </div>
+        </>
+      )}
+      {conn.state && (
+        <ConnectionStatus
+          state={conn.state}
+          onReconnect={
+            conn.state === 'failed' || conn.state === 'disconnected'
+              ? () => setRestartToken((n) => n + 1)
+              : undefined
+          }
+        />
+      )}
+    </section>
+  );
+}
+
+function HostFingerprint({ code }: { readonly code: string }) {
+  const t = useTranslate();
+  const [copied, setCopied] = useState(false);
+  const [nativeOk, setNativeOk] = useState<boolean | null>(null);
+  const display = formatPairingFingerprint(code);
+  const pasteable = code.replace(/[\s-]/g, '').toUpperCase();
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      const { isNativeFingerprintAvailable, verifyPeerFingerprint } =
+        await import('../lib/native-fingerprint');
+      if (!isNativeFingerprintAvailable()) {
+        if (!cancelled) setNativeOk(null);
+        return;
+      }
+      // Self-check: Rust normalises dash/case the same way the UI does.
+      const ok = await verifyPeerFingerprint(pasteable, code);
+      if (!cancelled) setNativeOk(ok);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [code, pasteable]);
+
+  async function copyFingerprint(): Promise<void> {
+    try {
+      await navigator.clipboard.writeText(pasteable);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      /* clipboard may be denied in tests / locked-down hosts */
+    }
+  }
+
+  return (
+    <div className="flex flex-col items-center gap-2">
+      <p
+        className="font-mono text-5xl font-semibold tracking-[0.4em]"
+        data-testid="host-pairing-code"
+        data-native-fingerprint={
+          nativeOk === null ? 'fallback' : nativeOk ? 'verified' : 'mismatch'
+        }
+      >
+        {display}
+      </p>
+      <button
+        type="button"
+        className="kindora-button-ghost text-xs"
+        onClick={() => void copyFingerprint()}
+        data-testid="host-copy-fingerprint"
+      >
+        {copied ? t('connect.copied') : t('connect.copyFingerprint')}
+      </button>
+    </div>
+  );
+}
+
+function WebRtcModeToggle({
+  mode,
+  labAvailable,
+  serverAvailable,
+  onChange,
+}: {
+  mode: WebRtcSignallingMode;
+  labAvailable: boolean;
+  serverAvailable: boolean;
+  onChange: (mode: WebRtcSignallingMode) => void;
+}) {
+  const t = useTranslate();
+  return (
+    <div className="flex flex-wrap gap-2" data-testid="webrtc-mode-toggle">
+      <button
+        type="button"
+        className={`kindora-toggle ${mode === 'lab' ? 'kindora-toggle-active' : 'kindora-toggle-idle'}`}
+        disabled={!labAvailable}
+        title={labAvailable ? t('connect.labTitle') : t('connect.labUnavailable')}
+        onClick={() => onChange('lab')}
+      >
+        {t('connect.lab')}
+      </button>
+      <button
+        type="button"
+        className={`kindora-toggle ${mode === 'server' ? 'kindora-toggle-active' : 'kindora-toggle-idle'}`}
+        disabled={!serverAvailable}
+        title={serverAvailable ? t('connect.serverTitle') : t('connect.serverUnavailable')}
+        onClick={() => onChange('server')}
+        data-testid="webrtc-mode-server"
+      >
+        {t('connect.server')}
+      </button>
+      <button
+        type="button"
+        className={`kindora-toggle ${mode === 'manual' ? 'kindora-toggle-active' : 'kindora-toggle-idle'}`}
+        title={t('connect.manualTitle')}
+        onClick={() => onChange('manual')}
+      >
+        {t('connect.manual')}
+      </button>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* WebRTC join panel                                                    */
+/* ------------------------------------------------------------------ */
+
+function WebRtcJoinPanel({
+  llmReady,
+  onConnected,
+}: {
+  llmReady: boolean;
+  onConnected: ConnectViewProps['onConnected'];
+}) {
+  const t = useTranslate();
+  const labAvailable = isWebRtcLabAvailable();
+  const serverAvailable = isWebRtcServerSignallingAvailable();
+  const [signallingMode, setSignallingMode] = useState<WebRtcSignallingMode>(
+    labAvailable ? 'lab' : serverAvailable ? 'server' : 'manual',
+  );
+  const [code, setCode] = useState('');
+  const [offerPaste, setOfferPaste] = useState('');
+  const [answerBlob, setAnswerBlob] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const [joined, setJoined] = useState(false);
+  const [session, setSession] = useState<PairingSession | null>(null);
+  const [rtcHandle, setRtcHandle] = useState<WebRtcConnectHandle | null>(null);
+  const handleRef = useRef<WebRtcConnectHandle | null>(null);
+  const mountedRef = useRef(true);
+  const conn = useWebRtcConnectionState(rtcHandle);
+
+  function restartWebRtcJoin(): void {
+    const h = handleRef.current;
+    handleRef.current = null;
+    if (h) void h.disconnect('cancelled');
+    setRtcHandle(null);
+    setSession(null);
+    setJoined(false);
+    setAnswerBlob(null);
+    setOfferPaste('');
+    setError(null);
+    setBusy(false);
+  }
+
+  useCloseReasonError(session, setError);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      const h = handleRef.current;
+      handleRef.current = null;
+      if (h) void h.disconnect('cancelled');
+    };
+  }, []);
+
+  async function handleSubmit(e: FormEvent<HTMLFormElement>): Promise<void> {
+    e.preventDefault();
+    if (!llmReady) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const input = await toConnectInput();
+      if (!mountedRef.current) return;
+      const h = await startWebRtcJoin({
+        ...input,
+        code: code.trim(),
+        offerBlob: signallingMode === 'manual' ? offerPaste.trim() : undefined,
+        signallingMode,
+      });
+      if (!mountedRef.current) {
+        await h.disconnect('cancelled');
+        return;
+      }
+      handleRef.current = h;
+      setSession(h.session);
+      setRtcHandle(h);
+      setJoined(true);
+
+      if (signallingMode === 'manual') {
+        const blob = await h.takeOutboundBlob();
+        if (!mountedRef.current) {
+          await h.disconnect('cancelled');
+          return;
+        }
+        setAnswerBlob(blob);
+      }
+
+      let fired = false;
+      h.session.onStateChange((snap) => {
+        if (fired) return;
+        if (snap.state !== 'tcp-connected' && snap.state !== 'connected') return;
+        fired = true;
+        if (mountedRef.current) onConnected(h);
+      });
+    } catch (err: unknown) {
+      if (mountedRef.current) {
+        const message = err instanceof Error ? err.message : String(err);
+        setError(
+          /signalling blob|base64|JSON|role must|version/i.test(message)
+            ? t('connect.badSignalBlob')
+            : message,
+        );
+      }
+    } finally {
+      if (mountedRef.current) setBusy(false);
+    }
+  }
+
+  async function copyAnswer(): Promise<void> {
+    if (!answerBlob) return;
+    try {
+      await navigator.clipboard.writeText(answerBlob);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  const canSubmit =
+    llmReady &&
+    !busy &&
+    !joined &&
+    code.length >= 4 &&
+    (signallingMode === 'lab' ||
+      signallingMode === 'server' ||
+      offerPaste.trim().length >= 8);
+
+  return (
+    <form className="flex flex-col gap-3" onSubmit={(e) => void handleSubmit(e)}>
+      <WebRtcModeToggle
+        mode={signallingMode}
+        labAvailable={labAvailable}
+        serverAvailable={serverAvailable}
+        onChange={(mode) => {
+          if (joined) return;
+          setSignallingMode(mode);
+        }}
+      />
+      <div className="kindora-card flex flex-col gap-3">
+        <label className="text-kindora-500 dark:text-kindora-400 text-xs uppercase tracking-wide">
+          {t('connect.pairingCodeWebRtc')}
+        </label>
+        <input
+          type="text"
+          inputMode="text"
+          autoComplete="off"
+          autoFocus
+          placeholder={t('connect.codePlaceholder')}
+          value={code}
+          onChange={(e) => {
+            const raw = e.target.value.trim();
+            const fromUrl = decodeQrPayload(raw);
+            if (fromUrl) {
+              setCode(fromUrl.code);
+              return;
+            }
+            setCode(e.target.value.toUpperCase());
+          }}
+          className="kindora-input font-mono tracking-[0.3em]"
+          maxLength={120}
+          data-testid="join-code-input"
+          disabled={joined}
+        />
+
+        {signallingMode === 'manual' && (
+          <>
+            <label className="text-kindora-500 dark:text-kindora-400 text-xs uppercase tracking-wide">
+              {t('connect.pasteOffer')}
+            </label>
+            <textarea
+              value={offerPaste}
+              onChange={(e) => setOfferPaste(e.target.value)}
+              onFocus={selectAllOnFocus}
+              rows={4}
+              className="kindora-input font-mono text-xs leading-relaxed"
+              data-testid="webrtc-offer-paste"
+              disabled={joined}
+            />
+          </>
+        )}
+
+        {signallingMode === 'lab' && (
+          <p className="text-kindora-500 dark:text-kindora-400 text-xs leading-relaxed">
+            {t('connect.labJoinHint')}
+          </p>
+        )}
+
+        {error && (
+          <p className="text-sm text-rose-600 dark:text-rose-400" data-testid="webrtc-join-error">
+            {error}
+          </p>
+        )}
+
+        {!joined ? (
+          <button type="submit" className="kindora-button self-start" disabled={!canSubmit}>
+            {busy
+              ? t('connect.joining')
+              : signallingMode === 'lab'
+                ? t('connect.join')
+                : t('connect.createAnswer')}
+          </button>
+        ) : signallingMode === 'manual' && answerBlob ? (
+          <div className="flex flex-col gap-2">
+            <div className="flex items-center justify-between gap-2">
+              <label className="text-kindora-500 dark:text-kindora-400 text-xs uppercase tracking-wide">
+                {t('connect.answerBlob')}
+              </label>
+              <button
+                type="button"
+                className="kindora-button-ghost text-xs"
+                onClick={() => void copyAnswer()}
+              >
+                {copied ? t('connect.copied') : t('connect.copyBlob')}
+              </button>
+            </div>
+            <textarea
+              readOnly
+              value={answerBlob}
+              rows={4}
+              onFocus={selectAllOnFocus}
+              className="kindora-input font-mono text-xs leading-relaxed"
+              data-testid="webrtc-answer-blob"
+            />
+            <p className="text-kindora-500 dark:text-kindora-400 text-sm">
+              {t('connect.webrtcConnecting')}
+            </p>
+          </div>
+        ) : (
+          <p className="text-kindora-500 dark:text-kindora-400 text-sm">
+            {t('connect.webrtcConnecting')}
+          </p>
+        )}
+
+        {conn.state && (
+          <ConnectionStatus
+            state={conn.state}
+            onReconnect={
+              conn.state === 'failed' || conn.state === 'disconnected'
+                ? restartWebRtcJoin
+                : undefined
+            }
+          />
+        )}
+
+        <p className="text-kindora-600 dark:text-kindora-300 text-xs leading-relaxed">
+          {t('connect.fingerprintHint')}
+        </p>
+      </div>
     </form>
   );
 }

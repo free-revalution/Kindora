@@ -34,7 +34,7 @@ export function IdentifyView({ phase, error, onDisconnect }: IdentifyViewProps) 
     return <ErrorView message={error ?? t('match.errorFallback')} onDisconnect={onDisconnect} />;
   }
   return (
-    <main className="mx-auto flex w-full max-w-2xl flex-col items-center gap-4 px-6 py-20">
+    <main className="kindora-page items-center py-16">
       <p className="text-kindora-500 dark:text-kindora-400 text-xs uppercase tracking-wide">
         {t('identify.eyebrow')}
       </p>

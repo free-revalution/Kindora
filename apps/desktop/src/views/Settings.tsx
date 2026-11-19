@@ -6,6 +6,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import type { LLMErrorCode, LLMProviderKind } from '@kindora/llm';
+import { isWebRtcAvailable, runWebRtcLoopbackSelfTest } from '@kindora/transport';
 import {
   PROVIDER_PRESETS,
   presetFor,
@@ -13,10 +14,20 @@ import {
   saveLLMConfig,
   clearStoredApiKey,
   hasStoredApiKey,
-  loadStoredApiKey,
   testConnection,
   describeLlmFailure,
 } from '../lib/llm-service';
+import {
+  formatIceServers,
+  loadIceServers,
+  loadSignallingUrl,
+  parseIceServers,
+  resetIceServers,
+  resetSignallingUrl,
+  saveIceServers,
+  saveSignallingUrl,
+} from '../lib/webrtc-settings';
+import { isHttpSignallingUrl } from '@kindora/transport';
 import {
   SUPPORTED_LOCALES,
   useI18n,
@@ -109,6 +120,12 @@ export function Settings({ onClose, onSaved }: SettingsProps) {
   const [clear, setClear] = useState<ClearState>({ kind: 'idle' });
   const [test, setTest] = useState<TestState>({ kind: 'idle' });
   const [hydrated, setHydrated] = useState(false);
+  /** Snapshot of the last loaded/saved LLM fields — used to warn on discard. */
+  const [savedSnap, setSavedSnap] = useState<{
+    provider: LLMProviderKind;
+    baseUrl: string;
+    model: string;
+  } | null>(null);
 
   // Monotonic counter for the "is a key stored?" probe.
   //
@@ -128,13 +145,18 @@ export function Settings({ onClose, onSaved }: SettingsProps) {
   useEffect(() => {
     void loadLLMConfig().then((cfg) => {
       if (cfg) {
+        const base = cfg.baseUrl ?? presetFor(cfg.provider).defaultBaseUrl;
         setProvider(cfg.provider);
-        setBaseUrl(cfg.baseUrl ?? presetFor(cfg.provider).defaultBaseUrl);
+        setBaseUrl(base);
         setModel(cfg.model);
+        setSavedSnap({ provider: cfg.provider, baseUrl: base, model: cfg.model });
       } else {
         const preset = presetFor(DEFAULT_PROVIDER);
-        setBaseUrl(preset.defaultBaseUrl);
-        setModel(preset.exampleModels[0] ?? '');
+        const base = preset.defaultBaseUrl;
+        const modelName = preset.exampleModels[0] ?? '';
+        setBaseUrl(base);
+        setModel(modelName);
+        setSavedSnap({ provider: DEFAULT_PROVIDER, baseUrl: base, model: modelName });
       }
       setHydrated(true);
     });
@@ -172,6 +194,17 @@ export function Settings({ onClose, onSaved }: SettingsProps) {
   const preset = presetFor(provider);
   const needsKey = preset.requiresApiKey;
   const canSave = model.trim().length > 0 && baseUrl.trim().length > 0 && save.kind !== 'saving';
+  const dirty =
+    Boolean(savedSnap) &&
+    (provider !== savedSnap!.provider ||
+      baseUrl !== savedSnap!.baseUrl ||
+      model !== savedSnap!.model ||
+      apiKey.length > 0);
+
+  function requestClose(): void {
+    if (dirty && !window.confirm(t('settings.unsavedConfirm'))) return;
+    onClose();
+  }
 
   function switchProvider(next: LLMProviderKind) {
     setProvider(next);
@@ -204,6 +237,7 @@ export function Settings({ onClose, onSaved }: SettingsProps) {
       // up front (or in a `finally`) would destroy the user's key on a failed
       // save and leave no way to retry without retyping it.
       setApiKey('');
+      setSavedSnap({ provider, baseUrl, model });
       setSave({ kind: 'ok' });
       // The config on disk changed — tell the app so it can re-read whether
       // a provider is usable. Without this the Connect screen would keep the
@@ -237,11 +271,7 @@ export function Settings({ onClose, onSaved }: SettingsProps) {
       // stored key is never displayed, so after a restart the field is
       // empty by design — testing with nothing would report a missing
       // key for a provider that is configured correctly.
-      const key = needsKey
-        ? apiKey.length > 0
-          ? apiKey
-          : await loadStoredApiKey(provider)
-        : undefined;
+      const key = needsKey && apiKey.length > 0 ? apiKey : undefined;
       const reply = await testConnection({ provider, baseUrl, model }, key);
       setTest({ kind: 'ok', reply: reply.trim() });
     } catch (err) {
@@ -258,18 +288,27 @@ export function Settings({ onClose, onSaved }: SettingsProps) {
   }
 
   return (
-    <main className="mx-auto flex w-full max-w-2xl flex-col gap-6 px-6 py-10">
+    <main className="kindora-page" data-testid="settings-screen">
       <header className="flex items-center justify-between">
-        <h1 className="text-3xl font-semibold tracking-tight">{t('settings.title')}</h1>
-        <button type="button" className="kindora-button-ghost" onClick={onClose}>
+        <h1 className="kindora-title">{t('settings.title')}</h1>
+        <button
+          type="button"
+          className="kindora-button-ghost"
+          onClick={requestClose}
+          data-testid="settings-done"
+        >
           {t('settings.done')}
         </button>
       </header>
 
+      <section className="kindora-banner-info text-xs leading-relaxed">
+        {t('app.keyBoundaryNote')}
+      </section>
+
       <LanguagePicker />
 
       <section className="kindora-card flex flex-col gap-4">
-        <h2 className="text-base font-semibold">{t('settings.llmProvider')}</h2>
+        <h2 className="text-base font-semibold text-kindora-900">{t('settings.llmProvider')}</h2>
 
         <label className="flex flex-col gap-1">
           <span className="text-sm font-medium">{t('settings.provider')}</span>
@@ -294,6 +333,9 @@ export function Settings({ onClose, onSaved }: SettingsProps) {
             onChange={(e) => setBaseUrl(e.target.value)}
             className="kindora-input font-mono text-xs"
           />
+          {provider === 'ollama' && (
+            <span className="text-xs text-kindora-500">{t('settings.ollamaLoopbackHint')}</span>
+          )}
         </label>
 
         <label className="flex flex-col gap-1">
@@ -418,10 +460,197 @@ export function Settings({ onClose, onSaved }: SettingsProps) {
         )}
       </section>
 
+      <TransportDiagnostics />
+
       <p className="text-kindora-500 dark:text-kindora-400 text-center text-xs">
         {t('settings.privacyNote')}
       </p>
     </main>
+  );
+}
+
+function TransportDiagnostics() {
+  const t = useTranslate();
+  const available = isWebRtcAvailable();
+  const [state, setState] = useState<TestState>({ kind: 'idle' });
+  const [iceText, setIceText] = useState(() => formatIceServers(loadIceServers()));
+  const [iceSave, setIceSave] = useState<SaveState>({ kind: 'idle' });
+  const [signallingUrl, setSignallingUrl] = useState(() => loadSignallingUrl());
+  const [signallingSave, setSignallingSave] = useState<SaveState>({ kind: 'idle' });
+
+  async function runSelfTest(): Promise<void> {
+    setState({ kind: 'testing' });
+    const result = await runWebRtcLoopbackSelfTest(15_000);
+    if (result.ok) {
+      setState({ kind: 'ok', reply: result.detail });
+    } else {
+      setState({ kind: 'error', message: result.detail });
+    }
+  }
+
+  function handleSaveIce(): void {
+    setIceSave({ kind: 'saving' });
+    try {
+      const urls = parseIceServers(iceText);
+      saveIceServers(urls);
+      setIceText(formatIceServers(urls.length > 0 ? urls : loadIceServers()));
+      setIceSave({ kind: 'ok' });
+    } catch (err) {
+      setIceSave({
+        kind: 'error',
+        message: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  function handleResetIce(): void {
+    resetIceServers();
+    setIceText(formatIceServers(loadIceServers()));
+    setIceSave({ kind: 'idle' });
+  }
+
+  function handleSaveSignalling(): void {
+    setSignallingSave({ kind: 'saving' });
+    const trimmed = signallingUrl.trim().replace(/\/+$/, '');
+    if (trimmed && !isHttpSignallingUrl(trimmed)) {
+      setSignallingSave({
+        kind: 'error',
+        message: 'URL must start with http:// or https://',
+      });
+      return;
+    }
+    saveSignallingUrl(trimmed);
+    setSignallingUrl(loadSignallingUrl());
+    setSignallingSave({ kind: 'ok' });
+  }
+
+  function handleClearSignalling(): void {
+    resetSignallingUrl();
+    setSignallingUrl('');
+    setSignallingSave({ kind: 'idle' });
+  }
+
+  return (
+    <section className="kindora-card flex flex-col gap-3" data-testid="transport-diagnostics">
+      <h2 className="text-sm font-medium">{t('settings.transportTitle')}</h2>
+      <p className="text-kindora-600 dark:text-kindora-300 text-xs leading-relaxed">
+        {t('settings.transportBody')}
+      </p>
+      <p className="text-xs">
+        WebRTC:{' '}
+        <span className={available ? 'text-emerald-700 dark:text-emerald-400' : 'text-rose-600'}>
+          {available ? t('settings.webrtcAvailable') : t('settings.webrtcUnavailable')}
+        </span>
+      </p>
+      <button
+        type="button"
+        className="kindora-button self-start"
+        disabled={!available || state.kind === 'testing'}
+        onClick={() => void runSelfTest()}
+        data-testid="webrtc-selftest"
+      >
+        {state.kind === 'testing' ? t('settings.testing') : t('settings.webrtcSelfTest')}
+      </button>
+      {state.kind === 'ok' && (
+        <p className="rounded-xl bg-emerald-50 px-3 py-2 text-xs text-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-200">
+          ✓ {state.reply}
+        </p>
+      )}
+      {state.kind === 'error' && (
+        <p className="rounded-xl bg-red-50 px-3 py-2 text-xs text-red-700 dark:bg-red-900/40 dark:text-red-200">
+          ✗ {state.message}
+        </p>
+      )}
+
+      <label className="flex flex-col gap-1">
+        <span className="text-sm font-medium">{t('settings.iceServers')}</span>
+        <textarea
+          value={iceText}
+          onChange={(e) => {
+            setIceText(e.target.value);
+            setIceSave({ kind: 'idle' });
+          }}
+          rows={3}
+          className="kindora-input font-mono text-xs leading-relaxed"
+          data-testid="ice-servers-input"
+          spellCheck={false}
+        />
+        <span className="text-kindora-500 dark:text-kindora-400 text-xs">
+          {t('settings.iceServersHint')}
+        </span>
+      </label>
+      <div className="flex flex-wrap gap-2">
+        <button
+          type="button"
+          className="kindora-button self-start"
+          onClick={handleSaveIce}
+          disabled={iceSave.kind === 'saving'}
+          data-testid="ice-servers-save"
+        >
+          {t('settings.iceServersSave')}
+        </button>
+        <button
+          type="button"
+          className="kindora-button-ghost self-start text-xs"
+          onClick={handleResetIce}
+          data-testid="ice-servers-reset"
+        >
+          {t('settings.iceServersReset')}
+        </button>
+      </div>
+      {iceSave.kind === 'ok' && (
+        <p className="text-xs text-emerald-700 dark:text-emerald-300">✓ {t('settings.iceServersSaved')}</p>
+      )}
+      {iceSave.kind === 'error' && (
+        <p className="text-xs text-rose-600 dark:text-rose-300">✗ {iceSave.message}</p>
+      )}
+
+      <label className="flex flex-col gap-1">
+        <span className="text-sm font-medium">{t('settings.signallingUrl')}</span>
+        <input
+          type="url"
+          value={signallingUrl}
+          onChange={(e) => {
+            setSignallingUrl(e.target.value);
+            setSignallingSave({ kind: 'idle' });
+          }}
+          className="kindora-input font-mono text-xs"
+          placeholder="http://127.0.0.1:8787"
+          data-testid="signalling-url-input"
+          spellCheck={false}
+        />
+        <span className="text-kindora-500 dark:text-kindora-400 text-xs">
+          {t('settings.signallingUrlHint')}
+        </span>
+      </label>
+      <div className="flex flex-wrap gap-2">
+        <button
+          type="button"
+          className="kindora-button self-start"
+          onClick={handleSaveSignalling}
+          disabled={signallingSave.kind === 'saving'}
+          data-testid="signalling-url-save"
+        >
+          {t('settings.signallingUrlSave')}
+        </button>
+        <button
+          type="button"
+          className="kindora-button-ghost self-start text-xs"
+          onClick={handleClearSignalling}
+          data-testid="signalling-url-clear"
+        >
+          {t('settings.signallingUrlClear')}
+        </button>
+      </div>
+      {signallingSave.kind === 'ok' && (
+        <p className="text-xs text-emerald-700 dark:text-emerald-300">
+          ✓ {t('settings.signallingUrlSaved')}
+        </p>
+      )}
+      {signallingSave.kind === 'error' && (
+        <p className="text-xs text-rose-600 dark:text-rose-300">✗ {signallingSave.message}</p>
+      )}
+    </section>
   );
 }
 

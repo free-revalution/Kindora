@@ -31,9 +31,11 @@ import {
   type UntrustedNotice,
 } from './context-builder';
 import { computeHeuristics } from './heuristics';
+import { displayLabelsForSharedInterests } from './interest-taxonomy';
 import {
   parseChatAssistReply,
   type ChatAssistReply,
+  type ChatAssistSuggestion,
   type ParseChatAssistResult,
 } from './output-parser';
 
@@ -135,16 +137,61 @@ export async function generateChatAssist(
   const response = await provider.chat(messages, llmOptions);
   const parsed: ParseChatAssistResult = parseChatAssistReply(response.content);
 
+  let reply = parsed.reply;
+  let degraded = parsed.degraded;
+  let degradationNote = parsed.note;
+  if (reply.suggestions.length === 0) {
+    const seeded = seedChatAssistSuggestions(input, hints.sharedInterests);
+    if (seeded.length > 0) {
+      reply = Object.freeze({
+        summary: reply.summary || 'Heuristic drafts from shared interests.',
+        suggestions: Object.freeze(seeded),
+      });
+      degraded = true;
+      degradationNote = degradationNote
+        ? `${degradationNote}; heuristic-seed`
+        : 'heuristic-seed: empty LLM suggestions replaced with interest overlap';
+    }
+  }
+
   return {
-    reply: parsed.reply,
+    reply,
     messages,
     estimatedTokens: tokens,
     rawResponse: response.content,
-    degraded: parsed.degraded,
-    degradationNote: parsed.note,
+    degraded,
+    degradationNote,
     boundaryBlocked: false,
     notices: built.notices,
   };
+}
+
+function seedChatAssistSuggestions(
+  input: GenerateChatAssistInput,
+  sharedCanonical: readonly string[],
+): ChatAssistSuggestion[] {
+  const fromAnalysis = (input.analysis?.recommendedTopics ?? [])
+    .map((t) => t.trim())
+    .filter(Boolean)
+    .slice(0, 2)
+    .map(
+      (topic): ChatAssistSuggestion =>
+        Object.freeze({
+          kind: 'topic',
+          text: topic,
+          rationale: 'From the match report’s recommended topics.',
+        }),
+    );
+  if (fromAnalysis.length > 0) return fromAnalysis;
+
+  const labels = displayLabelsForSharedInterests(input.selfProfile.interests, sharedCanonical);
+  return labels.slice(0, 2).map((label) =>
+    Object.freeze({
+      kind: 'topic' as const,
+      text: `I'd like to hear more about ${label}.`,
+      rationale: 'You both list this interest.',
+    }),
+  );
 }
 
 function estimateTotal(messages: readonly ChatMessage[]): number {

@@ -2,7 +2,8 @@
 name = "kindora-phase21-experiment-a"
 version = "0.0.1"
 edition = "2021"
-rust-version = "1.77.2"
+# P0-2A / A-39 (V6-1): keep in lockstep with apps/desktop/src-tauri.
+rust-version = "1.90"
 publish = false
 description = "Phase 2.1 Experiment A — cross-process UDP unicast verification"
 

@@ -7,8 +7,8 @@
  * (`llm:<provider>:api-key`) so the desktop UI can swap the
  * implementation at startup without changing key names.
  *
- * V0.1 limitation: the `keyring` crate does not expose a portable
- * list API. The store is forward-only via known keys.
+ * P0-2A / MB-1: `secret_get` is not on the WebView command surface.
+ * Use `exists` for presence checks; LLM calls read keys only in Rust.
  */
 
 import type { SecretStore } from '@kindora/storage';
@@ -28,8 +28,12 @@ export class TauriSecretStore implements SecretStore {
     this.tauri = t;
   }
 
-  async get(key: string): Promise<string | null> {
-    return this.tauri.invoke<string | null>('secret_get', { key });
+  async get(_key: string): Promise<string | null> {
+    throw new Error('secret_get removed; use secret_exists / llm_*');
+  }
+
+  async exists(key: string): Promise<boolean> {
+    return this.tauri.invoke<boolean>('secret_exists', { key });
   }
 
   async set(key: string, value: string): Promise<void> {

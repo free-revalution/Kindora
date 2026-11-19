@@ -1,0 +1,22 @@
+{
+  "vectors": [
+    {
+      "name": "ascii-agent-minimal-spki",
+      "agentId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "spkiDerBase64": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE",
+      "expectedFingerprint": "7F3X7D"
+    },
+    {
+      "name": "empty-agent-id",
+      "agentId": "",
+      "spkiDerBase64": "YQ==",
+      "expectedFingerprint": "SABR24"
+    },
+    {
+      "name": "unicode-agent-id",
+      "agentId": "代理-π",
+      "spkiDerBase64": "YkI=",
+      "expectedFingerprint": "2PTWZJ"
+    }
+  ]
+}

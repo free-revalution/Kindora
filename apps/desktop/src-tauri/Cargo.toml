@@ -10,7 +10,9 @@ version = "0.1.0"
 description = "Kindora Desktop — Personal AI Social Agent client."
 authors = ["Kindora Contributors"]
 edition = "2021"
-rust-version = "1.77.2"
+# P0-2A / A-39 (V6-1): project MSRV is Rust 1.90. Default developer
+# toolchain remains `stable` via `rust-toolchain.toml` (A-42).
+rust-version = "1.90"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -33,6 +35,24 @@ log = "0.4"
 env_logger = "0.11"
 keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
 thiserror = "2"
+# P0-2A / A0 (§6.1) — crypto + JCS + credential-shape regex.
+# Versions pinned to MSRV-friendly releases (exclude p256 0.14 / sha2 0.11 /
+# serde_jcs). See docs/security/P0_2_REMEDIATION_DESIGN.md §6.1.
+p256 = { version = "0.13.2", default-features = false, features = ["ecdsa", "pkcs8", "pem", "std"] }
+sha2 = "0.10.9"
+base64 = "0.22"
+serde_json_canonicalizer = "0.4.1"
+regex = "1"
+# P0-2A / A-RFD — native confirm dialogs for message-level auth (MLA).
+# Exact pin; default-features off; xdg-portal required so Linux build.rs
+# does not panic (D22). Do not bump to 0.18+ (MSRV 1.92).
+rfd = { version = "=0.17.2", default-features = false, features = ["xdg-portal"] }
+# P0-2A / A-LLM-0 — TLS HTTP client for LLM calls that never expose API
+# keys to the webview. Exact pin + feature set from §6.3.4 (V6-3).
+reqwest = { version = "=0.12.28", default-features = false, features = ["rustls-tls-native-roots", "json", "http2", "stream"] }
+# P0-2B / B1 — promote sqlx from tauri-plugin-sql transitive dep to a
+# direct dependency (same version + feature set; plugin stays until B6).
+sqlx = { version = "=0.8.6", default-features = false, features = ["sqlite", "runtime-tokio"] }
 
 [profile.release]
 panic = "abort"
@@ -44,3 +64,4 @@ strip = true
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
+rand_core = { version = "0.6.4", features = ["getrandom"] }

@@ -14,9 +14,24 @@
  * See RFC 8785, https://www.rfc-editor.org/rfc/rfc8785
  */
 import { describe, it, expect } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { dirname, join } from 'node:path';
 import { canonicalize, canonicalizeToBytes, CanonicalJsonError } from '../canonical-json';
 
 describe('canonicalize — RFC 8785 (JCS)', () => {
+  it('matches the shared golden vectors file (Rust + TS §5.3 test A)', () => {
+    const here = dirname(fileURLToPath(import.meta.url));
+    const raw = readFileSync(join(here, 'fixtures/jcs-vectors.json'), 'utf8');
+    const doc = JSON.parse(raw) as {
+      vectors: Array<{ name: string; input: unknown; expected: string }>;
+    };
+    expect(doc.vectors.length).toBeGreaterThan(0);
+    for (const v of doc.vectors) {
+      expect(canonicalize(v.input), v.name).toBe(v.expected);
+    }
+  });
+
   it('matches the RFC 8785 § 3.2.3 reference vector', () => {
     // The RFC's input value.
     //

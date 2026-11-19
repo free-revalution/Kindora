@@ -67,7 +67,7 @@ export function IcebreakerView({
   const isLoading = phase === 'generating' || phase === 'regenerating';
 
   return (
-    <main className="mx-auto flex w-full max-w-2xl flex-col gap-6 px-6 py-10">
+    <main className="kindora-page">
       <header className="flex items-start justify-between">
         <div>
           <p className="text-kindora-500 dark:text-kindora-400 text-xs uppercase tracking-wide">
@@ -133,6 +133,20 @@ export function IcebreakerView({
           </button>
         </section>
       )}
+
+      {degradationNote?.includes('heuristic-seed') &&
+        !boundaryBlocked &&
+        phase === 'ready' &&
+        topics.length > 0 && (
+          <section
+            className="border-amber-300 bg-amber-50 text-amber-950 dark:border-amber-700 dark:bg-amber-950/40 dark:text-amber-100 rounded-md border px-3 py-2 text-sm"
+            data-testid="icebreaker-heuristic-seed"
+            role="status"
+          >
+            <p className="font-medium">{t('icebreaker.heuristicSeedTitle')}</p>
+            <p className="mt-1 opacity-90">{t('icebreaker.heuristicSeedBody')}</p>
+          </section>
+        )}
 
       <IcebreakerTopicList topics={topics} isLoading={isLoading} onUse={onUse} phase={phase} />
 

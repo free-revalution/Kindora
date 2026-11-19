@@ -23,6 +23,17 @@ function makeOutcome(peer: string = 'Bob'): MatchOutcome {
     peerAnalysis: SAMPLE_ANALYSIS,
     localResult: {
       analysis: SAMPLE_ANALYSIS,
+      heuristics: {
+        sharedInterests: ['typescript', 'climbing'],
+        sharedActivities: [],
+        sharedStyles: ['deep'],
+        interestScore: 0.67,
+        activityScore: 0,
+        styleScore: 1,
+        intentScore: 1,
+        compositeScore: 0.72,
+        blockingIssues: [],
+      },
       messages: [],
       estimatedTokens: 0,
       rawResponse: '',
@@ -99,6 +110,38 @@ describe('apps/desktop — MatchView', () => {
     const outcome: MatchOutcome = { ...makeOutcome(), peerAnalysis: null };
     render(<MatchView phase="done" outcome={outcome} onDisconnect={() => undefined} />);
     expect(screen.getByText(/their agent is still thinking/i)).toBeInTheDocument();
+  });
+
+  it('says the peer timed out when peerAnalysisTimedOut is set', () => {
+    const outcome: MatchOutcome = {
+      ...makeOutcome(),
+      peerAnalysis: null,
+      peerAnalysisTimedOut: true,
+    };
+    render(<MatchView phase="done" outcome={outcome} onDisconnect={() => undefined} />);
+    expect(screen.getByText(/did not arrive in time/i)).toBeInTheDocument();
+  });
+
+  it('renders deterministic overlap scores from localResult.heuristics', () => {
+    render(<MatchView phase="done" outcome={makeOutcome()} onDisconnect={() => undefined} />);
+    expect(screen.getByTestId('match-overlap-scores')).toBeInTheDocument();
+    expect(screen.getByText(/Overlap scores/i)).toBeInTheDocument();
+    expect(screen.getByText('0.72')).toBeInTheDocument();
+  });
+
+  it('shows a degraded banner when localResult.degraded is true', () => {
+    const base = makeOutcome();
+    const outcome: MatchOutcome = {
+      ...base,
+      localResult: {
+        ...base.localResult,
+        degraded: true,
+        degradationNote: 'defaults-applied: explanation',
+      },
+    };
+    render(<MatchView phase="done" outcome={outcome} onDisconnect={() => undefined} />);
+    expect(screen.getByTestId('match-degraded-banner')).toBeInTheDocument();
+    expect(screen.getByText(/Partial analysis/i)).toBeInTheDocument();
   });
 
   it('fires onDisconnect when the disconnect button is clicked', () => {

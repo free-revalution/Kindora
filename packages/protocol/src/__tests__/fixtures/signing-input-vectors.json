@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "description": "KSA signing-input golden vectors shared by @kindora/protocol and kindora_desktop_lib::envelope. P0-2A / A2.",
+  "vectors": [
+    {
+      "name": "hello-empty-recipient",
+      "envelope": {
+        "protocol": "ksa",
+        "version": "0.1",
+        "messageId": "11111111-1111-4111-8111-111111111111",
+        "timestamp": "2026-01-01T00:00:00.000Z",
+        "type": "hello",
+        "sender": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "payload": {
+          "displayName": "t",
+          "capabilities": {
+            "protocolVersion": "0.1"
+          }
+        }
+      },
+      "recipient": "",
+      "expectedInputB64url": "S1NBLVNJRy1WMQprc2EKMC4xCjExMTExMTExLTExMTEtNDExMS04MTExLTExMTExMTExMTExMQoyMDI2LTAxLTAxVDAwOjAwOjAwLjAwMFoKaGVsbG8KYWFhYWFhYWEtYWFhYS00YWFhLThhYWEtYWFhYWFhYWFhYWFhCgo5M1E4bHVrYmxmY19ucmlnTDBKbGpNbzd6VFh2emRoXzhEMlc4d1F4SUpnCg"
+    }
+  ]
+}

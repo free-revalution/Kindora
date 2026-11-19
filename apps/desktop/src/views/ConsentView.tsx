@@ -80,7 +80,7 @@ export function ConsentView({
   const isTimedOut = finalOutcome?.peerAcceptTimedOut === true;
 
   return (
-    <main className="mx-auto flex w-full max-w-2xl flex-col gap-6 px-6 py-10">
+    <main className="kindora-page">
       <header className="flex items-start justify-between">
         <div>
           <p className="text-kindora-500 dark:text-kindora-400 text-xs uppercase tracking-wide">

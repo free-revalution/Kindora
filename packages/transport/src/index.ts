@@ -6,7 +6,7 @@
  *   - `Transport`           — interface (§ 19). connect / send / onMessage / disconnect.
  *   - `LoopbackTransport`   — in-memory dev / test transport (Mode A stand-in for browser dev).
  *   - `LanTransport`        — Tauri-side UDP discovery + TCP (Mode A real, V0.1).
- *   - `WebRtcTransport`     — interface + stub (Mode B / C, not implemented in V0.1 dev).
+ *   - `WebRtcTransport`     — DataChannel + Mode B manual / Mode C HTTP signalling.
  *   - `PairingSession`      — finite state machine on top of any Transport.
  *   - `pairingCode*`        — short codes for manual pairing (§ 17).
  *   - `qrPayload*`          — `kindora://pair?c=...&a=...&v=0.1` URLs for QR codes.
@@ -143,10 +143,39 @@ export {
   WebRtcTransport,
   WebRtcNotImplementedError,
   WEBRTC_NOT_IMPLEMENTED_CODE,
+  DEFAULT_STUN_SERVERS,
+  isWebRtcAvailable,
+  type WebRtcRole,
   type WebRtcTransportOptions,
   type WebRtcSignallingAdapter,
   type WebRtcSignallingEvent,
 } from './webrtc-transport';
+export {
+  MANUAL_SIGNAL_BLOB_VERSION,
+  ManualSignallingAdapter,
+  ManualSignalError,
+  encodeManualSignalBlob,
+  decodeManualSignalBlob,
+  bridgeManualSignalling,
+  waitForIceGatheringComplete,
+  type ManualSignalRole,
+  type ManualSignalPayload,
+} from './manual-signalling';
+export {
+  runWebRtcLoopbackSelfTest,
+  type WebRtcSelfTestResult,
+} from './webrtc-selftest';
+export {
+  BroadcastSignallingAdapter,
+  isBroadcastSignallingAvailable,
+} from './broadcast-signalling';
+export {
+  HttpSignallingAdapter,
+  HttpSignallingError,
+  isHttpSignallingUrl,
+  type HttpSignallingOptions,
+  type HttpSignallingWire,
+} from './http-signalling';
 export {
   LanTransport,
   type LanTransportOptions,
@@ -156,6 +185,7 @@ export {
 export {
   PairingSession,
   DEFAULT_REPLAY_GUARD_OPTIONS,
+  type AuthorizedEnvelopeSignFn,
   type PairingState,
   type PairingSnapshot,
   type PairingSessionOptions,

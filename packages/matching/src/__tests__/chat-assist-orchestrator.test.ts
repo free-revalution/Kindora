@@ -127,13 +127,13 @@ describe('@kindora/matching — ChatAssistOrchestrator', () => {
     expect(provider.calls).toHaveLength(0);
   });
 
-  it('parses invalid LLM output into an empty reply with degraded=true', async () => {
+  it('parses invalid LLM output into an empty reply with degraded=true when there is no overlap to seed', async () => {
     const provider = stubProvider('not json at all');
     const orchestrator = new ChatAssistOrchestrator({
       selfAgentId: SELF_ID,
-      selfProfile: makeProfile(),
+      selfProfile: makeProfile({ interests: ['pottery'] }),
       peerDisplayName: 'Sam',
-      peerProfile: makeProfile({ nickname: 'sam' }),
+      peerProfile: makeProfile({ nickname: 'sam', interests: ['astronomy'] }),
       llm: provider,
       config: { maxChatAssistTokens: 1200 },
       getHistory: () => [],
@@ -142,6 +142,23 @@ describe('@kindora/matching — ChatAssistOrchestrator', () => {
     expect(result.degraded).toBe(true);
     expect(result.reply.suggestions).toEqual([]);
     expect(result.degradationNote).toMatch(/json-parse-failed/);
+  });
+
+  it('seeds suggestions from shared interests when the LLM returns nothing usable', async () => {
+    const provider = stubProvider('not json at all');
+    const orchestrator = new ChatAssistOrchestrator({
+      selfAgentId: SELF_ID,
+      selfProfile: makeProfile({ interests: ['typescript', 'hiking'] }),
+      peerDisplayName: 'Sam',
+      peerProfile: makeProfile({ nickname: 'sam', interests: ['typescript', 'hiking'] }),
+      llm: provider,
+      config: { maxChatAssistTokens: 1200 },
+      getHistory: () => [],
+    });
+    const result = await orchestrator.ask('help');
+    expect(result.degraded).toBe(true);
+    expect(result.reply.suggestions.length).toBeGreaterThan(0);
+    expect(result.degradationNote).toMatch(/heuristic-seed/);
   });
 
   it('forwards the analysis into the user message', async () => {

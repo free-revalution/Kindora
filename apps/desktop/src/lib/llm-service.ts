@@ -8,8 +8,16 @@
  * See 开发手册.md § 10–12.
  */
 
-import type { LLMConfig, LLMProvider, LLMProviderKind } from '@kindora/llm';
+import type {
+  ChatMessage,
+  LLMConfig,
+  LLMOptions,
+  LLMProvider,
+  LLMProviderKind,
+  LLMResponse,
+} from '@kindora/llm';
 import { createProvider, isLLMError, type LLMErrorCode } from '@kindora/llm';
+import { getTauriInvoke } from './tauri-runtime';
 import {
   BrowserLocalStorageEncryptedSecretStore,
   type SecretStore,
@@ -57,7 +65,36 @@ export async function loadLLMConfig(): Promise<StoredLLMConfig | null> {
   return _settings.get<StoredLLMConfig>(SETTINGS_KEY);
 }
 
+/**
+ * LLM-01 — Ollama (and any loopback-only provider) must stay on localhost.
+ * Non-loopback hosts are rejected before they are written, because the
+ * packaged CSP only allows `localhost` / `127.0.0.1:11434`.
+ */
+export function assertOllamaBaseUrlAllowed(baseUrl: string | undefined): void {
+  if (!baseUrl || baseUrl.trim().length === 0) {
+    throw new Error('Ollama base URL is required (e.g. http://127.0.0.1:11434).');
+  }
+  let url: URL;
+  try {
+    url = new URL(baseUrl);
+  } catch {
+    throw new Error(`Ollama base URL is not a valid URL: ${baseUrl}`);
+  }
+  const host = url.hostname.toLowerCase();
+  if (host !== 'localhost' && host !== '127.0.0.1' && host !== '[::1]' && host !== '::1') {
+    throw new Error(
+      `Ollama base URL must point at this machine (localhost / 127.0.0.1). Got host "${host}".`,
+    );
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    throw new Error(`Ollama base URL must use http or https. Got ${url.protocol}`);
+  }
+}
+
 export async function saveLLMConfig(config: StoredLLMConfig, apiKey?: string): Promise<void> {
+  if (config.provider === 'ollama') {
+    assertOllamaBaseUrlAllowed(config.baseUrl);
+  }
   // Secret FIRST, settings second.
   //
   // These are two independent writes (localStorage and the OS keychain) and
@@ -108,6 +145,9 @@ export async function clearStoredApiKey(provider: LLMProviderKind): Promise<void
  */
 export async function loadStoredApiKey(provider: LLMProviderKind): Promise<string | undefined> {
   if (!providerRequiresApiKey(provider)) return undefined;
+  if (isTauriSecretStoreAvailable()) {
+    return undefined;
+  }
   try {
     const value = await _secrets.get(secretKeyFor(provider));
     return value && value.length > 0 ? value : undefined;
@@ -129,6 +169,9 @@ export async function loadStoredApiKey(provider: LLMProviderKind): Promise<strin
 export async function hasStoredApiKey(provider: LLMProviderKind): Promise<boolean> {
   if (!providerRequiresApiKey(provider)) return false;
   try {
+    if (typeof _secrets.exists === 'function') {
+      return await _secrets.exists(secretKeyFor(provider));
+    }
     const value = await _secrets.get(secretKeyFor(provider));
     return typeof value === 'string' && value.length > 0;
   } catch {
@@ -161,9 +204,43 @@ export async function clearLLMConfig(): Promise<void> {
  * instead would turn a half-configured app into an unhandled rejection at
  * startup (see `App.tsx`) and a confusing failure inside the Connect flow.
  */
+class TauriNativeLlmProvider implements LLMProvider {
+  constructor(private readonly cfg: StoredLLMConfig) {}
+
+  async chat(messages: readonly ChatMessage[], _options?: LLMOptions): Promise<LLMResponse> {
+    const tauri = getTauriInvoke();
+    if (!tauri) {
+      throw new Error('Tauri LLM provider requires the desktop runtime.');
+    }
+    const result = await tauri.invoke<{ content: string }>('llm_chat', {
+      provider: this.cfg.provider,
+      model: this.cfg.model,
+      baseUrl: this.cfg.baseUrl,
+      messages,
+    });
+    return Object.freeze({
+      content: result.content,
+      model: this.cfg.model,
+    });
+  }
+}
+
 export async function loadProvider(): Promise<LLMProvider | null> {
   const cfg = await loadLLMConfig();
   if (!cfg) return null;
+  if (isTauriSecretStoreAvailable()) {
+    if (providerRequiresApiKey(cfg.provider) && !(await hasStoredApiKey(cfg.provider))) {
+      return null;
+    }
+    if (cfg.provider === 'ollama') {
+      try {
+        assertOllamaBaseUrlAllowed(cfg.baseUrl);
+      } catch {
+        return null;
+      }
+    }
+    return new TauriNativeLlmProvider(cfg);
+  }
   const apiKey = await loadStoredApiKey(cfg.provider);
   if (providerRequiresApiKey(cfg.provider) && !apiKey) return null;
   try {
@@ -212,6 +289,19 @@ export async function loadLlmStatus(): Promise<LlmStatus> {
   // "no key". A locked or unavailable keychain is indistinguishable
   // from "no key" here — and both mean the app cannot talk to the
   // provider, so reporting `missing_api_key` is the honest answer.
+  if (isTauriSecretStoreAvailable()) {
+    if (providerRequiresApiKey(cfg.provider) && !(await hasStoredApiKey(cfg.provider))) {
+      return { ready: false, reason: 'missing_api_key' };
+    }
+    if (cfg.provider === 'ollama') {
+      try {
+        assertOllamaBaseUrlAllowed(cfg.baseUrl);
+      } catch {
+        return { ready: false, reason: 'invalid_config' };
+      }
+    }
+    return { ready: true };
+  }
   const apiKey = await loadStoredApiKey(cfg.provider);
   if (providerRequiresApiKey(cfg.provider) && !apiKey) {
     return { ready: false, reason: 'missing_api_key' };
@@ -266,6 +356,22 @@ export function describeLlmFailure(err: unknown): LlmFailure {
 }
 
 export async function testConnection(cfg: StoredLLMConfig, apiKey?: string): Promise<string> {
+  if (cfg.provider === 'ollama') {
+    assertOllamaBaseUrlAllowed(cfg.baseUrl);
+  }
+  const tauri = getTauriInvoke();
+  if (tauri) {
+    const result = await tauri.invoke<{ ok: boolean; message: string }>('llm_test_connection', {
+      provider: cfg.provider,
+      model: cfg.model,
+      baseUrl: cfg.baseUrl,
+      apiKey: apiKey && apiKey.length > 0 ? apiKey : undefined,
+    });
+    if (!result.ok) {
+      throw new Error(result.message);
+    }
+    return result.message;
+  }
   const provider = createProvider({
     ...cfg,
     apiKey: apiKey && apiKey.length > 0 ? apiKey : undefined,
