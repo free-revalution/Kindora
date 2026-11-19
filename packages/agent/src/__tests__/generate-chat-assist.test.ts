@@ -163,18 +163,33 @@ describe('@kindora/agent — generateChatAssist', () => {
     expect(provider.calls).toHaveLength(0);
   });
 
-  it('falls back to empty reply with degraded=true on unparseable LLM output', async () => {
+  it('falls back to empty reply with degraded=true on unparseable LLM output when there is no overlap to seed', async () => {
     const provider = stubProvider('not json at all');
     const result = await generateChatAssist(provider, {
-      selfProfile: makeProfile(),
+      selfProfile: makeProfile({ interests: ['pottery'] }),
       selfAgentId: SELF_ID,
-      peerProfile: makeProfile({ nickname: 'sam' }),
+      peerProfile: makeProfile({ nickname: 'sam', interests: ['astronomy'] }),
       history: [],
       userQuery: 'help',
     });
     expect(result.degraded).toBe(true);
     expect(result.reply.suggestions).toEqual([]);
     expect(result.degradationNote).toMatch(/json-parse-failed/);
+  });
+
+  it('seeds topic suggestions from recommendedTopics when the LLM returns nothing', async () => {
+    const provider = stubProvider('not json at all');
+    const result = await generateChatAssist(provider, {
+      selfProfile: makeProfile(),
+      selfAgentId: SELF_ID,
+      peerProfile: makeProfile({ nickname: 'sam' }),
+      analysis: SAMPLE_ANALYSIS,
+      history: [],
+      userQuery: 'help',
+    });
+    expect(result.degraded).toBe(true);
+    expect(result.reply.suggestions.map((s) => s.text)).toEqual(['side projects in TS']);
+    expect(result.degradationNote).toMatch(/heuristic-seed/);
   });
 
   it('forwards an abort signal to the LLM provider', async () => {

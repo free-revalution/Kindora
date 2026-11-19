@@ -51,7 +51,7 @@ export function MatchView({ title, phase, outcome, error, onDisconnect }: MatchV
   const heading = title ?? t('match.connectedWith');
 
   return (
-    <main className="mx-auto flex w-full max-w-2xl flex-col gap-6 px-6 py-10">
+    <main className="kindora-page">
       <header className="flex items-start justify-between">
         <div>
           <p className="text-kindora-500 dark:text-kindora-400 text-xs uppercase tracking-wide">
@@ -87,9 +87,20 @@ export function MatchView({ title, phase, outcome, error, onDisconnect }: MatchV
       )}
       {!peer && (
         <p className="text-kindora-500 dark:text-kindora-400 text-sm italic">
-          {t('match.peerStillThinking')}
+          {outcome.peerAnalysisTimedOut ? t('match.peerTimedOut') : t('match.peerStillThinking')}
         </p>
       )}
+
+      {outcome.localResult.degraded ? (
+        <div
+          className="border-amber-300 bg-amber-50 text-amber-950 dark:border-amber-700 dark:bg-amber-950/40 dark:text-amber-100 rounded-md border px-3 py-2 text-sm"
+          data-testid="match-degraded-banner"
+          role="status"
+        >
+          <p className="font-medium">{t('match.degradedTitle')}</p>
+          <p className="mt-1 opacity-90">{t('match.degradedBody')}</p>
+        </div>
+      ) : null}
 
       <Section title={t('match.commonGround')}>
         {local.commonGround.length === 0 ? (
@@ -124,7 +135,55 @@ export function MatchView({ title, phase, outcome, error, onDisconnect }: MatchV
       <Section title={t('match.explanation')}>
         <p className="text-sm leading-relaxed">{local.explanation || t('match.noExplanation')}</p>
       </Section>
+
+      <OverlapScores hints={outcome.localResult.heuristics} />
     </main>
+  );
+}
+
+function OverlapScores({
+  hints,
+}: {
+  hints: {
+    readonly interestScore: number;
+    readonly intentScore: number;
+    readonly styleScore: number;
+    readonly activityScore: number;
+    readonly compositeScore: number;
+  };
+}) {
+  const t = useTranslate();
+  const rows: Array<{ key: TranslationKey; value: number }> = [
+    { key: 'match.overlap.interest', value: hints.interestScore },
+    { key: 'match.overlap.intent', value: hints.intentScore },
+    { key: 'match.overlap.style', value: hints.styleScore },
+    { key: 'match.overlap.activity', value: hints.activityScore },
+    { key: 'match.overlap.composite', value: hints.compositeScore },
+  ];
+  return (
+    <Section title={t('match.overlapTitle')}>
+      <p className="text-kindora-500 dark:text-kindora-400 mb-3 text-xs leading-relaxed">
+        {t('match.overlapHint')}
+      </p>
+      <ul className="flex flex-col gap-2" data-testid="match-overlap-scores">
+        {rows.map((row) => (
+          <li key={row.key} className="flex items-center gap-3 text-sm">
+            <span className="text-kindora-600 dark:text-kindora-300 w-24 shrink-0">
+              {t(row.key)}
+            </span>
+            <div className="bg-kindora-100 dark:bg-kindora-800 h-1.5 flex-1 overflow-hidden rounded-full">
+              <div
+                className="bg-kindora-700 dark:bg-kindora-300 h-full rounded-full"
+                style={{ width: `${Math.round(Math.min(1, Math.max(0, row.value)) * 100)}%` }}
+              />
+            </div>
+            <span className="text-kindora-500 dark:text-kindora-400 w-10 text-right font-mono text-xs">
+              {row.value.toFixed(2)}
+            </span>
+          </li>
+        ))}
+      </ul>
+    </Section>
   );
 }
 
@@ -212,7 +271,7 @@ export function ProgressView({
 }) {
   const t = useTranslate();
   return (
-    <main className="mx-auto flex w-full max-w-2xl flex-col items-center gap-6 px-6 py-20">
+    <main className="kindora-page items-center py-16">
       <p className="text-kindora-500 dark:text-kindora-400 text-sm">{message}</p>
       <div
         className="border-kindora-200 dark:border-kindora-700 h-2 w-40 animate-pulse rounded-full border"
@@ -237,7 +296,7 @@ export function ErrorView({
 }) {
   const t = useTranslate();
   return (
-    <main className="mx-auto flex w-full max-w-2xl flex-col gap-4 px-6 py-20">
+    <main className="kindora-page py-16">
       <section className="kindora-card flex flex-col gap-3">
         <h2 className="text-xs uppercase tracking-wide text-rose-600 dark:text-rose-400">
           {t('common.error')}

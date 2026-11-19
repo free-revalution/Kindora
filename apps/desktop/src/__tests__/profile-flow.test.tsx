@@ -49,7 +49,7 @@ describe('apps/desktop — Phase 1 profile flow', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Create Agent' }));
 
     await waitFor(() => {
-      expect(screen.getByText('Alex')).toBeInTheDocument();
+      expect(screen.getAllByText('Alex').length).toBeGreaterThan(0);
     });
 
     const stored = await loadAgent();
@@ -100,7 +100,7 @@ describe('apps/desktop — Phase 1 profile flow', () => {
     });
 
     render(<App />);
-    expect(await screen.findByText('Preexisting')).toBeInTheDocument();
+    expect((await screen.findAllByText('Preexisting')).length).toBeGreaterThan(0);
   });
 
   it('Edit Profile flow loads existing values and saves updates', async () => {
@@ -129,7 +129,7 @@ describe('apps/desktop — Phase 1 profile flow', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
 
     await waitFor(() => {
-      expect(screen.getByText('Updated')).toBeInTheDocument();
+      expect(screen.getAllByText('Updated').length).toBeGreaterThan(0);
     });
 
     const stored = await loadAgent();

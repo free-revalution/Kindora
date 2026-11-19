@@ -11,10 +11,8 @@
  * so callers can react to "the keychain is locked" instead of matching
  * on English prose.
  *
- * Known V0.1 limitation: the private key is read back into the webview
- * in order to sign envelopes there. A Rust-side signer (so that the key
- * never leaves Rust) needs `p256` / `ecdsa` in `Cargo.lock` and is
- * tracked as a follow-up. See docs/REMEDIATION_PROGRESS.md.
+ * P0-2A / SEC-01: `agent_key_get` is not registered for the WebView.
+ * Signing goes through Rust `agent_sign_envelope`; `load()` does not return plaintext.
  */
 
 import { getTauriInvoke, isTauriRuntime, type TauriInvoke } from './tauri-runtime';
@@ -127,11 +125,10 @@ export class TauriAgentKeychain implements AgentKeychain {
   }
 
   async load(): Promise<string | null> {
-    try {
-      return await this.tauri.invoke<string | null>('agent_key_get');
-    } catch (err) {
-      throw toAgentKeyError(err);
-    }
+    throw new AgentKeyError(
+      'keychain_denied',
+      'agent_key_get removed; use agent_sign_envelope or exists()',
+    );
   }
 
   async exists(): Promise<boolean> {

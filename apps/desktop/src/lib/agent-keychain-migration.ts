@@ -33,7 +33,12 @@ import {
 } from '@kindora/protocol';
 import type { StoredAgent } from '@kindora/storage';
 
-import { AgentKeyError, TauriAgentKeychain } from './tauri-agent-keychain';
+import {
+  AgentKeyError,
+  TauriAgentKeychain,
+  isAgentKeychainAvailable,
+} from './tauri-agent-keychain';
+import { getTauriInvoke } from './tauri-runtime';
 
 /** How the caller reads and writes the record the key belongs to. */
 export interface AgentRecordIo {
@@ -68,14 +73,14 @@ export async function movePlaintextKeyToKeychain(
   // 1 — write.
   await keychain.store(privateKey);
 
-  // 2 — verify.
-  const readBack = await keychain.load();
-  if (readBack !== privateKey) {
+  // 2 — verify (native path: no plaintext read-back).
+  if (!(await keychain.exists())) {
     throw new AgentKeyError(
       'corrupt',
-      'the OS keychain did not return the key that was just stored; the local copy was kept',
+      'the OS keychain did not retain the key that was just stored; the local copy was kept',
     );
   }
+  await assertNativeKeyMatchesPublicKey(stored.publicKey);
 
   const keyId = await deriveKeyId(base64ToBytes(stored.publicKey));
   const { privateKey: _plaintext, ...withoutPlaintext } = stored;
@@ -103,12 +108,42 @@ export async function movePlaintextKeyToKeychain(
 }
 
 /**
- * Confirm that a private key really belongs to the recorded public key.
- *
- * A mismatch means the keychain holds a key from a different identity —
- * which would silently break every signature. We sign a fixed probe with
- * the private key and verify it with the public key.
+ * Verify the OS keychain key matches the recorded public key via Rust
+ * `agent_key_matches_public_key` (fixed probe; D4 — no WebView `agent_sign`).
  */
+export async function assertNativeKeyMatchesPublicKey(
+  publicKeySpkiBase64: string,
+): Promise<void> {
+  if (!isAgentKeychainAvailable()) {
+    throw new AgentKeyError('keychain_unavailable', 'Tauri runtime required for native key check');
+  }
+  const tauri = getTauriInvoke();
+  if (!tauri) {
+    throw new AgentKeyError('keychain_unavailable', 'Tauri invoke unavailable');
+  }
+  const keychain = new TauriAgentKeychain();
+  if (!(await keychain.exists())) {
+    throw new AgentKeyError('not_found', 'no agent key in the OS keychain');
+  }
+  let ok: boolean;
+  try {
+    ok = await tauri.invoke<boolean>('agent_key_matches_public_key', {
+      publicKeyB64: publicKeySpkiBase64,
+    });
+  } catch (err) {
+    throw new AgentKeyError(
+      'corrupt',
+      `native key match failed: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+  if (!ok) {
+    throw new AgentKeyError(
+      'corrupt',
+      'the private key in the OS keychain does not match the recorded public key',
+    );
+  }
+}
+
 export async function assertKeyMatchesPublicKey(
   privateKeyPkcs8Base64: string,
   publicKeySpkiBase64: string,

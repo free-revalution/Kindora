@@ -1,0 +1,73 @@
+{
+  "version": 1,
+  "description": "RFC 8785 JCS golden vectors shared by TypeScript (@kindora/protocol) and Rust (kindora_desktop_lib::jcs). P0-2A §5.2 / §5.3 test A.",
+  "vectors": [
+    {
+      "name": "rfc-8785-3.2.3",
+      "input": {
+        "numbers": [
+          333333333.3333333,
+          1e+30,
+          4.5,
+          0.002,
+          1e-27
+        ],
+        "string": "€$\u000f\nA'B\"\\\\\"/",
+        "literals": [
+          null,
+          true,
+          false
+        ]
+      },
+      "expected": "{\"literals\":[null,true,false],\"numbers\":[333333333.3333333,1e+30,4.5,0.002,1e-27],\"string\":\"€$\\u000f\\nA'B\\\"\\\\\\\\\\\"/\"}"
+    },
+    {
+      "name": "key-order-independent",
+      "input": {
+        "b": 1,
+        "a": 2,
+        "c": 3
+      },
+      "expected": "{\"a\":2,\"b\":1,\"c\":3}"
+    },
+    {
+      "name": "nested-key-order",
+      "input": {
+        "outer": {
+          "z": 1,
+          "a": {
+            "y": 2,
+            "b": 3
+          }
+        }
+      },
+      "expected": "{\"outer\":{\"a\":{\"b\":3,\"y\":2},\"z\":1}}"
+    },
+    {
+      "name": "empty-containers",
+      "input": {
+        "o": {},
+        "a": []
+      },
+      "expected": "{\"a\":[],\"o\":{}}"
+    },
+    {
+      "name": "literals-and-unicode",
+      "input": {
+        "n": null,
+        "t": true,
+        "f": false,
+        "s": "中文€"
+      },
+      "expected": "{\"f\":false,\"n\":null,\"s\":\"中文€\",\"t\":true}"
+    },
+    {
+      "name": "utf16-surrogate-key-order",
+      "input": {
+        "𐀀": 1,
+        "＀": 2
+      },
+      "expected": "{\"𐀀\":1,\"＀\":2}"
+    }
+  ]
+}

@@ -100,71 +100,87 @@ export function ChatView({
   const textTooLong = trimmed.length > maxTextLength;
 
   return (
-    <main className="mx-auto flex h-full min-h-screen w-full max-w-2xl flex-col gap-4 px-6 py-6">
-      <header className="flex items-start justify-between" data-testid="chat-header">
-        <div>
-          <p className="text-kindora-500 dark:text-kindora-400 text-xs uppercase tracking-wide">
-            {t('chat.eyebrow')}
-          </p>
-          <h1 className="mt-1 text-3xl font-semibold tracking-tight">{peerDisplayName}</h1>
-          <p className="text-kindora-500 dark:text-kindora-400 mt-1 text-sm">
+    <main className="flex h-full min-h-0 w-full flex-col bg-kindora-50" data-testid="chat-screen">
+      <header
+        className="flex shrink-0 items-start justify-between gap-3 border-b border-kindora-200 bg-white px-6 py-3.5"
+        data-testid="chat-header"
+      >
+        <div className="min-w-0">
+          <p className="kindora-eyebrow">{t('chat.eyebrow')}</p>
+          <h1 className="mt-1 truncate font-display text-2xl font-medium tracking-[-0.03em] text-kindora-950">
+            {peerDisplayName}
+          </h1>
+          <p className="mt-0.5 text-xs text-kindora-500">
             {t('chat.you', { name: selfDisplayName })}
           </p>
         </div>
-        <button
-          type="button"
-          className="kindora-button-ghost"
-          onClick={onDisconnect}
-          data-testid="chat-close"
-        >
-          {t(isClosed ? 'chat.back' : 'chat.disconnect')}
-        </button>
+        <div className="flex shrink-0 gap-2">
+          <button
+            type="button"
+            className="kindora-button-ghost"
+            onClick={onBlock}
+            disabled={isClosed || snapshot.blockedByLocal}
+            data-testid="chat-block"
+          >
+            {t(snapshot.blockedByLocal ? 'chat.alreadyBlocked' : 'chat.block')}
+          </button>
+          <button
+            type="button"
+            className="kindora-button-ghost"
+            onClick={onDisconnect}
+            data-testid="chat-close"
+          >
+            {t(isClosed ? 'chat.back' : 'chat.disconnect')}
+          </button>
+        </div>
       </header>
 
-      {snapshot.blockedByLocal && (
-        <section
-          className="kindora-card flex flex-col gap-2 border border-rose-300 dark:border-rose-700"
-          data-testid="chat-blocked-local"
-        >
-          <h2 className="text-xs uppercase tracking-wide text-rose-600 dark:text-rose-400">
-            {t('chat.blockedLocal')}
-          </h2>
-          <p className="text-sm leading-relaxed">
-            {t('chat.blockedLocalBody', { peer: peerDisplayName })}
-          </p>
-        </section>
-      )}
-
-      {snapshot.blockedByPeer && (
-        <section
-          className="kindora-card flex flex-col gap-2 border border-rose-300 dark:border-rose-700"
-          data-testid="chat-blocked-peer"
-        >
-          <h2 className="text-xs uppercase tracking-wide text-rose-600 dark:text-rose-400">
-            {t('chat.blockedByPeer')}
-          </h2>
-          <p className="text-sm leading-relaxed">
-            {t('chat.blockedByPeerBody', { peer: peerDisplayName })}
-          </p>
-        </section>
-      )}
-
-      {isClosed && snapshot.closeReason === 'peer-disconnect' && (
-        <section className="kindora-card flex flex-col gap-2" data-testid="chat-peer-left">
-          <p className="text-sm leading-relaxed">{t('chat.peerLeft', { peer: peerDisplayName })}</p>
-        </section>
+      {(snapshot.blockedByLocal ||
+        snapshot.blockedByPeer ||
+        (isClosed && snapshot.closeReason === 'peer-disconnect') ||
+        error) && (
+        <div className="flex shrink-0 flex-col gap-2 border-b border-kindora-200 px-6 py-3">
+          {snapshot.blockedByLocal && (
+            <section
+              className="kindora-banner-error"
+              data-testid="chat-blocked-local"
+            >
+              <h2 className="text-xs font-medium uppercase tracking-wide">{t('chat.blockedLocal')}</h2>
+              <p className="mt-1 text-sm">
+                {t('chat.blockedLocalBody', { peer: peerDisplayName })}
+              </p>
+            </section>
+          )}
+          {snapshot.blockedByPeer && (
+            <section className="kindora-banner-error" data-testid="chat-blocked-peer">
+              <h2 className="text-xs font-medium uppercase tracking-wide">
+                {t('chat.blockedByPeer')}
+              </h2>
+              <p className="mt-1 text-sm">
+                {t('chat.blockedByPeerBody', { peer: peerDisplayName })}
+              </p>
+            </section>
+          )}
+          {isClosed && snapshot.closeReason === 'peer-disconnect' && (
+            <section className="kindora-banner-info" data-testid="chat-peer-left">
+              <p className="text-sm">{t('chat.peerLeft', { peer: peerDisplayName })}</p>
+            </section>
+          )}
+          {error && (
+            <section className="kindora-banner-error" data-testid="chat-error">
+              <p className="text-sm">{error}</p>
+            </section>
+          )}
+        </div>
       )}
 
       <section
-        className="kindora-card flex min-h-[40vh] flex-col gap-3"
+        className="min-h-0 flex-1 space-y-3 overflow-y-auto px-6 py-5"
         data-testid="chat-history"
         data-entry-count={snapshot.entries.length}
       >
         {snapshot.entries.length === 0 && (
-          <p
-            className="text-kindora-500 dark:text-kindora-400 text-sm italic"
-            data-testid="chat-history-empty"
-          >
+          <p className="text-sm italic text-kindora-400" data-testid="chat-history-empty">
             {t(phase === 'open' ? 'chat.emptyOpen' : 'chat.emptyClosed')}
           </p>
         )}
@@ -181,88 +197,62 @@ export function ChatView({
         ))}
       </section>
 
-      {error && (
-        <section
-          className="kindora-card flex flex-col gap-2 border border-rose-300 dark:border-rose-700"
-          data-testid="chat-error"
-        >
-          <p className="text-sm text-rose-600 dark:text-rose-400">{error}</p>
-        </section>
-      )}
-
-      <ChatAssistPanel
-        state={assistant}
-        disabled={isClosed}
-        onAskOpen={onAskOpen}
-        onAskClose={onAskClose}
-        onAskChangeQuery={onAskChangeQuery}
-        onAskSubmit={onAskSubmit}
-        onAskRegenerate={onAskRegenerate}
-        onUseSuggestion={onUseSuggestion}
-        onAskDismissSuggestion={onAskDismissSuggestion}
-      />
-
-      <form
-        className="kindora-card flex flex-col gap-2"
-        onSubmit={(e) => {
-          e.preventDefault();
-          if (canSend) onSend();
-        }}
-        data-testid="chat-composer"
-      >
-        <label
-          htmlFor="chat-input"
-          className="text-kindora-500 dark:text-kindora-400 text-xs uppercase tracking-wide"
-        >
-          {t('chat.message')}
-        </label>
-        <textarea
-          id="chat-input"
-          className="border-kindora-200 dark:border-kindora-700 min-h-[5rem] w-full resize-none rounded-md border bg-transparent p-2 text-sm leading-relaxed disabled:opacity-50"
-          rows={3}
-          value={draft}
-          onChange={(e) => onDraftChange(e.target.value)}
-          placeholder={
-            isClosed ? t('chat.inputClosed') : t('chat.inputOpen', { peer: peerDisplayName })
-          }
-          disabled={isClosed || sending}
-          maxLength={maxTextLength * 2 /* allow typing past, validate below */}
-          data-testid="chat-input"
+      <div className="shrink-0 border-t border-kindora-200 bg-white px-6 py-3.5">
+        <ChatAssistPanel
+          state={assistant}
+          disabled={isClosed}
+          onAskOpen={onAskOpen}
+          onAskClose={onAskClose}
+          onAskChangeQuery={onAskChangeQuery}
+          onAskSubmit={onAskSubmit}
+          onAskRegenerate={onAskRegenerate}
+          onUseSuggestion={onUseSuggestion}
+          onAskDismissSuggestion={onAskDismissSuggestion}
         />
-        <div className="flex items-center justify-between gap-2">
-          <p
-            className={`text-xs ${
-              textTooLong
-                ? 'text-rose-600 dark:text-rose-400'
-                : 'text-kindora-500 dark:text-kindora-400'
-            }`}
-            data-testid="chat-counter"
-          >
-            {trimmed.length} / {maxTextLength}
-          </p>
-          <button
-            type="submit"
-            className="kindora-button"
-            disabled={!canSend}
-            data-testid="chat-send"
-          >
-            {t(sending ? 'chat.sending' : 'chat.send')}
-          </button>
-        </div>
-      </form>
 
-      <footer className="flex flex-wrap items-center justify-between gap-2">
-        <button
-          type="button"
-          className="kindora-button-ghost"
-          onClick={onBlock}
-          disabled={isClosed || snapshot.blockedByLocal}
-          data-testid="chat-block"
+        <form
+          className="mt-3 flex flex-col gap-2"
+          onSubmit={(e) => {
+            e.preventDefault();
+            if (canSend) onSend();
+          }}
+          data-testid="chat-composer"
         >
-          {t(snapshot.blockedByLocal ? 'chat.alreadyBlocked' : 'chat.block')}
-        </button>
-        <p className="text-kindora-500 dark:text-kindora-400 text-xs">{t('chat.aiNeverSends')}</p>
-      </footer>
+          <label htmlFor="chat-input" className="sr-only">
+            {t('chat.message')}
+          </label>
+          <textarea
+            id="chat-input"
+            className="kindora-input min-h-[4.5rem] resize-none"
+            rows={3}
+            value={draft}
+            onChange={(e) => onDraftChange(e.target.value)}
+            placeholder={
+              isClosed ? t('chat.inputClosed') : t('chat.inputOpen', { peer: peerDisplayName })
+            }
+            disabled={isClosed || sending}
+            maxLength={maxTextLength * 2}
+            data-testid="chat-input"
+          />
+          <div className="flex items-center justify-between gap-2">
+            <p
+              className={`text-xs ${textTooLong ? 'text-rose-400' : 'text-kindora-500'}`}
+              data-testid="chat-counter"
+            >
+              {trimmed.length} / {maxTextLength}
+              <span className="ml-3 text-kindora-600">{t('chat.aiNeverSends')}</span>
+            </p>
+            <button
+              type="submit"
+              className="kindora-button"
+              disabled={!canSend}
+              data-testid="chat-send"
+            >
+              {t(sending ? 'chat.sending' : 'chat.send')}
+            </button>
+          </div>
+        </form>
+      </div>
     </main>
   );
 }
@@ -293,8 +283,8 @@ function ChatBubble({
   const align = isSent ? 'items-end' : 'items-start';
   const label = isSent ? t('chat.bubbleYou') : peerDisplayName;
   const bubbleClass = isSent
-    ? 'border-kindora-300 bg-kindora-50 dark:border-kindora-600 dark:bg-kindora-800/60'
-    : 'border-emerald-300 bg-emerald-50 dark:border-emerald-700 dark:bg-emerald-900/30';
+    ? 'border-kindora-200 bg-kindora-100 text-kindora-900'
+    : 'border-kindora-200 bg-white text-kindora-800';
   return (
     <div
       className={`flex flex-col gap-1 ${align}`}
@@ -302,29 +292,23 @@ function ChatBubble({
       data-direction={direction}
       data-status={status ?? 'unknown'}
     >
-      <p className="text-kindora-500 dark:text-kindora-400 text-xs">
+      <p className="font-mono text-[10px] uppercase tracking-[0.04em] text-kindora-400">
         {label}
         {source === 'agent' ? ` · ${t('chat.fromAgent')}` : ''} ·{' '}
         {formatTime(timestamp, LOCALES[locale].htmlLang)}
       </p>
       <p
-        className={`max-w-[80%] whitespace-pre-wrap break-words rounded-2xl border px-3 py-2 text-sm leading-relaxed ${bubbleClass}`}
+        className={`max-w-[min(80%,42rem)] whitespace-pre-wrap break-words rounded-[8px] border px-3.5 py-2.5 text-[14px] leading-[1.55] ${bubbleClass}`}
       >
         {text}
       </p>
       {status === 'PENDING' && (
-        <p
-          className="text-kindora-500 dark:text-kindora-400 text-xs italic"
-          data-testid="chat-status-pending"
-        >
+        <p className="text-xs italic text-pastel-yellowInk" data-testid="chat-status-pending">
           {t('chat.statusPending')}
         </p>
       )}
       {status === 'FAILED' && (
-        <p
-          className="text-xs italic text-rose-600 dark:text-rose-400"
-          data-testid="chat-status-failed"
-        >
+        <p className="text-xs italic text-pastel-redInk" data-testid="chat-status-failed">
           {t('chat.statusFailed')}
         </p>
       )}
@@ -363,6 +347,11 @@ export interface ChatAssistPanelState {
   readonly unavailableReason: string | undefined;
   /** Error from the most recent round-trip (parser / network). */
   readonly error: string | undefined;
+  /**
+   * Soft notice (e.g. heuristic-seed fallback) — not a hard failure.
+   * Prefer this over `error` when suggestions were still produced.
+   */
+  readonly softNotice: string | undefined;
   /** The user's free-text query. */
   readonly query: string;
   /** Parsed reply — already shaped for display by `summariseChatAssist`. */
@@ -491,6 +480,16 @@ function ChatAssistPanel({
             </button>
           </div>
         </form>
+      )}
+
+      {state.softNotice && (
+        <section
+          className="border-amber-300 bg-amber-50 text-amber-950 dark:border-amber-700 dark:bg-amber-950/40 dark:text-amber-100 rounded-md border px-3 py-2 text-sm"
+          data-testid="chat-assist-soft-notice"
+          role="status"
+        >
+          <p>{state.softNotice}</p>
+        </section>
       )}
 
       {state.error && (
@@ -759,6 +758,7 @@ export function LiveChatView({
   const [assistQuery, setAssistQuery] = useState('');
   const [assistBusy, setAssistBusy] = useState(false);
   const [assistError, setAssistError] = useState<string | undefined>(undefined);
+  const [assistSoftNotice, setAssistSoftNotice] = useState<string | undefined>(undefined);
   const [assistDisplay, setAssistDisplay] = useState<ChatAssistDisplay | null>(null);
   const [assistDismissed, setAssistDismissed] = useState<readonly string[]>([]);
 
@@ -846,16 +846,18 @@ export function LiveChatView({
     if (!handle || !query) return;
     setAssistBusy(true);
     setAssistError(undefined);
+    setAssistSoftNotice(undefined);
     setAssistDismissed([]);
     try {
       const result = await handle.orchestrator.ask(query);
       const display = summariseChatAssist(result.reply);
       setAssistDisplay(display);
-      if (result.degraded && result.degradationNote) {
-        setAssistError(result.degradationNote);
-      }
       if (result.boundaryBlocked) {
         setAssistError(t('chat.assist.boundaryBlocked'));
+      } else if (result.degraded && result.degradationNote?.includes('heuristic-seed')) {
+        setAssistSoftNotice(t('chat.assist.heuristicSeed'));
+      } else if (result.degraded && result.degradationNote) {
+        setAssistError(result.degradationNote);
       }
     } catch (e: unknown) {
       setAssistError(e instanceof Error ? e.message : String(e));
@@ -889,6 +891,7 @@ export function LiveChatView({
     unavailable: chatAssist === null,
     unavailableReason: chatAssist === null ? chatAssistError : undefined,
     error: assistError,
+    softNotice: assistSoftNotice,
     query: assistQuery,
     display: assistDisplay,
     dismissedIds: assistDismissed,

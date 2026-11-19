@@ -39,7 +39,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { act, render, screen, cleanup, fireEvent, waitFor } from '@testing-library/react';
 import { ConnectView } from '../ConnectView';
-import type { SocialProfile } from '@kindora/protocol';
+import { type SocialProfile } from '@kindora/protocol';
 import type { ConnectionState } from '@kindora/transport';
 import { createAgent } from '../../lib/agent-service';
 import { saveLLMConfig } from '../../lib/llm-service';
@@ -75,9 +75,8 @@ function installTauriRecorder(record: RecordedIpc[]): {
   // (it asks "is the Tauri runtime there?" every time), so this mock
   // has to answer those commands or agent creation throws before the
   // view is ever rendered. One in-memory slot models the keychain:
-  // `agent_key_store` writes it, `agent_key_get` reads it back, and
-  // `createAgent` compares the two — a keychain that silently
-  // discarded the write would fail the read-back on purpose.
+  // `agent_key_store` writes it; `agent_key_matches_public_key`
+  // verifies without returning plaintext (D4 — no WebView `agent_sign`).
   let agentKey: string | null = null;
   // The LLM API keys live in the same OS keychain (`secret_*`). The
   // secret store is chosen when `llm-service` is first imported, which
@@ -125,10 +124,58 @@ function installTauriRecorder(record: RecordedIpc[]): {
           agentKey = value;
           return null;
         }
-        case 'agent_key_get':
-          return agentKey;
         case 'agent_key_exists':
           return agentKey !== null;
+        case 'agent_key_matches_public_key': {
+          // Honest stub: key present ⇒ treat as matching (full crypto
+          // check lives in Rust unit tests).
+          return agentKey !== null;
+        }
+        case 'session_bind_local':
+        case 'session_note_peer':
+        case 'session_confirm_peer_fingerprint':
+        case 'session_set_mutual_consent':
+        case 'session_advance_chat':
+        case 'session_clear':
+          return null;
+        case 'agent_sign_envelope': {
+          if (!agentKey) {
+            throw { kind: 'not_found', message: 'no agent key' };
+          }
+          // Minimal signed-looking envelope for tests that reach send.
+          return {
+            protocol: 'KSA',
+            version: '0.1',
+            messageId: '11111111-1111-4111-8111-111111111111',
+            timestamp: '2026-01-01T00:00:00.000Z',
+            typeName: typeof args?.typeName === 'string' ? args.typeName : 'hello',
+            sender: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+            recipient: '',
+            payload: args?.payload ?? {},
+            signature: {
+              alg: 'ES256',
+              signedFields: 'ksa-sig-v1',
+              keyId: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+              value:
+                'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+            },
+          };
+        }
+        case 'agent_local_fingerprint': {
+          // P0-2A / A10 — host fingerprint is Rust-authoritative in
+          // production; tests fall back to the TS Crockford path.
+          const { pairingFingerprintFromPublicKey } = await import('@kindora/transport');
+          const agentId = typeof args?.agentId === 'string' ? args.agentId : '';
+          const publicKeyB64 =
+            typeof args?.publicKeyB64 === 'string' ? args.publicKeyB64 : '';
+          return pairingFingerprintFromPublicKey(agentId, publicKeyB64);
+        }
+        case 'agent_verify_peer_fingerprint': {
+          const claimed = typeof args?.claimed === 'string' ? args.claimed : '';
+          const expected = typeof args?.expected === 'string' ? args.expected : '';
+          const norm = (s: string) => s.replace(/[\s-]/g, '').toUpperCase();
+          return norm(claimed) === norm(expected);
+        }
         case 'agent_key_delete':
           agentKey = null;
           return null;
@@ -141,9 +188,9 @@ function installTauriRecorder(record: RecordedIpc[]): {
           secrets.set(key, value);
           return null;
         }
-        case 'secret_get': {
+        case 'secret_exists': {
           const key = args?.key;
-          return typeof key === 'string' ? (secrets.get(key) ?? null) : null;
+          return typeof key === 'string' ? secrets.has(key) : false;
         }
         case 'secret_delete': {
           const key = args?.key;
@@ -241,6 +288,7 @@ describe('ConnectView cancel / unmount cleanup (Phase 16.2 § 5.2 + Phase 16.3 �
     // assertion below pins the grouped shape.
     const codeEl = await screen.findByTestId('host-pairing-code');
     expect(codeEl.textContent).toMatch(/^[A-Z0-9]{3}-[A-Z0-9]{3}$/);
+    expect(screen.getByTestId('host-copy-fingerprint')).toBeInTheDocument();
 
     // Pre-condition: lan_host_start has been called.
     await waitFor(() => {

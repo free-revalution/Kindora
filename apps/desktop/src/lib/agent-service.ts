@@ -51,8 +51,12 @@ import {
   AgentKeyError,
   TauriAgentKeychain,
   isAgentKeychainAvailable,
+  type AgentKeyErrorKind,
 } from './tauri-agent-keychain';
-import { assertKeyMatchesPublicKey, movePlaintextKeyToKeychain } from './agent-keychain-migration';
+import {
+  assertNativeKeyMatchesPublicKey,
+  movePlaintextKeyToKeychain,
+} from './agent-keychain-migration';
 import { ensureLegacyMigration } from './database';
 import { runtimeProfileStore } from './runtime-stores';
 
@@ -83,8 +87,8 @@ export function agentRuntimeMode(): AgentRuntimeMode {
  * The capabilities this runtime can honestly advertise (Phase A / A4).
  *
  * `transportEncryption` is `false`: the LAN transport is plaintext TCP
- * and there is no TLS anywhere in V0.1. `webRtc` is `false`: the WebRTC
- * transport is not implemented (Phase G).
+ * and there is no TLS anywhere in V0.1. `webRtc` follows whether
+ * `RTCPeerConnection` exists (Tauri WebView / modern browsers).
  */
 export function runtimeCapabilities(hasPrivateKey: boolean): RuntimeCapabilities {
   return {
@@ -92,7 +96,7 @@ export function runtimeCapabilities(hasPrivateKey: boolean): RuntimeCapabilities
     signingReady: hasPrivateKey,
     sessionEncryptionReady: isCryptoAvailable(),
     transportEncryption: false,
-    webRtc: false,
+    webRtc: typeof globalThis.RTCPeerConnection === 'function',
   };
 }
 
@@ -120,15 +124,13 @@ export async function createAgent(profile: SocialProfile): Promise<StoredAgent> 
     const keychain = new TauriAgentKeychain();
     await keychain.store(identity.privateKey);
 
-    // Read the key back before we let go of it: a keychain that silently
-    // discards the write would leave the user with no identity at all.
-    const readBack = await keychain.load();
-    if (readBack !== identity.privateKey) {
+    if (!(await keychain.exists())) {
       throw new AgentKeyError(
         'corrupt',
-        'the OS keychain did not return the key that was just stored',
+        'the OS keychain did not retain the key that was just stored',
       );
     }
+    await assertNativeKeyMatchesPublicKey(identity.publicKey);
 
     const keyId = await deriveKeyId(base64ToBytes(identity.publicKey));
     const capabilities: AgentCapabilities = buildRuntimeCapabilities(runtimeCapabilities(true));
@@ -200,15 +202,19 @@ export async function loadAgent(): Promise<StoredAgent | null> {
   }
 
   const keychain = new TauriAgentKeychain();
-  const privateKey = await keychain.load();
-  if (!privateKey) {
+  // Confirm the keychain entry exists via `agent_key_matches_public_key` so the
+  // private key is not attached to the in-memory agent for the hot path.
+  // We still load once to verify it matches the stored public key (migration
+  // / corruption check), then drop it from the returned record.
+  if (!(await keychain.exists())) {
     throw new AgentKeyError(
       'not_found',
       'this device has an agent record but the OS keychain holds no matching private key',
     );
   }
-  await assertKeyMatchesPublicKey(privateKey, stored.publicKey);
-  return { ...stored, privateKey };
+  await assertNativeKeyMatchesPublicKey(stored.publicKey);
+  // Do not attach privateKey — signing goes through Rust `agent_sign_envelope`.
+  return stored;
 }
 
 /**
@@ -265,30 +271,81 @@ async function migrateLegacyDataIfNeeded(): Promise<void> {
   }
 }
 
+/** Structured agent-key failure for the keychain error screen. */
+export interface AgentKeyFailure {
+  readonly kind: AgentKeyErrorKind | 'unknown';
+  /** English fallback (logs / non-i18n callers). */
+  readonly message: string;
+  /** True when unlocking / granting access and retrying can help. */
+  readonly recoverable: boolean;
+}
+
+/**
+ * Classify an agent-key failure for the UI. Never throws.
+ */
+export function classifyAgentKeyError(err: unknown): AgentKeyFailure {
+  if (err instanceof AgentKeyError) {
+    const recoverable = err.isRecoverable;
+    switch (err.kind) {
+      case 'keychain_locked':
+        return {
+          kind: err.kind,
+          message: 'Your system keychain is locked. Unlock it, then try again.',
+          recoverable,
+        };
+      case 'keychain_denied':
+        return {
+          kind: err.kind,
+          message:
+            'Your system keychain denied access to Kindora’s key. Allow access and try again.',
+          recoverable,
+        };
+      case 'keychain_unavailable':
+        return {
+          kind: err.kind,
+          message:
+            'No system keychain is available on this device, so the private key cannot be stored safely.',
+          recoverable,
+        };
+      case 'not_found':
+        return {
+          kind: err.kind,
+          message: 'No private key was found for this agent.',
+          recoverable: false,
+        };
+      case 'corrupt':
+        return {
+          kind: err.kind,
+          message: 'The stored private key could not be read.',
+          recoverable: false,
+        };
+      case 'invalid_key':
+        return {
+          kind: err.kind,
+          message: 'The private key was rejected by the system keychain.',
+          recoverable: false,
+        };
+      default:
+        return {
+          kind: err.kind,
+          message: `The system keychain reported an error: ${err.detail}`,
+          recoverable: false,
+        };
+    }
+  }
+  return {
+    kind: 'unknown',
+    message: err instanceof Error ? err.message : String(err),
+    recoverable: false,
+  };
+}
+
 /**
  * A short, human-readable description of an agent-key failure, for the
  * UI. Never throws.
  */
 export function describeAgentKeyError(err: unknown): string {
-  if (err instanceof AgentKeyError) {
-    switch (err.kind) {
-      case 'keychain_locked':
-        return 'Your system keychain is locked. Unlock it, then try again.';
-      case 'keychain_denied':
-        return 'Your system keychain denied access to Kindora’s key. Allow access and try again.';
-      case 'keychain_unavailable':
-        return 'No system keychain is available on this device, so the private key cannot be stored safely.';
-      case 'not_found':
-        return 'No private key was found for this agent.';
-      case 'corrupt':
-        return 'The stored private key could not be read.';
-      case 'invalid_key':
-        return 'The private key was rejected by the system keychain.';
-      default:
-        return `The system keychain reported an error: ${err.detail}`;
-    }
-  }
-  return err instanceof Error ? err.message : String(err);
+  return classifyAgentKeyError(err).message;
 }
 
 /**

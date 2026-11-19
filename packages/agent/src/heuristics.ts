@@ -18,16 +18,21 @@
  * Pure / synchronous / no I/O. See 开发手册.md § 6, Phase 3, Phase 6.
  */
 import type { SocialProfile } from '@kindora/protocol';
+import { canonicalInterestSet } from './interest-taxonomy';
 
 export interface HeuristicHints {
-  /** Interest tokens shared by both profiles. */
+  /** Interest tokens shared by both profiles (canonicalised when known). */
   readonly sharedInterests: readonly string[];
   /** Activity tokens shared by both profiles. */
   readonly sharedActivities: readonly string[];
+  /** Conversation-style tokens shared by both profiles. */
+  readonly sharedStyles: readonly string[];
   /** 0–1 jaccard over interests. */
   readonly interestScore: number;
   /** 0–1 jaccard over activities. */
   readonly activityScore: number;
+  /** 0–1 jaccard over conversation styles. */
+  readonly styleScore: number;
   /** 0–1 heuristic intent alignment. */
   readonly intentScore: number;
   /** 0–1 weighted composite. */
@@ -87,10 +92,14 @@ function boundaryBlocks(self: SocialProfile, peer: SocialProfile): string[] {
 }
 
 export function computeHeuristics(self: SocialProfile, peer: SocialProfile): HeuristicHints {
-  const selfInterests = tokenize(self.interests);
-  const peerInterests = tokenize(peer.interests);
+  // Taxonomy aliases ("AI" / "人工智能" / "ml") collapse to the same id
+  // before Jaccard, so locale and spelling variants still count as overlap.
+  const selfInterests = canonicalInterestSet(self.interests);
+  const peerInterests = canonicalInterestSet(peer.interests);
   const selfActivities = tokenize(self.currentActivities);
   const peerActivities = tokenize(peer.currentActivities);
+  const selfStyles = tokenize(self.conversationStyle as readonly string[]);
+  const peerStyles = tokenize(peer.conversationStyle as readonly string[]);
 
   const sharedInterests: string[] = [];
   for (const t of selfInterests) if (peerInterests.has(t)) sharedInterests.push(t);
@@ -98,23 +107,33 @@ export function computeHeuristics(self: SocialProfile, peer: SocialProfile): Heu
   const sharedActivities: string[] = [];
   for (const t of selfActivities) if (peerActivities.has(t)) sharedActivities.push(t);
 
+  const sharedStyles: string[] = [];
+  for (const t of selfStyles) if (peerStyles.has(t)) sharedStyles.push(t);
+
   const interestScore = jaccard(selfInterests, peerInterests);
   const activityScore = jaccard(selfActivities, peerActivities);
+  const style = jaccard(selfStyles, peerStyles);
   const intent = intentScore(
     self.socialIntent as readonly string[],
     peer.socialIntent as readonly string[],
   );
 
-  // Composite — interests and intent weigh more than activities.
-  const composite = Math.min(1, interestScore * 0.5 + intent * 0.35 + activityScore * 0.15);
+  // Composite — interests and intent weigh most; style and activities
+  // are lighter tie-breakers.
+  const composite = Math.min(
+    1,
+    interestScore * 0.45 + intent * 0.3 + style * 0.15 + activityScore * 0.1,
+  );
 
   const blockingIssues = boundaryBlocks(self, peer);
 
   return Object.freeze({
     sharedInterests: Object.freeze(sharedInterests),
     sharedActivities: Object.freeze(sharedActivities),
+    sharedStyles: Object.freeze(sharedStyles),
     interestScore,
     activityScore,
+    styleScore: style,
     intentScore: intent,
     compositeScore: composite,
     blockingIssues: Object.freeze(blockingIssues),
@@ -132,6 +151,9 @@ export function renderHeuristics(hints: HeuristicHints): string {
   );
   lines.push(
     `- activity overlap (jaccard): ${hints.activityScore.toFixed(2)} → ${formatSet(hints.sharedActivities)}`,
+  );
+  lines.push(
+    `- style overlap (jaccard):    ${hints.styleScore.toFixed(2)} → ${formatSet(hints.sharedStyles)}`,
   );
   lines.push(`- intent alignment:           ${hints.intentScore.toFixed(2)}`);
   lines.push(`- composite score:            ${hints.compositeScore.toFixed(2)}`);

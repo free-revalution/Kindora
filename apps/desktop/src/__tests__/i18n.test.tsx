@@ -87,6 +87,7 @@ describe('apps/desktop — i18n dictionary integrity', () => {
       'settings.apiKey', // "API Key" — the term users recognise
       'settings.apiKeyPlaceholderEmpty', // "sk-…" — a format sample, not prose
       'connect.codePlaceholder', // "ABCDEF" — a sample pairing code
+      'connect.webrtc', // "WebRTC" — proper noun / protocol name
     ]);
 
     const untranslated = Object.keys(en).filter(

@@ -14,16 +14,16 @@
       {
         "label": "main",
         "title": "Kindora",
-        "width": 1024,
-        "height": 720,
-        "minWidth": 720,
+        "width": 1180,
+        "height": 760,
+        "minWidth": 880,
         "minHeight": 480,
         "resizable": true,
         "fullscreen": false
       }
     ],
     "security": {
-      "csp": "default-src 'self'; connect-src 'self' ipc: http://ipc.localhost https://api.minimaxi.com https://api.openai.com https://api.anthropic.com https://*.anthropic.com https://*.openai.com; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
+      "csp": "default-src 'self'; connect-src 'self' ipc: http://ipc.localhost http://localhost:11434 http://127.0.0.1:11434 https://api.minimaxi.com https://api.openai.com https://api.anthropic.com https://*.anthropic.com https://*.openai.com; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
     }
   },
   "bundle": {

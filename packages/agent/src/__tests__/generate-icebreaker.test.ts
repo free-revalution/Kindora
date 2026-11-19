@@ -145,16 +145,44 @@ describe('@kindora/agent — generateIcebreaker', () => {
     expect(provider.calls).toHaveLength(0);
   });
 
-  it('falls back to empty topics with degraded=true on unparseable LLM output', async () => {
+  it('falls back to empty topics with degraded=true on unparseable LLM output when there is no overlap to seed', async () => {
     const provider = stubProvider('not json at all');
     const result = await generateIcebreaker(provider, {
-      selfProfile: makeProfile(),
-      peerProfile: makeProfile({ nickname: 'sam' }),
+      selfProfile: makeProfile({ interests: ['pottery'] }),
+      peerProfile: makeProfile({ nickname: 'sam', interests: ['astronomy'] }),
     });
     expect(result.degraded).toBe(true);
     expect(result.topics).toEqual([]);
     expect(result.boundaryBlocked).toBe(false);
     expect(result.degradationNote).toMatch(/json-parse-failed/);
+  });
+
+  it('seeds starters from recommendedTopics when the LLM returns nothing', async () => {
+    const provider = stubProvider('not json at all');
+    const result = await generateIcebreaker(provider, {
+      selfProfile: makeProfile(),
+      peerProfile: makeProfile({ nickname: 'sam' }),
+      analysis: SAMPLE_ANALYSIS,
+    });
+    expect(result.degraded).toBe(true);
+    expect(result.topics).toEqual(['side projects in TS']);
+    expect(result.degradationNote).toMatch(/heuristic-seed/);
+  });
+
+  it('seeds starters from taxonomy-shared interests when analysis has no topics', async () => {
+    const provider = stubProvider(JSON.stringify({ topics: [] }));
+    const result = await generateIcebreaker(provider, {
+      selfProfile: makeProfile({ interests: ['人工智能', '徒步'] }),
+      peerProfile: makeProfile({ nickname: 'sam', interests: ['AI', 'hiking'] }),
+      analysis: {
+        ...SAMPLE_ANALYSIS,
+        recommendedTopics: [],
+        commonGround: [],
+      },
+    });
+    expect(result.topics.length).toBeGreaterThan(0);
+    expect(result.topics.some((t) => t.includes('人工智能') || t.includes('徒步'))).toBe(true);
+    expect(result.degradationNote).toMatch(/heuristic-seed/);
   });
 
   it('forwards an abort signal to the LLM provider', async () => {

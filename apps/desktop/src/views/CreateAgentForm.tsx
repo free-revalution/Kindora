@@ -15,7 +15,13 @@ import {
   type SocialIntent,
   type SocialProfile,
 } from '@kindora/protocol';
-import { DEFAULT_PROFILE_LIMITS, isProfileValid, validateProfile } from '@kindora/agent';
+import {
+  DEFAULT_PROFILE_LIMITS,
+  INTEREST_CATEGORY_ORDER,
+  isProfileValid,
+  validateProfile,
+  type InterestCategoryId,
+} from '@kindora/agent';
 import {
   CONVERSATION_STYLE_KEYS,
   PROFILE_VALIDATION_KEYS,
@@ -25,21 +31,64 @@ import {
 } from '../i18n';
 
 /**
- * Suggestions are translation KEYS, not strings. The label the user sees — and
- * therefore the value stored in `profile.interests` — is resolved through `t`,
- * so a Chinese user gets Chinese suggestions that are meaningful to them.
+ * Taxonomy-backed suggestion chips, grouped by category. Labels (and the
+ * value stored in `profile.interests`) resolve through `t`, so a Chinese
+ * user gets Chinese tags that still alias-match English peers in heuristics.
  */
-const SUGGESTED_INTEREST_KEYS: readonly TranslationKey[] = [
-  'agent.suggestedInterest.ai',
-  'agent.suggestedInterest.programming',
-  'agent.suggestedInterest.openSource',
-  'agent.suggestedInterest.gaming',
-  'agent.suggestedInterest.fpv',
-  'agent.suggestedInterest.indieHacking',
-  'agent.suggestedInterest.music',
-  'agent.suggestedInterest.reading',
-  'agent.suggestedInterest.climbing',
+const SUGGESTED_INTEREST_BY_CATEGORY: ReadonlyArray<{
+  readonly category: InterestCategoryId;
+  readonly categoryKey: TranslationKey;
+  readonly keys: readonly TranslationKey[];
+}> = [
+  {
+    category: 'tech',
+    categoryKey: 'agent.interestCategory.tech',
+    keys: [
+      'agent.suggestedInterest.ai',
+      'agent.suggestedInterest.programming',
+      'agent.suggestedInterest.openSource',
+      'agent.suggestedInterest.indieHacking',
+    ],
+  },
+  {
+    category: 'creative',
+    categoryKey: 'agent.interestCategory.creative',
+    keys: [
+      'agent.suggestedInterest.music',
+      'agent.suggestedInterest.writing',
+      'agent.suggestedInterest.design',
+    ],
+  },
+  {
+    category: 'outdoors',
+    categoryKey: 'agent.interestCategory.outdoors',
+    keys: [
+      'agent.suggestedInterest.climbing',
+      'agent.suggestedInterest.hiking',
+      'agent.suggestedInterest.fpv',
+    ],
+  },
+  {
+    category: 'games',
+    categoryKey: 'agent.interestCategory.games',
+    keys: ['agent.suggestedInterest.gaming', 'agent.suggestedInterest.boardGames'],
+  },
+  {
+    category: 'learning',
+    categoryKey: 'agent.interestCategory.learning',
+    keys: ['agent.suggestedInterest.reading', 'agent.suggestedInterest.languages'],
+  },
+  {
+    category: 'social',
+    categoryKey: 'agent.interestCategory.social',
+    keys: ['agent.suggestedInterest.coffee', 'agent.suggestedInterest.cooking'],
+  },
 ];
+
+/** Keep category render order aligned with `@kindora/agent` taxonomy. */
+const ORDERED_SUGGESTIONS = INTEREST_CATEGORY_ORDER.map(
+  (id) => SUGGESTED_INTEREST_BY_CATEGORY.find((g) => g.category === id)!,
+).filter(Boolean);
 
 export interface CreateAgentFormProps {
   initialProfile?: SocialProfile;
@@ -178,8 +227,6 @@ export function CreateAgentForm({
   );
   const canSubmit = isProfileValid(profile) && !submitting;
 
-  const suggestedInterests = SUGGESTED_INTEREST_KEYS.map((k) => t(k));
-
   function addInterest(value: string) {
     const trimmed = value.trim();
     if (!trimmed) return;
@@ -240,7 +287,7 @@ export function CreateAgentForm({
   return (
     <form
       onSubmit={handleSubmit}
-      className="mx-auto flex w-full max-w-2xl flex-col gap-8 px-6 py-10"
+      className="kindora-page"
     >
       <header>
         <h1 className="text-3xl font-semibold tracking-tight">
@@ -315,19 +362,32 @@ export function CreateAgentForm({
             {t('common.add')}
           </button>
         </div>
-        <div className="mt-3 flex flex-wrap gap-2">
-          {suggestedInterests
-            .filter((s) => !interests.includes(s))
-            .map((s) => (
-              <button
-                key={s}
-                type="button"
-                onClick={() => addInterest(s)}
-                className="border-kindora-300 text-kindora-600 hover:border-kindora-500 hover:text-kindora-800 dark:border-kindora-600 dark:text-kindora-200 dark:hover:border-kindora-400 rounded-full border border-dashed px-3 py-1 text-xs"
-              >
-                + {s}
-              </button>
-            ))}
+        <div className="mt-3 space-y-3">
+          {ORDERED_SUGGESTIONS.map((group) => {
+            const chips = group.keys
+              .map((k) => t(k))
+              .filter((label) => !interests.includes(label));
+            if (chips.length === 0) return null;
+            return (
+              <div key={group.category}>
+                <p className="text-kindora-500 dark:text-kindora-400 mb-1.5 text-[11px] tracking-wide uppercase">
+                  {t(group.categoryKey)}
+                </p>
+                <div className="flex flex-wrap gap-2">
+                  {chips.map((s) => (
+                    <button
+                      key={s}
+                      type="button"
+                      onClick={() => addInterest(s)}
+                      className="border-kindora-300 text-kindora-600 hover:border-kindora-500 hover:text-kindora-800 dark:border-kindora-600 dark:text-kindora-200 dark:hover:border-kindora-400 rounded-full border border-dashed px-3 py-1 text-xs"
+                    >
+                      + {s}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            );
+          })}
         </div>
       </Field>
 

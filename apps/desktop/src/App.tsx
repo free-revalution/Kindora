@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
 import type { SocialProfile } from '@kindora/protocol';
 import { DatabaseError, type StoredAgent, type StoredChatMessage } from '@kindora/storage';
 import type { ConnectionState } from '@kindora/transport';
@@ -10,11 +10,24 @@ import { ConnectView } from './views/ConnectView';
 import { ConnectionStatus } from './views/ConnectionStatus';
 import { LiveMatchView } from './views/MatchView';
 import { LiveIdentifyView } from './views/IdentifyView';
+import { PeerFingerprintConfirmView } from './views/PeerFingerprintConfirmView';
 import { LiveConsentView } from './views/ConsentView';
+import {
+  markChatPhase,
+  markMutualConsent,
+  markPeerFingerprintVerified,
+} from './lib/authorized-envelope';
+import {
+  sessionAdvanceChat,
+  sessionConfirmPeerFingerprint,
+  sessionNotePeer,
+  sessionSetMutualConsent,
+} from './lib/outbound-session';
 import { LiveIcebreakerView } from './views/IcebreakerView';
 import { LiveChatView } from './views/ChatView';
 import { BlockedAgentsView } from './views/BlockedAgentsView';
 import { ChatHistoryView } from './views/ChatHistoryView';
+import { DemoView } from './views/DemoView';
 import type { ConsentOutcome, MatchOutcome, PeerIntroduction } from '@kindora/matching';
 import type { ChatMessageSource } from '@kindora/matching';
 import type { BlockedAgent } from '@kindora/storage';
@@ -35,31 +48,29 @@ import {
   loadChatTranscript,
   type ChatHistorySession,
 } from './lib/chat-history';
-import { createAgent, describeAgentKeyError, loadAgent, updateProfile } from './lib/agent-service';
+import {
+  classifyAgentKeyError,
+  createAgent,
+  loadAgent,
+  updateProfile,
+  type AgentKeyFailure,
+} from './lib/agent-service';
 import { loadLlmStatus, type LlmStatus } from './lib/llm-service';
-import { useTranslate, I18nProvider, LLM_STATUS_KEYS } from './i18n';
+import { useTranslate, I18nProvider, LLM_STATUS_KEYS, type TranslationKey } from './i18n';
+import { AppLayout } from './shell/AppLayout';
+import { navIdForViewKind, type FlowStepId, type NavId } from './shell/nav';
+import { Banner } from './components/Banner';
+import { ErrorBoundary } from './components/ErrorBoundary';
 
 /**
  * The screens of the app.
  *
- * ## Phase B — the order of the screens changed
- *
- * Before Phase B the flow was: connect → **match** → consent →
- * icebreaker → chat. The match ran *before* the user had agreed to
- * talk to the peer, which meant the peer's full profile was already
- * on the wire when the consent screen appeared.
- *
- * Task book § 五 B2 reverses it: connect → **identify** (exchange the
- * public cards) → **consent** (the human decides) → **match** (the
- * authorised profiles are exchanged and analysed) → icebreaker → chat.
- *
- * The `match` screen therefore carries a `consent` — it is the proof
- * that the disclosure was authorised — and the `consent` screen
- * carries a `peer` (the public card), not a `MatchOutcome`.
+ * Phase B order: connect → identify → consent → match → icebreaker → chat.
  */
 type View =
   | { kind: 'loading' }
   | { kind: 'welcome' }
+  | { kind: 'demo' }
   | { kind: 'create' }
   | { kind: 'edit'; agent: StoredAgent }
   | { kind: 'home'; agent: StoredAgent }
@@ -67,6 +78,12 @@ type View =
   | { kind: 'blocked'; agent: StoredAgent }
   | { kind: 'connect'; agent: StoredAgent }
   | { kind: 'identify'; agent: StoredAgent; handle: ConnectHandle }
+  | {
+      kind: 'verify-peer';
+      agent: StoredAgent;
+      handle: ConnectHandle;
+      peer: PeerIntroduction;
+    }
   | {
       kind: 'consent';
       agent: StoredAgent;
@@ -80,7 +97,7 @@ type View =
       peer: PeerIntroduction;
       consent: ConsentOutcome;
     }
-  | { kind: 'keychain-error'; error: string }
+  | { kind: 'keychain-error'; failure: AgentKeyFailure }
   | { kind: 'database-error'; error: string }
   | { kind: 'history'; agent: StoredAgent }
   | {
@@ -92,6 +109,15 @@ type View =
       icebreaker: IcebreakerHandle;
     }
   | {
+      /** UI-03 — icebreaker failed; user can retry / skip / disconnect. */
+      kind: 'icebreaker-error';
+      agent: StoredAgent;
+      handle: ConnectHandle;
+      outcome: MatchOutcome;
+      consent: ConsentOutcome;
+      error: string;
+    }
+  | {
       kind: 'chat';
       agent: StoredAgent;
       handle: ConnectHandle;
@@ -99,54 +125,90 @@ type View =
       match: MatchOutcome;
       chat: ChatHandle;
       firstMessage?: string;
-      /**
-       * Phase D / D2 — who wrote the first message. The icebreaker is
-       * written by the LLM, so it is `agent`.
-       */
       firstMessageSource?: ChatMessageSource;
     };
 
+function agentFromView(view: View): StoredAgent | null {
+  if (
+    view.kind === 'home' ||
+    view.kind === 'edit' ||
+    view.kind === 'settings' ||
+    view.kind === 'blocked' ||
+    view.kind === 'connect' ||
+    view.kind === 'identify' ||
+    view.kind === 'verify-peer' ||
+    view.kind === 'consent' ||
+    view.kind === 'match' ||
+    view.kind === 'icebreaker' ||
+    view.kind === 'icebreaker-error' ||
+    view.kind === 'chat' ||
+    view.kind === 'history'
+  ) {
+    return view.agent;
+  }
+  return null;
+}
+
+function flowStepForView(view: View): FlowStepId | undefined {
+  switch (view.kind) {
+    case 'connect':
+      return 'connect';
+    case 'identify':
+    case 'verify-peer':
+      return 'identify';
+    case 'consent':
+      return 'consent';
+    case 'match':
+      return 'match';
+    case 'icebreaker':
+    case 'icebreaker-error':
+      return 'icebreaker';
+    case 'chat':
+      return 'chat';
+    default:
+      return undefined;
+  }
+}
+
+function isConnectingView(view: View): boolean {
+  return (
+    view.kind === 'connect' ||
+    view.kind === 'identify' ||
+    view.kind === 'verify-peer' ||
+    view.kind === 'consent' ||
+    view.kind === 'match' ||
+    view.kind === 'icebreaker' ||
+    view.kind === 'icebreaker-error' ||
+    view.kind === 'chat'
+  );
+}
+
 export default function App() {
-  // `App` owns the provider rather than `main.tsx`. That way every entry point
-  // — the real window and every test that renders `<App />` — is wired for
-  // translations by construction, and `useI18n()`'s "no provider" warning
-  // becomes a real signal instead of routine noise.
   return (
     <I18nProvider>
-      <AppShell />
+      <ErrorBoundary>
+        <AppRoot />
+      </ErrorBoundary>
     </I18nProvider>
   );
 }
 
-function AppShell() {
+function AppRoot() {
   const t = useTranslate();
   const [view, setView] = useState<View>({ kind: 'loading' });
   const [llmStatus, setLlmStatus] = useState<LlmStatus>({
     ready: false,
     reason: 'not_configured',
   });
-  /**
-   * Bumped by the "Try again" button on the keychain-error screen so
-   * that the agent is loaded again from scratch.
-   */
   const [reloadToken, setReloadToken] = useState(0);
+  const [demoReturn, setDemoReturn] = useState<View | null>(null);
+  /** UI-02 — surface persistence failures instead of console-only. */
+  const [persistenceNotice, setPersistenceNotice] = useState<string | null>(null);
 
-  /**
-   * Re-read the saved LLM configuration.
-   *
-   * This has to be a callback the Settings screen can trigger, not a one-off
-   * read at startup: the Connect screen gates on `llmStatus.ready`, and the
-   * only way a user configures an LLM is by saving it in Settings while the
-   * app is already running. Reading once at mount meant a successful save
-   * changed nothing until the app was restarted — the save banner said
-   * "Saved" while the app still believed there was no LLM.
-   */
   const refreshLlmStatus = useCallback(() => {
     void loadLlmStatus()
       .then(setLlmStatus)
       .catch((err: unknown) => {
-        // A broken config is a state to report, not a crash. `loadLlmStatus`
-        // never throws, so this is belt-and-braces.
         console.error('Kindora: could not read the saved LLM config.', err);
         setLlmStatus({ ready: false, reason: 'invalid_config' });
       });
@@ -159,38 +221,171 @@ function AppShell() {
         setView(agent ? { kind: 'home', agent } : { kind: 'welcome' });
       })
       .catch((err: unknown) => {
-        // Phase D / D1 — a broken database is a different problem from
-        // a missing private key, and it deserves its own screen: the
-        // message says what went wrong and the button retries.
         if (err instanceof DatabaseError) {
           console.error('Kindora: could not open the local database.', err);
           setView({ kind: 'database-error', error: err.message });
           return;
         }
-        // The private key could not be recovered. This is a state to
-        // report, not a crash — and it is emphatically *not* a licence
-        // to fall back to a plaintext key or to mint a new identity.
         console.error('Kindora: could not load the agent private key.', err);
-        setView({ kind: 'keychain-error', error: describeAgentKeyError(err) });
+        setView({ kind: 'keychain-error', failure: classifyAgentKeyError(err) });
       });
     refreshLlmStatus();
   }, [refreshLlmStatus, reloadToken]);
 
+  // Warn before closing the window mid-session (pairing → chat).
+  useEffect(() => {
+    const active =
+      view.kind === 'connect' ||
+      view.kind === 'identify' ||
+      view.kind === 'verify-peer' ||
+      view.kind === 'consent' ||
+      view.kind === 'match' ||
+      view.kind === 'icebreaker' ||
+      view.kind === 'icebreaker-error' ||
+      view.kind === 'chat';
+    if (!active) return undefined;
+    const onBeforeUnload = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+      e.returnValue = '';
+    };
+    window.addEventListener('beforeunload', onBeforeUnload);
+    return () => window.removeEventListener('beforeunload', onBeforeUnload);
+  }, [view.kind]);
+
+  const agent = agentFromView(view);
+  const shellActive = agent !== null || (view.kind === 'demo' && demoReturn !== null && agentFromView(demoReturn) !== null);
+
+  const navigate = useCallback(
+    (id: NavId) => {
+      if (view.kind === 'demo') {
+        // Leaving demo via sidebar restores the prior screen first.
+        const back = demoReturn;
+        setDemoReturn(null);
+        if (back && agentFromView(back)) {
+          const a = agentFromView(back)!;
+          if (id === 'home') setView({ kind: 'home', agent: a });
+          else if (id === 'connect') setView({ kind: 'connect', agent: a });
+          else if (id === 'history') setView({ kind: 'history', agent: a });
+          else if (id === 'blocked') setView({ kind: 'blocked', agent: a });
+          else if (id === 'settings') setView({ kind: 'settings', agent: a });
+          else if (id === 'demo') setView({ kind: 'demo' });
+          return;
+        }
+        setView({ kind: 'welcome' });
+        return;
+      }
+
+      const a = agent;
+      if (!a) {
+        if (id === 'demo') {
+          setDemoReturn({ kind: 'welcome' });
+          setView({ kind: 'demo' });
+        }
+        return;
+      }
+
+      // Leaving an active session: disconnect before navigating away.
+      if (isConnectingView(view) && 'handle' in view && id !== 'connect') {
+        void view.handle.disconnect('user-navigate');
+      }
+
+      switch (id) {
+        case 'home':
+          setView({ kind: 'home', agent: a });
+          break;
+        case 'connect':
+          setView({ kind: 'connect', agent: a });
+          break;
+        case 'history':
+          setView({ kind: 'history', agent: a });
+          break;
+        case 'blocked':
+          setView({ kind: 'blocked', agent: a });
+          break;
+        case 'settings':
+          setView({ kind: 'settings', agent: a });
+          break;
+        case 'demo':
+          setDemoReturn({ kind: 'home', agent: a });
+          setView({ kind: 'demo' });
+          break;
+      }
+    },
+    [agent, demoReturn, view],
+  );
+
+  const shell = useMemo(
+    () => ({
+      active: navIdForViewKind(view.kind),
+      agentName: agent?.profile.nickname || agent?.displayName,
+      agentReady: agent !== null,
+      connecting: isConnectingView(view),
+      onNavigate: navigate,
+    }),
+    [agent, navigate, view],
+  );
+
+  const banner =
+    persistenceNotice !== null ? (
+      <Banner tone="error" testId="persistence-banner" onDismiss={() => setPersistenceNotice(null)}>
+        {persistenceNotice}
+      </Banner>
+    ) : null;
+
+  function withShell(children: ReactNode, opts?: { flush?: boolean; topBar?: ReactNode }) {
+    return (
+      <AppLayout
+        sidebar={shell}
+        flowStep={flowStepForView(view)}
+        banner={banner}
+        topBar={opts?.topBar}
+        flush={opts?.flush}
+      >
+        {children}
+      </AppLayout>
+    );
+  }
+
   if (view.kind === 'loading') {
     return (
-      <main className="text-kindora-500 flex h-full items-center justify-center text-sm">
+      <main className="flex h-full items-center justify-center text-sm text-kindora-500">
         {t('app.loading')}
       </main>
     );
   }
 
   if (view.kind === 'welcome') {
-    return <Welcome onCreate={() => setView({ kind: 'create' })} />;
+    return (
+      <Welcome
+        onCreate={() => setView({ kind: 'create' })}
+        onTryDemo={() => {
+          setDemoReturn({ kind: 'welcome' });
+          setView({ kind: 'demo' });
+        }}
+      />
+    );
+  }
+
+  if (view.kind === 'demo') {
+    const demo = (
+      <DemoView
+        onExit={() => {
+          const back = demoReturn;
+          setDemoReturn(null);
+          setView(back ?? { kind: 'welcome' });
+        }}
+      />
+    );
+    return shellActive ? withShell(demo) : demo;
   }
 
   if (view.kind === 'keychain-error') {
     return (
-      <KeychainErrorScreen message={view.error} onRetry={() => setReloadToken((n) => n + 1)} />
+      <KeychainErrorScreen
+        failure={view.failure}
+        onRetry={() => setReloadToken((n) => n + 1)}
+        onCreateNew={() => setView({ kind: 'create' })}
+      />
     );
   }
 
@@ -205,15 +400,24 @@ function AppShell() {
       <CreateAgentForm
         variant="create"
         onSubmit={async (profile) => {
-          const agent = await createAgent(profile as SocialProfile);
-          setView({ kind: 'home', agent });
+          const created = await createAgent(profile as SocialProfile);
+          setView({ kind: 'home', agent: created });
         }}
       />
     );
   }
 
-  if (view.kind === 'edit') {
+  // From here on an agent is required for the shell.
+  if (!agent && view.kind !== 'edit') {
     return (
+      <main className="kindora-page">
+        <p className="kindora-muted">{t('app.loading')}</p>
+      </main>
+    );
+  }
+
+  if (view.kind === 'edit') {
+    return withShell(
       <CreateAgentForm
         initialProfile={view.agent.profile}
         variant="edit"
@@ -222,116 +426,255 @@ function AppShell() {
           const updated = await updateProfile(view.agent, profile as SocialProfile);
           setView({ kind: 'home', agent: updated });
         }}
-      />
+      />,
     );
   }
 
   if (view.kind === 'settings') {
-    return (
+    return withShell(
       <Settings
         onClose={() => setView({ kind: 'home', agent: view.agent })}
         onSaved={refreshLlmStatus}
-      />
+      />,
     );
   }
 
   if (view.kind === 'blocked') {
-    return <BlockedAgentsScreen view={view} setView={setView} />;
+    return withShell(<BlockedAgentsScreen view={view} setView={setView} />);
   }
 
   if (view.kind === 'history') {
-    return <ChatHistoryScreen view={view} setView={setView} />;
+    return withShell(<ChatHistoryScreen view={view} setView={setView} />);
   }
 
   if (view.kind === 'connect') {
     const notReady = llmStatus.reason ? LLM_STATUS_KEYS[llmStatus.reason] : undefined;
-    return (
+    return withShell(
       <ConnectView
         llmReady={llmStatus.ready}
         llmNotReadyTitle={notReady ? t(notReady.title) : undefined}
         llmNotReadyBody={notReady ? t(notReady.body) : undefined}
         onConnected={(handle) => setView({ kind: 'identify', agent: view.agent, handle })}
         onCancel={() => setView({ kind: 'home', agent: view.agent })}
-      />
+      />,
     );
   }
 
   if (view.kind === 'identify') {
-    return (
+    return withShell(
       <>
-        <ConnectionStatusBar handle={view.handle} />
         <LiveIdentifyView
           run={() => runIdentify(view.handle)}
           onDisconnect={() => {
             void view.handle.disconnect('user-disconnect');
             setView({ kind: 'home', agent: view.agent });
           }}
-          onDone={(peer) =>
-            setView({ kind: 'consent', agent: view.agent, handle: view.handle, peer })
-          }
+          onDone={(peer) => {
+            void (async () => {
+              const publicKey = peer.peerAgent?.publicKey;
+              if (publicKey) {
+                try {
+                  await sessionNotePeer(peer.peerAgentId, publicKey);
+                } catch (err) {
+                  console.error('Kindora: session_note_peer failed', err);
+                }
+              }
+              // Joiner already typed the host fingerprint (IBR-12); mark verified.
+              // Host must confirm the joiner fingerprint before consent (IBR-5).
+              if (view.handle.pairingRole === 'join') {
+                try {
+                  await sessionConfirmPeerFingerprint(view.handle.pairingCode);
+                } catch (err) {
+                  console.error('Kindora: session_confirm_peer_fingerprint failed', err);
+                }
+                if (view.handle.envelopeAuth) {
+                  markPeerFingerprintVerified(view.handle.envelopeAuth);
+                }
+                setView({ kind: 'consent', agent: view.agent, handle: view.handle, peer });
+                return;
+              }
+              setView({ kind: 'verify-peer', agent: view.agent, handle: view.handle, peer });
+            })();
+          }}
         />
-      </>
+      </>,
+      {
+        topBar: (
+          <ConnectionStatusBar
+            handle={view.handle}
+            onLeave={() => setView({ kind: 'home', agent: view.agent })}
+          />
+        ),
+      },
+    );
+  }
+
+  if (view.kind === 'verify-peer') {
+    return withShell(
+      <PeerFingerprintConfirmView
+        peer={view.peer}
+        envelopeAuth={view.handle.envelopeAuth}
+        onConfirmed={() =>
+          setView({
+            kind: 'consent',
+            agent: view.agent,
+            handle: view.handle,
+            peer: view.peer,
+          })
+        }
+        onDisconnect={() => {
+          void view.handle.disconnect('user-disconnect');
+          setView({ kind: 'home', agent: view.agent });
+        }}
+      />,
+      {
+        topBar: (
+          <ConnectionStatusBar
+            handle={view.handle}
+            onLeave={() => setView({ kind: 'home', agent: view.agent })}
+          />
+        ),
+      },
     );
   }
 
   if (view.kind === 'match') {
-    return (
-      <>
-        <ConnectionStatusBar handle={view.handle} />
-        <LiveMatchView
-          run={() => runExchangeAndMatch(view.handle, view.consent)}
-          onDisconnect={() => {
-            void view.handle.disconnect('user-disconnect');
-            setView({ kind: 'home', agent: view.agent });
-          }}
-          onDone={(outcome) => {
-            // Phase B: the match only runs once both sides accepted, so
-            // the icebreaker can be built from the outcome directly.
-            // If it cannot be built (no agent / no LLM), fall through
-            // to a chat screen so the user isn't stranded — they can
-            // still type and send.
-            void runIcebreaker(outcome)
-              .then((icebreaker) => {
-                setView({
-                  kind: 'icebreaker',
-                  agent: view.agent,
-                  handle: view.handle,
-                  outcome,
-                  consent: view.consent,
-                  icebreaker,
-                });
-              })
-              .catch(() => {
-                const chat = runChat(view.handle, view.consent, '');
-                setView({
-                  kind: 'chat',
-                  agent: view.agent,
-                  handle: view.handle,
-                  consent: view.consent,
-                  match: outcome,
-                  chat,
-                });
+    return withShell(
+      <LiveMatchView
+        run={() => runExchangeAndMatch(view.handle, view.consent)}
+        onDisconnect={() => {
+          void view.handle.disconnect('user-disconnect');
+          setView({ kind: 'home', agent: view.agent });
+        }}
+        onDone={(outcome) => {
+          void runIcebreaker(outcome)
+            .then((icebreaker) => {
+              setView({
+                kind: 'icebreaker',
+                agent: view.agent,
+                handle: view.handle,
+                outcome,
+                consent: view.consent,
+                icebreaker,
               });
-          }}
-        />
-      </>
+            })
+            .catch((err: unknown) => {
+              // UI-03 — do not silently drop the user into an empty chat.
+              setView({
+                kind: 'icebreaker-error',
+                agent: view.agent,
+                handle: view.handle,
+                outcome,
+                consent: view.consent,
+                error: err instanceof Error ? err.message : String(err),
+              });
+            });
+        }}
+      />,
+      {
+        topBar: (
+          <ConnectionStatusBar
+            handle={view.handle}
+            onLeave={() => setView({ kind: 'home', agent: view.agent })}
+          />
+        ),
+      },
+    );
+  }
+
+  if (view.kind === 'icebreaker-error') {
+    return withShell(
+      <IcebreakerErrorScreen
+        message={view.error}
+        onRetry={() => {
+          void runIcebreaker(view.outcome)
+            .then((icebreaker) => {
+              setView({
+                kind: 'icebreaker',
+                agent: view.agent,
+                handle: view.handle,
+                outcome: view.outcome,
+                consent: view.consent,
+                icebreaker,
+              });
+            })
+            .catch((err: unknown) => {
+              setView({
+                ...view,
+                error: err instanceof Error ? err.message : String(err),
+              });
+            });
+        }}
+        onSkip={() => {
+          const chat = runChat(view.handle, view.consent, '');
+          setView({
+            kind: 'chat',
+            agent: view.agent,
+            handle: view.handle,
+            consent: view.consent,
+            match: view.outcome,
+            chat,
+          });
+        }}
+        onDisconnect={() => {
+          void view.handle.disconnect('user-disconnect');
+          setView({ kind: 'home', agent: view.agent });
+        }}
+      />,
+      {
+        topBar: (
+          <ConnectionStatusBar
+            handle={view.handle}
+            onLeave={() => setView({ kind: 'home', agent: view.agent })}
+          />
+        ),
+      },
     );
   }
 
   if (view.kind === 'consent') {
-    return <ConsentScreen view={view} setView={setView} />;
+    return withShell(<ConsentScreen view={view} setView={setView} />, {
+      topBar: (
+        <ConnectionStatusBar
+          handle={view.handle}
+          onLeave={() => setView({ kind: 'home', agent: view.agent })}
+        />
+      ),
+    });
   }
 
   if (view.kind === 'icebreaker') {
-    return <IcebreakerScreen view={view} setView={setView} />;
+    return withShell(<IcebreakerScreen view={view} setView={setView} />, {
+      topBar: (
+        <ConnectionStatusBar
+          handle={view.handle}
+          onLeave={() => setView({ kind: 'home', agent: view.agent })}
+        />
+      ),
+    });
   }
 
   if (view.kind === 'chat') {
-    return <ChatScreen view={view} setView={setView} />;
+    return withShell(
+      <ChatScreen
+        view={view}
+        setView={setView}
+        onPersistenceError={() => setPersistenceNotice(t('app.persistenceError'))}
+      />,
+      {
+        flush: true,
+        topBar: (
+          <ConnectionStatusBar
+            handle={view.handle}
+            onLeave={() => setView({ kind: 'home', agent: view.agent })}
+          />
+        ),
+      },
+    );
   }
 
   // view.kind === 'home'
-  return (
+  return withShell(
     <Home
       agent={view.agent}
       onEdit={() => setView({ kind: 'edit', agent: view.agent })}
@@ -339,25 +682,58 @@ function AppShell() {
       onSettings={() => setView({ kind: 'settings', agent: view.agent })}
       onBlocked={() => setView({ kind: 'blocked', agent: view.agent })}
       onHistory={() => setView({ kind: 'history', agent: view.agent })}
-    />
+      onTryDemo={() => {
+        setDemoReturn({ kind: 'home', agent: view.agent });
+        setView({ kind: 'demo' });
+      }}
+    />,
   );
 }
 
-/**
- * Phase D / D1 — the local database could not be opened.
- *
- * The message says what happened and what was *not* changed: the
- * database is only ever written to, so a failed open means the data
- * is still exactly where it was. "Try again" re-opens it — the failed
- * attempt is not cached.
- */
+function IcebreakerErrorScreen({
+  message,
+  onRetry,
+  onSkip,
+  onDisconnect,
+}: {
+  message: string;
+  onRetry: () => void;
+  onSkip: () => void;
+  onDisconnect: () => void;
+}) {
+  const t = useTranslate();
+  return (
+    <main className="kindora-page" data-testid="icebreaker-error">
+      <section className="kindora-card">
+        <p className="kindora-eyebrow">{t('common.error')}</p>
+        <h1 className="kindora-title mt-2">{t('app.icebreakerErrorTitle')}</h1>
+        <p className="kindora-muted mt-3">{t('app.icebreakerErrorBody')}</p>
+        <pre className="mt-4 max-h-32 overflow-auto rounded-md border border-kindora-700 bg-kindora-950 p-3 font-mono text-xs text-rose-300">
+          {message}
+        </pre>
+        <div className="mt-6 flex flex-wrap gap-2">
+          <button type="button" className="kindora-button" onClick={onRetry}>
+            {t('app.icebreakerRetry')}
+          </button>
+          <button type="button" className="kindora-button-ghost" onClick={onSkip}>
+            {t('app.icebreakerSkip')}
+          </button>
+          <button type="button" className="kindora-button-ghost" onClick={onDisconnect}>
+            {t('common.cancel')}
+          </button>
+        </div>
+      </section>
+    </main>
+  );
+}
+
 function DatabaseErrorScreen({ message, onRetry }: { message: string; onRetry: () => void }) {
   const t = useTranslate();
   return (
-    <main className="mx-auto flex w-full max-w-xl flex-col gap-6 px-6 py-16">
+    <main className="kindora-page">
       <section className="kindora-card">
-        <h1 className="text-xl font-semibold tracking-tight">{t('app.databaseErrorTitle')}</h1>
-        <p className="mt-2 text-sm leading-relaxed">{message}</p>
+        <h1 className="kindora-title">{t('app.databaseErrorTitle')}</h1>
+        <p className="kindora-muted mt-2">{message}</p>
         <button type="button" className="kindora-button mt-6" onClick={onRetry}>
           {t('app.databaseErrorRetry')}
         </button>
@@ -366,13 +742,6 @@ function DatabaseErrorScreen({ message, onRetry }: { message: string; onRetry: (
   );
 }
 
-/**
- * Phase D / D2 — the chat history.
- *
- * The conversations of this device, newest first, and the transcript
- * of the selected one. The data comes from the local database; the
- * browser dev server has none, and the screen says so.
- */
 function ChatHistoryScreen({
   view,
   setView,
@@ -415,10 +784,10 @@ function ChatHistoryScreen({
   return (
     <>
       {error && (
-        <div className="mx-auto w-full max-w-2xl px-6 pt-4">
-          <p className="text-sm text-rose-600 dark:text-rose-400" data-testid="history-error">
+        <div className="px-6 pt-4">
+          <Banner tone="error" testId="history-error">
             {error}
-          </p>
+          </Banner>
         </div>
       )}
       <ChatHistoryView
@@ -435,15 +804,6 @@ function ChatHistoryScreen({
   );
 }
 
-/**
- * Phase B / B3 — the blocked-agents screen.
- *
- * The list is read from the store (localStorage) and re-read after
- * every change, so what is shown is what is actually persisted. The
- * pairing guard reads the same store, so an unblock here takes effect
- * on the very next pairing attempt — there is no separate cache to
- * invalidate.
- */
 function BlockedAgentsScreen({
   view,
   setView,
@@ -478,17 +838,15 @@ function BlockedAgentsScreen({
   );
 }
 
-/**
- * Phase C / C3 § 8 — the connection lifecycle, shown above the match
- * screen.
- *
- * The in-process loopback path has no "the peer went away" event, so
- * it does not report a connection state and the bar simply does not
- * appear there. The LAN path does report one, and this is where the
- * user sees 连接中 / 已连接 / 断开 / 重连中 / 失败 — and where they
- * can ask for a reconnect.
- */
-function ConnectionStatusBar({ handle }: { handle: ConnectHandle }) {
+function ConnectionStatusBar({
+  handle,
+  onLeave,
+}: {
+  handle: ConnectHandle;
+  /** Return home after a dead peer / failed link when reconnect is unavailable. */
+  onLeave?: () => void;
+}) {
+  const t = useTranslate();
   const [state, setState] = useState<ConnectionState | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -503,12 +861,11 @@ function ConnectionStatusBar({ handle }: { handle: ConnectHandle }) {
 
   if (!state) return null;
 
-  // Captured in a local so the closure does not depend on narrowing
-  // that TypeScript does not carry into callbacks.
   const reconnect = handle.reconnect;
+  const linkGone = state === 'disconnected' || state === 'failed';
 
   return (
-    <div className="border-kindora-200 dark:border-kindora-700 mx-auto flex w-full max-w-2xl items-center justify-between gap-3 border-b px-6 py-3">
+    <div className="flex items-center justify-between gap-3 border-b border-kindora-200 bg-white px-6 py-2.5">
       <ConnectionStatus
         state={state}
         error={error}
@@ -523,57 +880,132 @@ function ConnectionStatusBar({ handle }: { handle: ConnectHandle }) {
             : undefined
         }
       />
+      {linkGone && onLeave && !reconnect && (
+        <button
+          type="button"
+          className="kindora-button-ghost text-xs"
+          data-testid="connection-leave-home"
+          onClick={() => {
+            void handle.disconnect('peer-link-gone');
+            onLeave();
+          }}
+        >
+          {t('connect.leaveToHome')}
+        </button>
+      )}
     </div>
   );
 }
 
-/**
- * Phase A / A1 — the agent's private key could not be recovered from the
- * OS keychain.
- *
- * We say so plainly instead of quietly continuing without a key: a
- * session that cannot sign is not a session the user thinks it is.
- */
-function KeychainErrorScreen({ message, onRetry }: { message: string; onRetry: () => void }) {
+const KEYCHAIN_ERROR_COPY: Record<
+  AgentKeyFailure['kind'],
+  { readonly body: TranslationKey; readonly hint: TranslationKey }
+> = {
+  keychain_locked: {
+    body: 'app.keychainError.locked',
+    hint: 'app.keychainError.lockedHint',
+  },
+  keychain_denied: {
+    body: 'app.keychainError.denied',
+    hint: 'app.keychainError.deniedHint',
+  },
+  keychain_unavailable: {
+    body: 'app.keychainError.unavailable',
+    hint: 'app.keychainError.unavailableHint',
+  },
+  not_found: {
+    body: 'app.keychainError.notFound',
+    hint: 'app.keychainError.notFoundHint',
+  },
+  corrupt: {
+    body: 'app.keychainError.corrupt',
+    hint: 'app.keychainError.corruptHint',
+  },
+  invalid_key: {
+    body: 'app.keychainError.invalidKey',
+    hint: 'app.keychainError.invalidKeyHint',
+  },
+  keyring: {
+    body: 'app.keychainError.generic',
+    hint: 'app.keychainError.genericHint',
+  },
+  unknown: {
+    body: 'app.keychainError.generic',
+    hint: 'app.keychainError.genericHint',
+  },
+};
+
+function KeychainErrorScreen({
+  failure,
+  onRetry,
+  onCreateNew,
+}: {
+  failure: AgentKeyFailure;
+  onRetry: () => void;
+  onCreateNew: () => void;
+}) {
   const t = useTranslate();
+  const copy = KEYCHAIN_ERROR_COPY[failure.kind] ?? KEYCHAIN_ERROR_COPY.unknown;
+  const offerCreateNew =
+    failure.kind === 'not_found' || failure.kind === 'corrupt' || failure.kind === 'invalid_key';
   return (
-    <main className="mx-auto flex w-full max-w-xl flex-col gap-6 px-6 py-16">
-      <section className="kindora-card">
-        <h1 className="text-xl font-semibold tracking-tight">{t('app.keychainErrorTitle')}</h1>
-        <p className="mt-2 text-sm leading-relaxed">{message}</p>
-        <button type="button" className="kindora-button mt-6" onClick={onRetry}>
-          {t('app.keychainErrorRetry')}
-        </button>
+    <main className="kindora-page">
+      <section className="kindora-card" data-testid="keychain-error-screen">
+        <h1 className="kindora-title">{t('app.keychainErrorTitle')}</h1>
+        <p className="kindora-muted mt-2" data-testid="keychain-error-body">
+          {t(copy.body)}
+        </p>
+        <p
+          className="text-kindora-600 dark:text-kindora-300 mt-3 text-sm"
+          data-testid="keychain-error-hint"
+        >
+          {t(copy.hint)}
+        </p>
+        {failure.kind === 'unknown' || failure.kind === 'keyring' ? (
+          <p className="kindora-muted mt-3 font-mono text-xs" data-testid="keychain-error-detail">
+            {failure.message}
+          </p>
+        ) : null}
+        <div className="mt-6 flex flex-wrap gap-3">
+          <button
+            type="button"
+            className="kindora-button"
+            data-testid="keychain-error-retry"
+            onClick={onRetry}
+          >
+            {t('app.keychainErrorRetry')}
+          </button>
+          {offerCreateNew ? (
+            <button
+              type="button"
+              className="kindora-button-ghost"
+              data-testid="keychain-error-create-new"
+              onClick={onCreateNew}
+            >
+              {t('app.keychainError.createNew')}
+            </button>
+          ) : null}
+        </div>
       </section>
     </main>
   );
 }
 
-/**
- * Phase 9 — Chat screen. Owns a single ChatOrchestrator built lazily
- * by `runChat()`. Subscribes to its snapshot so the view re-renders
- * when messages arrive or the session closes. The chosen icebreaker
- * (if any) is rendered as `initialDraft` — the user still has to click
- * Send; per § 32 the AI never auto-sends, and "Use" doesn't bypass
- * the human's final click.
- */
 function ChatScreen({
   view,
   setView,
+  onPersistenceError,
 }: {
   view: Extract<View, { kind: 'chat' }>;
   setView: (v: View) => void;
+  onPersistenceError: () => void;
 }) {
-  // Build the chat handle once for this (consent outcome, first
-  // message) pair. Recreating it would lose the entry history.
   const [chat] = useState(() =>
     runChat(view.handle, view.consent, view.firstMessage ?? '', view.firstMessageSource ?? 'human'),
   );
-  // Phase 10 — "Ask My Agent" handle. Built lazily so a missing LLM
-  // doesn't break the whole chat screen; if it fails, the user just
-  // doesn't see the assistant panel.
   const [chatAssist, setChatAssist] = useState<ChatAssistHandle | null>(null);
   const [chatAssistError, setChatAssistError] = useState<string | undefined>(undefined);
+
   useEffect(() => {
     void runChatAssist(chat, view.consent, view.match)
       .then((handle) => setChatAssist(handle))
@@ -581,6 +1013,16 @@ function ChatScreen({
         setChatAssistError(e instanceof Error ? e.message : String(e));
       });
   }, [chat, view.consent, view.match]);
+
+  // UI-02 — if the orchestrator reports a persistence failure via console
+  // path, also watch send failures that mention persistence. The chat
+  // port rejects; LiveChatView surfaces `error`. We additionally listen
+  // for window-level custom events fired by a patched send wrapper.
+  useEffect(() => {
+    const handler = () => onPersistenceError();
+    window.addEventListener('kindora:persistence-error', handler);
+    return () => window.removeEventListener('kindora:persistence-error', handler);
+  }, [onPersistenceError]);
 
   function exit(): void {
     void view.handle.disconnect('chat-closed');
@@ -597,7 +1039,15 @@ function ChatScreen({
       run={() => chat.orchestrator.start(view.handle.session)}
       subscribe={(listener) => chat.subscribe(listener)}
       onSend={async (text, source) => {
-        await chat.orchestrator.send(view.handle.session, text, source ?? 'human');
+        try {
+          await chat.orchestrator.send(view.handle.session, text, source ?? 'human');
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          if (/persist|database|sqlite|storage/i.test(msg)) {
+            onPersistenceError();
+          }
+          throw err;
+        }
       }}
       onDisconnect={async () => {
         await chat.orchestrator.disconnect(view.handle.session, 'user-disconnect');
@@ -613,12 +1063,6 @@ function ChatScreen({
   );
 }
 
-/* ------------------------------------------------------------------ */
-/* Consent screen — owns the orchestrator lifecycle for the consent    */
-/* phase. Created lazily once per (handle, outcome) pair so the        */
-/* underlying state machine stays stable across re-renders.            */
-/* ------------------------------------------------------------------ */
-
 function ConsentScreen({
   view,
   setView,
@@ -626,9 +1070,6 @@ function ConsentScreen({
   view: Extract<View, { kind: 'consent' }>;
   setView: (v: View) => void;
 }) {
-  // Lazy init — the orchestrator is created exactly once for this
-  // consent screen, then kept stable across renders. Recreating it
-  // would lose the peer-decision state.
   const [consent] = useState(() => runConsent(view.handle, view.peer));
   return (
     <LiveConsentView
@@ -641,33 +1082,32 @@ function ConsentScreen({
       }}
       onFinal={(finalOutcome) => {
         if (finalOutcome.state === 'accepted_both') {
-          // Phase B: only now may the authorised profiles be exchanged.
-          // The match screen is the first point in the flow where the
-          // peer's full (authorised) profile crosses the wire.
-          setView({
-            kind: 'match',
-            agent: view.agent,
-            handle: view.handle,
-            peer: view.peer,
-            consent: finalOutcome,
-          });
+          void (async () => {
+            try {
+              await sessionSetMutualConsent();
+              await sessionAdvanceChat();
+            } catch (err) {
+              console.error('Kindora: session consent/chat advance failed', err);
+            }
+            if (view.handle.envelopeAuth) {
+              markMutualConsent(view.handle.envelopeAuth);
+              markChatPhase(view.handle.envelopeAuth);
+            }
+            setView({
+              kind: 'match',
+              agent: view.agent,
+              handle: view.handle,
+              peer: view.peer,
+              consent: finalOutcome,
+            });
+          })();
         } else {
-          // rejected / blocked: the connection is over. Tear it down,
-          // and leave the user on the consent screen so they can read
-          // the final banner before closing it.
           void view.handle.disconnect('consent-closed');
         }
       }}
     />
   );
 }
-
-/* ------------------------------------------------------------------ */
-/* Icebreaker screen — owns the LLM call for Phase 8. Created lazily    */
-/* once per (consent outcome, match outcome) pair so the agent-runtime  */
-/* config stays stable. The view itself owns a single `generate()`     */
-/* call and is re-callable via Regenerate.                              */
-/* ------------------------------------------------------------------ */
 
 function IcebreakerScreen({
   view,
@@ -676,14 +1116,9 @@ function IcebreakerScreen({
   view: Extract<View, { kind: 'icebreaker' }>;
   setView: (v: View) => void;
 }) {
-  // `view.icebreaker` was built once by the parent; we re-use the
-  // same handle across re-renders. (The view only invokes `generate`
-  // again on Regenerate.)
   const icebreaker = view.icebreaker;
 
   function enterChat(firstMessage?: string): void {
-    // Phase D / D2 — the icebreaker was written by the LLM, so the
-    // message is recorded as agent-sourced when the user sends it.
     const chat = runChat(view.handle, view.consent, firstMessage ?? '', 'agent');
     setView({
       kind: 'chat',

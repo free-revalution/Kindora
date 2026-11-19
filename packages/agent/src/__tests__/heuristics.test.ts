@@ -37,7 +37,8 @@ describe('@kindora/agent — computeHeuristics', () => {
       makeProfile({ interests: ['hiking', 'typescript'] }),
     );
     expect(h.interestScore).toBe(1);
-    expect([...h.sharedInterests].sort()).toEqual(['hiking', 'typescript']);
+    // typescript is a taxonomy alias of programming
+    expect([...h.sharedInterests].sort()).toEqual(['hiking', 'programming']);
   });
 
   it('is case-insensitive and trims tokens', () => {
@@ -45,7 +46,16 @@ describe('@kindora/agent — computeHeuristics', () => {
       makeProfile({ interests: [' TypeScript ', 'HIKING'] }),
       makeProfile({ interests: ['typescript', 'hiking'] }),
     );
-    expect([...h.sharedInterests].sort()).toEqual(['hiking', 'typescript']);
+    expect([...h.sharedInterests].sort()).toEqual(['hiking', 'programming']);
+  });
+
+  it('matches interest aliases across locales (AI ↔ 人工智能)', () => {
+    const h = computeHeuristics(
+      makeProfile({ interests: ['AI', 'FPV'] }),
+      makeProfile({ interests: ['人工智能', 'fpv 飞行'] }),
+    );
+    expect(h.interestScore).toBe(1);
+    expect([...h.sharedInterests].sort()).toEqual(['ai', 'fpv']);
   });
 
   it('flags a blocking issue when both sides disable agent conversation', () => {
@@ -79,6 +89,15 @@ describe('@kindora/agent — computeHeuristics', () => {
       makeProfile({ socialIntent: ['learning_partner'] }),
     );
     expect(h.intentScore).toBe(1);
+  });
+
+  it('scores conversation-style overlap', () => {
+    const h = computeHeuristics(
+      makeProfile({ conversationStyle: ['deep', 'technical'] }),
+      makeProfile({ conversationStyle: ['deep', 'funny'] }),
+    );
+    expect(h.sharedStyles).toEqual(['deep']);
+    expect(h.styleScore).toBeCloseTo(1 / 3, 5);
   });
 
   it('produces a composite score in [0, 1]', () => {
@@ -117,7 +136,7 @@ describe('@kindora/agent — renderHeuristics', () => {
     expect(out).toMatch(/interest overlap/);
     expect(out).toMatch(/intent alignment/);
     expect(out).toMatch(/composite score/);
-    expect(out).toContain('typescript');
+    expect(out).toContain('programming');
   });
 
   it('includes blocking issues when present', () => {

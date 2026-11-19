@@ -59,9 +59,9 @@ import {
   ConnectionStateMachine,
   LanTransport,
   PairingSession,
-  derivePairingFingerprint,
   normalisePairingCode,
   PAIRING_FINGERPRINT_LENGTH,
+  type AuthorizedEnvelopeSignFn,
   type ConnectionState,
   type ConnectionStateHandler,
   type LanJoinPeer,
@@ -74,12 +74,12 @@ import {
   type MatchOutcome,
   type PeerIntroduction,
 } from '@kindora/matching';
-import { createEnvelopeSigner } from '@kindora/agent';
+import { buildSigningBundle, getBlockedAgentsStore } from './connect-service';
+import type { EnvelopeAuthState } from './authorized-envelope';
 import { loadAgent } from './agent-service';
 import { loadProvider } from './llm-service';
-import { getBlockedAgentsStore } from './connect-service';
+import { deriveLocalFingerprint } from './native-fingerprint';
 import {
-  base64ToBytes,
   type EnvelopeSigner,
   type SocialAgent,
   type SocialProfile,
@@ -98,6 +98,10 @@ export interface LanStartInput {
    * runtime has no usable WebCrypto.
    */
   readonly signer: EnvelopeSigner | null;
+  /** P0-2A / A10 — Rust-gated full-envelope signer when available. */
+  readonly authorizedSign?: AuthorizedEnvelopeSignFn | null;
+  /** P0-2A / A10 — mutable auth context for gated message types. */
+  readonly envelopeAuth?: EnvelopeAuthState;
   /**
    * Phase A / A3 — this agent's pairing fingerprint (six characters
    * derived from its own public key).
@@ -143,6 +147,8 @@ export interface LanConnectionHandle {
   /** The live transport. Same getter contract as `session`. */
   readonly transport: LanTransport;
   readonly selfAgentId: string;
+  /** P0-2A / A10 — mutable Rust authorisation context when wired. */
+  readonly envelopeAuth?: EnvelopeAuthState;
   /**
    * Build the orchestrator lazily — the peer agent id is unknown
    * until a `hello` envelope arrives. The orchestrator itself locks
@@ -339,6 +345,7 @@ async function startLanHostInner(
       agentId: input.agentId,
       displayName: input.displayName,
       signer: input.signer,
+      authorizedSign: input.authorizedSign ?? null,
     });
 
     // Step 2: bind the transport FIRST. If this throws (port in use,
@@ -477,6 +484,8 @@ async function startLanHostInner(
       return liveTransport;
     },
     selfAgentId: input.agentId,
+    envelopeAuth: input.envelopeAuth,
+    // role is already 'host' on LanHostHandle
     getOrchestrator() {
       return new MatchOrchestrator(toOrchestratorSelf(input), '');
     },
@@ -615,6 +624,7 @@ async function startLanJoinInner(
       agentId: input.agentId,
       displayName: input.displayName,
       signer: input.signer,
+      authorizedSign: input.authorizedSign ?? null,
       // The out-of-band identity check: the peer that answers must
       // present the public key this fingerprint was derived from.
       expectedPeerFingerprint: normalised,
@@ -677,6 +687,7 @@ async function startLanJoinInner(
       return liveTransport;
     },
     selfAgentId: input.agentId,
+    envelopeAuth: input.envelopeAuth,
     get peer(): LanJoinPeer {
       return runtime.peer;
     },
@@ -766,6 +777,7 @@ export async function toLanInput(): Promise<LanStartInput> {
   const [agent, llm] = await Promise.all([loadAgent(), loadProvider()]);
   if (!agent) throw new Error('No agent on this device. Create an agent first.');
   if (!llm) throw new Error('No LLM configured. Open Settings and pick a provider.');
+  const signing = await buildSigningBundle(agent);
   return {
     agentId: agent.agentId,
     displayName: agent.displayName,
@@ -779,38 +791,11 @@ export async function toLanInput(): Promise<LanStartInput> {
       capabilities: agent.capabilities,
     },
     llm,
-    signer: await buildSigner(agent),
-    fingerprint: await derivePairingFingerprint(agent.agentId, base64ToBytes(agent.publicKey)),
+    signer: signing.signer,
+    authorizedSign: signing.authorizedSign,
+    envelopeAuth: signing.envelopeAuth,
+    fingerprint: await deriveLocalFingerprint(agent.agentId, agent.publicKey),
   };
-}
-
-/**
- * Phase A / A2 — build the envelope signer for the local agent.
- *
- * `loadAgent()` attaches the private key in memory (it lives in the OS
- * keychain in the shipped app). The signer imports it as a
- * **non-extractable** WebCrypto key.
- *
- * Returns `null` when the runtime has no usable WebCrypto: the
- * session then runs unsigned, and the capability flags say so.
- */
-async function buildSigner(agent: {
-  readonly agentId: string;
-  readonly publicKey: string;
-  readonly privateKey?: string;
-}): Promise<EnvelopeSigner | null> {
-  if (!agent.privateKey) return null;
-  try {
-    return await createEnvelopeSigner({
-      agentId: agent.agentId,
-      publicKey: agent.publicKey,
-      privateKey: agent.privateKey,
-    });
-  } catch {
-    // No usable WebCrypto (or a corrupt key). The capability flags
-    // already report `supportsMessageSigning: false` in that case.
-    return null;
-  }
 }
 
 /**
@@ -852,7 +837,7 @@ export async function runLanExchangeAndMatch(
  * in a UI.
  *
  * Phase A / A3: the LAN pairing code is now the host's **identity
- * fingerprint**, not a random code — see `derivePairingFingerprint`.
+ * fingerprint**, not a random code — see `deriveLocalFingerprint`.
  * This re-export stays for callers that still want a random code for
  * something else (e.g. a test fixture); nothing in the pairing flow
  * uses it any more.

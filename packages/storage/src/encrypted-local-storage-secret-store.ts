@@ -74,6 +74,10 @@ export class BrowserLocalStorageEncryptedSecretStore implements SecretStore {
     getStorage().setItem(STORAGE_PREFIX + key, encoded);
   }
 
+  async exists(key: string): Promise<boolean> {
+    return getStorage().getItem(STORAGE_PREFIX + key) !== null;
+  }
+
   async get(key: string): Promise<string | null> {
     const encoded = getStorage().getItem(STORAGE_PREFIX + key);
     if (!encoded) return null;

@@ -17,9 +17,9 @@ import {
   LoopbackHub,
   LoopbackTransport,
   PairingSession,
-  derivePairingFingerprint,
   normalisePairingCode,
   PAIRING_FINGERPRINT_LENGTH,
+  type AuthorizedEnvelopeSignFn,
   type ConnectionState,
   type ConnectionStateHandler,
 } from '@kindora/transport';
@@ -51,13 +51,18 @@ import {
 } from '@kindora/agent';
 import { type BlockedAgentsStore } from '@kindora/storage';
 import {
-  base64ToBytes,
   resolveBoundaries,
   type EnvelopeSigner,
   type SocialAgent,
   type SocialProfile,
 } from '@kindora/protocol';
 
+import {
+  createAuthorizedSignFn,
+  createEnvelopeAuthState,
+  isAuthorizedEnvelopeSigningAvailable,
+  type EnvelopeAuthState,
+} from './authorized-envelope';
 import { DesktopChatPersistence } from './chat-persistence';
 import { getKindoraDatabase, isDatabaseAvailable } from './database';
 import { runtimeBlockedAgentsStore } from './runtime-stores';
@@ -122,6 +127,13 @@ export interface ConnectHandle {
   readonly reconnect?: () => Promise<void>;
   /** Tear down the session. Idempotent. */
   disconnect(reason?: string): Promise<void>;
+  /**
+   * P0-2A / A10 — mutable Rust authorisation context for this session.
+   * UI updates peer trust / consent here before gated message types.
+   */
+  readonly envelopeAuth?: EnvelopeAuthState;
+  /** Pairing role — host must confirm the joiner fingerprint (IBR-5). */
+  readonly pairingRole?: 'host' | 'join';
 }
 
 export interface StartInput {
@@ -137,6 +149,13 @@ export interface StartInput {
    * session runs unsigned (and says so through the capability flags).
    */
   readonly signer: EnvelopeSigner | null;
+  /**
+   * P0-2A / A10 — authorised full-envelope signer (Rust gates). Prefer
+   * this over `signer.sign(bytes)` when present.
+   */
+  readonly authorizedSign?: AuthorizedEnvelopeSignFn | null;
+  /** P0-2A / A10 — shared auth state for `authorizedSign`. */
+  readonly envelopeAuth?: EnvelopeAuthState;
   /**
    * Phase A / A3 — this agent's pairing fingerprint: the six-character
    * identity code derived from its own public key.
@@ -164,6 +183,7 @@ export function startHost(input: StartInput): ConnectHandle {
     agentId: input.agentId,
     displayName: input.displayName,
     signer: input.signer,
+    authorizedSign: input.authorizedSign ?? null,
   });
   const transport = new LoopbackTransport({ endpointId: input.agentId, hub: _hub });
   // Phase A / A3 — seed the pairing code with the identity
@@ -201,6 +221,8 @@ export function startHost(input: StartInput): ConnectHandle {
     pairingCode,
     session,
     selfAgentId: input.agentId,
+    envelopeAuth: input.envelopeAuth,
+    pairingRole: 'host',
     get orchestrator() {
       if (!orchestrator) {
         orchestrator = new MatchOrchestrator(toOrchestratorSelf(input), '');
@@ -253,6 +275,7 @@ export function startJoin(input: StartInput & { code: string }): ConnectHandle {
     agentId: input.agentId,
     displayName: input.displayName,
     signer: input.signer,
+    authorizedSign: input.authorizedSign ?? null,
     expectedPeerFingerprint: normalised,
   });
   const transport = new LoopbackTransport({ endpointId: input.agentId, hub: _hub });
@@ -277,6 +300,8 @@ export function startJoin(input: StartInput & { code: string }): ConnectHandle {
     pairingCode: normalised,
     session,
     selfAgentId: input.agentId,
+    envelopeAuth: input.envelopeAuth,
+    pairingRole: 'join',
     get orchestrator() {
       if (!orchestrator) {
         // Empty peer id — the orchestrator will learn it from the
@@ -683,11 +708,16 @@ function toOrchestratorSelf(input: StartInput): MatchOrchestratorSelf {
 
 import { loadAgent } from './agent-service';
 import { loadProvider } from './llm-service';
+import { deriveLocalFingerprint } from './native-fingerprint';
 
 /**
  * Build a `StartInput` from the local store. Throws if the agent
  * or LLM is not yet configured. Used by the ConnectView to drive
  * both host and join flows from a single source of truth.
+ *
+ * P0-2A / A6 / A10 — fingerprint is Rust-authoritative when Tauri
+ * is available (`deriveLocalFingerprint`); falls back to the TS
+ * WebCrypto path in browser-only runs.
  */
 export async function toConnectInput(): Promise<StartInput> {
   const [agent, llm] = await Promise.all([loadAgent(), loadProvider()]);
@@ -697,6 +727,7 @@ export async function toConnectInput(): Promise<StartInput> {
   if (!llm) {
     throw new Error('No LLM configured. Open Settings and pick a provider.');
   }
+  const signing = await buildSigningBundle(agent);
   return {
     agentId: agent.agentId,
     displayName: agent.displayName,
@@ -710,41 +741,79 @@ export async function toConnectInput(): Promise<StartInput> {
       capabilities: agent.capabilities,
     },
     llm,
-    signer: await buildSigner(agent),
-    fingerprint: await derivePairingFingerprint(agent.agentId, base64ToBytes(agent.publicKey)),
+    signer: signing.signer,
+    authorizedSign: signing.authorizedSign,
+    envelopeAuth: signing.envelopeAuth,
+    fingerprint: await deriveLocalFingerprint(agent.agentId, agent.publicKey),
   };
+}
+
+export interface SigningBundle {
+  readonly signer: EnvelopeSigner | null;
+  readonly authorizedSign: AuthorizedEnvelopeSignFn | null;
+  readonly envelopeAuth: EnvelopeAuthState | undefined;
+}
+
+/**
+ * P0-2A / A10 — build signer + authorised envelope hook.
+ *
+ * Under Tauri (no private key in the webview): prefer
+ * `agent_sign_envelope` via `authorizedSign`, keep a native
+ * `EnvelopeSigner` for capability metadata / ECDSA fallback.
+ * Browser-dev still uses WebCrypto with the in-memory private key.
+ */
+export async function buildSigningBundle(agent: {
+  readonly agentId: string;
+  readonly publicKey: string;
+  readonly privateKey?: string;
+}): Promise<SigningBundle> {
+  const { createAuthorizedEnvelopeSigner, isNativeSigningAvailable } =
+    await import('./native-envelope-signer');
+  if (isNativeSigningAvailable() && !agent.privateKey) {
+    if (!isAuthorizedEnvelopeSigningAvailable()) {
+      throw new Error(
+        'Tauri is available but authorised envelope signing is not — refusing to start an unsigned session.',
+      );
+    }
+    const signer = await createAuthorizedEnvelopeSigner({
+      agentId: agent.agentId,
+      publicKey: agent.publicKey,
+    });
+    const { sessionBindLocal } = await import('./outbound-session');
+    await sessionBindLocal(agent.agentId, agent.publicKey);
+    const envelopeAuth = createEnvelopeAuthState(agent.agentId, signer.keyId);
+    return {
+      signer,
+      authorizedSign: createAuthorizedSignFn(envelopeAuth),
+      envelopeAuth,
+    };
+  }
+  if (!agent.privateKey) {
+    throw new Error(
+      'No private key and no native signer — cannot build a signing bundle.',
+    );
+  }
+  const signer = await createEnvelopeSigner({
+    agentId: agent.agentId,
+    publicKey: agent.publicKey,
+    privateKey: agent.privateKey,
+  });
+  return { signer, authorizedSign: null, envelopeAuth: undefined };
 }
 
 /**
  * Phase A / A2 — build the envelope signer for the local agent.
  *
- * `loadAgent()` attaches the private key in memory (it lives in the OS
- * keychain in the shipped app). The signer imports it as a
- * **non-extractable** WebCrypto key, so from that point on the raw key
- * bytes cannot be read back out — only used to sign.
- *
- * Returns `null` when the runtime has no usable WebCrypto: the
- * session then runs unsigned, and the capability flags say so. A
- * signer that silently did nothing would be worse than none.
+ * Prefer {@link buildSigningBundle} for new call sites (A10). This
+ * helper remains for tests that only need the ECDSA signer.
  */
 export async function buildSigner(agent: {
   readonly agentId: string;
   readonly publicKey: string;
   readonly privateKey?: string;
 }): Promise<EnvelopeSigner | null> {
-  if (!agent.privateKey) return null;
-  try {
-    return await createEnvelopeSigner({
-      agentId: agent.agentId,
-      publicKey: agent.publicKey,
-      privateKey: agent.privateKey,
-    });
-  } catch {
-    // No usable WebCrypto (or a corrupt key). The capability flags
-    // already report `supportsMessageSigning: false` in that case;
-    // silently pretending to sign would be worse.
-    return null;
-  }
+  const bundle = await buildSigningBundle(agent);
+  return bundle.signer;
 }
 
 /**

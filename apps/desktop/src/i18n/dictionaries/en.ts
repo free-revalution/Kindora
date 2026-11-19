@@ -33,10 +33,62 @@ export const en = {
   'app.loading': 'Loading…',
   'app.keychainErrorTitle': 'Your private key could not be loaded',
   'app.keychainErrorRetry': 'Try again',
+  'app.keychainError.locked': 'Your system keychain is locked.',
+  'app.keychainError.lockedHint':
+    'Unlock your macOS Keychain (or Windows Credential Manager / Linux Secret Service), then press Try again.',
+  'app.keychainError.denied': 'Your system keychain denied access to Kindora’s key.',
+  'app.keychainError.deniedHint':
+    'Allow Kindora when the OS asks for keychain access, then press Try again.',
+  'app.keychainError.unavailable':
+    'No system keychain is available on this device, so the private key cannot be stored safely.',
+  'app.keychainError.unavailableHint':
+    'Use the packaged desktop app on a machine with a working OS keychain.',
+  'app.keychainError.notFound': 'No private key was found for this agent.',
+  'app.keychainError.notFoundHint':
+    'The agent record is present but the keychain entry is missing. Creating a new agent may be required.',
+  'app.keychainError.corrupt': 'The stored private key could not be read.',
+  'app.keychainError.corruptHint':
+    'The keychain entry looks damaged. Creating a new agent may be required.',
+  'app.keychainError.invalidKey': 'The private key was rejected by the system keychain.',
+  'app.keychainError.invalidKeyHint':
+    'The stored material is not a usable key. Creating a new agent may be required.',
+  'app.keychainError.generic': 'The system keychain reported an error.',
+  'app.keychainError.genericHint': 'See the detail below, then try again after fixing the cause.',
+  'app.keychainError.createNew': 'Create a new agent',
   'app.databaseErrorTitle': 'Your local database could not be opened',
   'app.databaseErrorRetry': 'Try again',
+  'app.errorBoundaryTitle': 'Something went wrong',
+  'app.errorBoundaryBody':
+    'This screen crashed. Your data on disk was not modified. You can try again.',
+  'app.persistenceError':
+    'Chat history could not be saved. The conversation can continue, but this message may be lost after a restart.',
+  'app.icebreakerErrorTitle': 'Icebreaker could not be generated',
+  'app.icebreakerErrorBody':
+    'The match succeeded, but the icebreaker request failed. You can retry, skip to chat, or disconnect.',
+  'app.icebreakerRetry': 'Retry icebreaker',
+  'app.icebreakerSkip': 'Skip to chat',
+  'app.keyBoundaryNote':
+    'Security note: the desktop app stores your identity key in the OS keychain, but signing still happens in the app window. A harder boundary (native signing) is planned; treat this build as a developer preview.',
   'home.keychainDevWarning':
     'Browser preview: your private key is kept in this browser’s local storage, not in the system keychain. Use the desktop app for real protection.',
+
+  /* ── Navigation ─────────────────────────────────────────────────── */
+  'nav.tagline': 'Local-first social agents',
+  'nav.agent': 'Agent',
+  'nav.connect': 'Connect',
+  'nav.history': 'History',
+  'nav.blocked': 'Blocked',
+  'nav.settings': 'Settings',
+  'nav.demo': 'Demo',
+  'nav.noAgent': 'No agent yet',
+  'nav.agentReady': 'Ready on this device',
+  'nav.agentMissing': 'Create an agent to begin',
+  'flow.connect': 'Connect',
+  'flow.identify': 'Identify',
+  'flow.consent': 'Consent',
+  'flow.match': 'Match',
+  'flow.icebreaker': 'Icebreaker',
+  'flow.chat': 'Chat',
 
   /* ── Welcome ────────────────────────────────────────────────────── */
   'welcome.taglineFirst': 'Your AI finds the connection.',
@@ -44,6 +96,7 @@ export const en = {
   'welcome.body':
     'Create a personal AI social agent that understands you, helps you find genuinely compatible people, and then gets out of the way.',
   'welcome.createAgent': 'Create My Agent',
+  'welcome.tryDemo': 'Try the demo',
   'welcome.footer': 'Local-first · Open source · MIT',
 
   /* ── Home ───────────────────────────────────────────────────────── */
@@ -57,6 +110,9 @@ export const en = {
   'home.lookingFor': 'Looking for',
   'home.conversationStyle': 'Conversation style',
   'home.connectAgent': 'Connect Agent',
+  'home.connectHint':
+    'LAN for the same Wi-Fi; WebRTC “Same device” to try two windows on this computer; copy/paste SDP for another network.',
+  'home.tryDemo': 'Run the local demo',
   'home.blockedAgents': 'Blocked agents',
   'home.chatHistory': 'Chat history',
   'home.intent.similar_interests': 'Similar interests',
@@ -102,15 +158,28 @@ export const en = {
   'agent.style.technical': 'Technical',
   'agent.style.funny': 'Funny',
   'agent.style.quiet': 'Quiet',
+  'agent.interestCategory.tech': 'Tech',
+  'agent.interestCategory.creative': 'Creative',
+  'agent.interestCategory.outdoors': 'Outdoors',
+  'agent.interestCategory.games': 'Games',
+  'agent.interestCategory.learning': 'Learning',
+  'agent.interestCategory.social': 'Social',
   'agent.suggestedInterest.ai': 'AI',
   'agent.suggestedInterest.programming': 'Programming',
   'agent.suggestedInterest.openSource': 'Open Source',
-  'agent.suggestedInterest.gaming': 'Gaming',
-  'agent.suggestedInterest.fpv': 'FPV',
   'agent.suggestedInterest.indieHacking': 'Indie Hacking',
   'agent.suggestedInterest.music': 'Music',
-  'agent.suggestedInterest.reading': 'Reading',
+  'agent.suggestedInterest.writing': 'Writing',
+  'agent.suggestedInterest.design': 'Design',
   'agent.suggestedInterest.climbing': 'Climbing',
+  'agent.suggestedInterest.hiking': 'Hiking',
+  'agent.suggestedInterest.fpv': 'FPV',
+  'agent.suggestedInterest.gaming': 'Gaming',
+  'agent.suggestedInterest.boardGames': 'Board Games',
+  'agent.suggestedInterest.reading': 'Reading',
+  'agent.suggestedInterest.languages': 'Languages',
+  'agent.suggestedInterest.coffee': 'Coffee',
+  'agent.suggestedInterest.cooking': 'Cooking',
 
   /* ── Privacy boundaries (Phase B / B1) ──────────────────────────── */
   'privacy.title': 'Privacy',
@@ -197,6 +266,8 @@ export const en = {
   'settings.apiKeyCleared': 'Saved API key removed.',
   'settings.apiKeyClearFailed': 'Could not remove the saved key: {message}',
   'settings.testConnection': 'Test Connection',
+  'settings.ollamaLoopbackHint':
+    'Ollama must run on this machine. Use http://127.0.0.1:11434 (or localhost). Remote hosts are blocked.',
   'settings.testing': 'Testing…',
   'settings.save': 'Save',
   'settings.saveSuccessWithKey': 'Saved. API key stored locally.',
@@ -205,6 +276,26 @@ export const en = {
   'settings.connectionOk': 'Connection OK. Model replied:',
   'settings.language': 'Language',
   'settings.languageHint': 'Applies immediately.',
+  'settings.transportTitle': 'Transports',
+  'settings.transportBody':
+    'LAN needs the desktop app. WebRTC needs RTCPeerConnection (Tauri WebView / modern browsers) and uses a local self-test that never leaves this device.',
+  'settings.webrtcAvailable': 'available',
+  'settings.webrtcUnavailable': 'not available in this runtime',
+  'settings.webrtcSelfTest': 'Test WebRTC (local loop)',
+  'settings.iceServers': 'ICE servers (STUN/TURN)',
+  'settings.iceServersHint':
+    'One stun: or turn: URL per line. Used by WebRTC pairing. Leave default Google STUN unless you have your own.',
+  'settings.iceServersSave': 'Save ICE servers',
+  'settings.iceServersReset': 'Reset to defaults',
+  'settings.iceServersSaved': 'ICE servers saved for this browser / app profile.',
+  'settings.signallingUrl': 'WebRTC signalling URL (Mode C)',
+  'settings.signallingUrlHint':
+    'HTTP base URL of your signalling server, e.g. http://127.0.0.1:8787. Run `node tools/kindora-signalling-server.mjs`. Leave empty to disable Mode C.',
+  'settings.signallingUrlSave': 'Save signalling URL',
+  'settings.signallingUrlClear': 'Clear',
+  'settings.signallingUrlSaved': 'Signalling URL saved for this browser / app profile.',
+  'settings.unsavedConfirm':
+    'You have unsaved LLM settings. Leave without saving?',
   'settings.privacyNote':
     'Kindora never sends your API key to another agent, logs it, or includes it in your profile.',
 
@@ -241,15 +332,74 @@ export const en = {
     'LAN mode is only available in the Tauri desktop app (not in browser dev).',
   'connect.loopback': 'Loopback',
   'connect.loopbackTitle': 'Loopback: in-process pairing (browser dev / single-machine tests).',
+  'connect.webrtc': 'WebRTC',
+  'connect.webrtcTitle':
+    'WebRTC: cross-network pairing via a DataChannel. You exchange SDP blobs by hand (copy/paste); STUN helps with NAT.',
+  'connect.webrtcUnavailableTitle':
+    'WebRTC is not available in this runtime (RTCPeerConnection missing).',
   'connect.preparingRoom': 'Preparing room…',
   'connect.shareCodeLan': 'Share this identity fingerprint (over LAN)',
   'connect.shareCodeLoopback': 'Share this identity fingerprint (loopback)',
+  'connect.shareCodeWebRtc': 'Share this identity fingerprint, then the offer blob',
   'connect.waitingForPeer': 'Waiting for the other person to enter this fingerprint…',
+  'connect.waitingForAnswer': 'Waiting for the other person to paste their answer blob…',
+  'connect.webrtcConnecting': 'Signalling done — opening the DataChannel…',
+  'connect.badSignalBlob':
+    'That does not look like a Kindora signalling blob. Copy the whole Answer text from the other device and try again.',
+  'connect.lab': 'Same device',
+  'connect.manual': 'Copy/paste',
+  'connect.labTitle':
+    'Lab: two windows on this computer exchange SDP over BroadcastChannel — no copy/paste.',
+  'connect.labUnavailable': 'BroadcastChannel is not available in this runtime.',
+  'connect.manualTitle': 'Manual Mode B: exchange SDP blobs by copy/paste across networks.',
+  'connect.server': 'Signalling server',
+  'connect.serverTitle':
+    'Mode C: exchange SDP through your HTTP signalling server (URL in Settings).',
+  'connect.serverUnavailable':
+    'Set a signalling URL in Settings (e.g. http://127.0.0.1:8787) to enable Mode C.',
+  'connect.serverWaiting':
+    'Waiting for the peer on the signalling server — they join with this fingerprint.',
+  'connect.labWaiting':
+    'Waiting for another window on this device to join with this fingerprint…',
+  'connect.labJoinHint':
+    'Open a second Kindora window, start Host with the same “Same device” mode, then enter that host fingerprint here.',
+  'connect.webrtcTimeout':
+    'WebRTC did not connect in time. Check ICE servers in Settings, or try again with both sides online.',
+  'connect.leaveToHome': 'Back to home',
   'connect.pairingCodeLan': 'Identity fingerprint (over LAN)',
   'connect.pairingCodeLoopback': 'Identity fingerprint (loopback)',
+  'connect.pairingCodeWebRtc': 'Host identity fingerprint',
   'connect.codePlaceholder': 'A1B2-C3',
+  'connect.offerBlob': 'Offer blob (copy this)',
+  'connect.answerBlob': 'Answer blob (copy this)',
+  'connect.pasteAnswer': 'Paste their answer blob',
+  'connect.pasteOffer': 'Paste their offer blob',
+  'connect.copyBlob': 'Copy',
+  'connect.copied': 'Copied',
+  'connect.applyAnswer': 'Apply answer',
+  'connect.createAnswer': 'Create answer',
+  'connect.webrtcPreparing': 'Preparing WebRTC offer…',
+  'connect.pairUrl': 'Pairing link',
+  'connect.copyPairUrl': 'Copy link',
+  'connect.copyFingerprint': 'Copy fingerprint',
+  'connect.qrLabel': 'Pairing QR code',
+  'connect.pairUrlHint':
+    'Scan the QR or paste the link into Join — or type the fingerprint by hand.',
   'connect.fingerprintHint':
     'Read these 6 characters out loud and check that the other device shows the same ones. This is an identity fingerprint — it identifies the host. It is not a password and it does not open anything by itself.',
+  'connect.localFingerprintHint':
+    'Show these 6 characters to the host so they can confirm it is you. This is your identity fingerprint — not a password.',
+  'connect.localFingerprintLabel': 'Your fingerprint (for the host)',
+  'connect.peerFingerprintEyebrow': 'Confirm identity',
+  'connect.peerFingerprintTitle': 'Does this match the other device?',
+  'connect.peerFingerprintBody':
+    'Read these characters out loud with {name}. Continue only when both of you see the same fingerprint.',
+  'connect.peerFingerprintHint':
+    'Until you confirm, Kindora will not allow consent or chat with this peer.',
+  'connect.peerFingerprintConfirm': 'Fingerprints match',
+  'connect.peerFingerprintConfirming': 'Confirming…',
+  'connect.peerFingerprintMissing':
+    'The peer did not send a public key, so a fingerprint cannot be shown.',
   'connect.fingerprintMismatch':
     'The other device does not match this fingerprint, so the connection was closed.',
   'connect.peerDisconnected': 'The other device disconnected, so the connection was closed.',
@@ -285,6 +435,10 @@ export const en = {
   'match.yourAgentSays': 'Your agent says',
   'match.theirAgentSays': 'Their agent says',
   'match.peerStillThinking': 'Their agent is still thinking. Showing your local result only.',
+  'match.degradedTitle': 'Partial analysis',
+  'match.degradedBody':
+    'The model reply was incomplete or unreadable in places. Shared tags below may come from deterministic interest overlap instead of the model narrative.',
+  'match.peerTimedOut': 'Their analysis did not arrive in time. Showing your local result only.',
   'match.commonGround': 'Common ground',
   'match.noCommonGround': 'No overlaps surfaced.',
   'match.recommendedTopics': 'Recommended topics',
@@ -293,6 +447,14 @@ export const en = {
   'match.noFriction': 'No friction points flagged.',
   'match.explanation': 'Explanation',
   'match.noExplanation': 'No explanation provided.',
+  'match.overlapTitle': 'Overlap scores',
+  'match.overlapHint':
+    'Deterministic scores that grounded the analysis. The signal above still comes from the model (or a safe fallback).',
+  'match.overlap.interest': 'Interests',
+  'match.overlap.intent': 'Intent',
+  'match.overlap.style': 'Style',
+  'match.overlap.activity': 'Activities',
+  'match.overlap.composite': 'Composite',
   'match.progressConnecting': 'Connecting…',
   'match.progressExchanging': 'Exchanging profiles…',
   'match.progressAnalysing': 'Your agent is analysing compatibility…',
@@ -363,6 +525,9 @@ export const en = {
   'icebreaker.disabledBody':
     'Both profiles disallow agent-assisted conversation starters. You can still enter the chat and write your own message.',
   'icebreaker.couldNotGenerate': 'Couldn’t generate starters',
+  'icebreaker.heuristicSeedTitle': 'Fallback starters',
+  'icebreaker.heuristicSeedBody':
+    'The model did not return usable openers, so these drafts come from recommended topics or shared interests. Edit freely before sending.',
   'icebreaker.drafting': 'Drafting starters',
   'icebreaker.thinking': 'Your agent is thinking about what to say…',
   'icebreaker.empty':
@@ -425,6 +590,8 @@ export const en = {
   'chat.assist.dismiss': 'Dismiss',
   'chat.assist.boundaryBlocked':
     'Both profiles disallow agent conversation — assistant is disabled for this chat.',
+  'chat.assist.heuristicSeed':
+    'The model did not return usable drafts, so these suggestions come from recommended topics or shared interests. Edit freely before sending.',
   'chat.assist.kind.reply': 'Reply',
   'chat.assist.kind.topic': 'Topic',
   'chat.assist.kind.explanation': 'Explain',
@@ -446,6 +613,50 @@ export const en = {
   'history.fromAgent': 'from your agent',
   'history.statusPending': 'Never sent.',
   'history.statusFailed': 'Not sent.',
+
+  /* ── Local demo mode ───────────────────────────────────────────── */
+  'demo.banner':
+    'Local demo — simulated agents on this machine. No network, no language model, no other people.',
+  'demo.stepsLabel': 'Demo steps',
+  'demo.step.intro': 'Intro',
+  'demo.step.meet': 'Meet',
+  'demo.step.consent': 'Consent',
+  'demo.step.match': 'Match report',
+  'demo.step.icebreaker': 'Icebreaker',
+  'demo.step.chat': 'Chat',
+  'demo.eyebrow': 'Local demo',
+  'demo.introTitle': 'See the whole loop in two minutes',
+  'demo.introBody':
+    'Kindora works by putting two personal AI agents in the same room and letting them find what you have in common — then leaving the decision to you. This demo walks through that loop on this machine, without a second device and without an API key.',
+  'demo.whatIsReal': 'What is real here',
+  'demo.realProfiles':
+    'The profile model, the privacy filter and the public card are the real ones.',
+  'demo.realHeuristics':
+    'The overlap scoring is the real deterministic matcher from the agent package.',
+  'demo.realParsing':
+    'The report is produced by the real prompt builder and the real output parser.',
+  'demo.realScreens': 'Every screen you will see is the shipping product UI.',
+  'demo.whatIsSimulated': 'What is simulated',
+  'demo.simulatedModel':
+    'No language model is called. A local deterministic stand-in answers the same prompt.',
+  'demo.simulatedPeer':
+    'The other person is a fixture profile. They are not real and not online.',
+  'demo.simulatedNetwork':
+    'Nothing is sent anywhere. There is no peer on your LAN and no server.',
+  'demo.start': 'Start the demo',
+  'demo.exit': 'Not now',
+  'demo.meetEyebrow': 'Step 1',
+  'demo.meetTitle': 'Two agents, two people',
+  'demo.meetBody':
+    'Each person writes their own agent: a nickname, a short bio, a handful of interests and what they are doing right now. Here are the two demo agents.',
+  'demo.you': 'Your agent',
+  'demo.peer': 'The demo peer',
+  'demo.continue': 'Continue',
+  'demo.continueToMatch': 'Continue to the match report',
+  'demo.continueToChat': 'Continue to the chat',
+  'demo.chatNotice':
+    'The peer in this demo is scripted: their three replies are fixed and do not depend on what you type. A real session would carry your messages to another device.',
+  'demo.finish': 'Finish the demo',
 
   /* ── Language picker ────────────────────────────────────────────── */
   'language.label': 'Language',

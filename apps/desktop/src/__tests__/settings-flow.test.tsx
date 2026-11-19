@@ -21,7 +21,7 @@ async function createAgentFromWelcome() {
   fireEvent.click(screen.getByText(/meet people with similar interests/i));
   fireEvent.click(screen.getByRole('button', { name: 'Casual' }));
   fireEvent.click(screen.getByRole('button', { name: 'Create Agent' }));
-  await waitFor(() => screen.getByText('Sam'));
+  await waitFor(() => expect(screen.getAllByText('Sam').length).toBeGreaterThan(0));
 }
 
 describe('apps/desktop — Settings flow', () => {
@@ -32,7 +32,7 @@ describe('apps/desktop — Settings flow', () => {
 
     // 2) Open Settings
     await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
+      fireEvent.click(screen.getByTestId('nav-settings'));
     });
     await screen.findByText('LLM Provider');
 
@@ -79,7 +79,7 @@ describe('apps/desktop — Settings flow', () => {
     await createAgentFromWelcome();
 
     await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
+      fireEvent.click(screen.getByTestId('nav-settings'));
     });
     await screen.findByText('LLM Provider');
 

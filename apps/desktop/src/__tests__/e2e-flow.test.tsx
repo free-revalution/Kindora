@@ -44,7 +44,7 @@ async function createAgentFromWelcome(displayName = 'Sam') {
   fireEvent.click(screen.getByText(/meet people with similar interests/i));
   fireEvent.click(screen.getByRole('button', { name: 'Casual' }));
   fireEvent.click(screen.getByRole('button', { name: 'Create Agent' }));
-  await waitFor(() => screen.getByText(displayName));
+  await waitFor(() => expect(screen.getAllByText(displayName).length).toBeGreaterThan(0));
 }
 
 async function saveLlmConfigAnthropic() {
@@ -62,7 +62,7 @@ async function saveLlmConfigAnthropic() {
   );
 
   await act(async () => {
-    fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
+    fireEvent.click(screen.getByTestId('nav-settings'));
   });
   await screen.findByText('LLM Provider');
 
@@ -100,13 +100,13 @@ describe('apps/desktop — App end-to-end flow', () => {
     await createAgentFromWelcome('Sam');
 
     // 3) Home view — agent name visible.
-    expect(screen.getByText('Sam')).toBeInTheDocument();
+    expect(screen.getAllByText('Sam').length).toBeGreaterThan(0);
 
     // 4) Save LLM config in Settings.
     await saveLlmConfigAnthropic();
 
     // 5) Back on Home — Settings closed.
-    expect(screen.getByText('Sam')).toBeInTheDocument();
+    expect(screen.getAllByText('Sam').length).toBeGreaterThan(0);
 
     // 6) Open Connect. The LLM saved in step 4 must be usable NOW —
     //    not only after the app is restarted. The App re-reads the saved
@@ -158,7 +158,7 @@ describe('apps/desktop — App end-to-end flow', () => {
     render(<App />);
 
     // Should land directly on Home (agent already exists).
-    expect(await screen.findByText('Persistent Sam')).toBeInTheDocument();
+    expect((await screen.findAllByText('Persistent Sam')).length).toBeGreaterThan(0);
     expect(screen.queryByText(/create my agent/i)).toBeNull();
   });
 });

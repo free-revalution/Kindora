@@ -168,6 +168,38 @@ describe('apps/desktop — ChatView (Phase 10 — Ask My Agent panel)', () => {
     expect(btn.disabled).toBe(true);
   });
 
+  it('shows a soft notice for heuristic-seed assist drafts', () => {
+    render(
+      <ChatView
+        peerDisplayName="Bob"
+        selfDisplayName="Alex"
+        snapshot={makeSnapshot()}
+        phase="open"
+        draft=""
+        sending={false}
+        maxTextLength={2000}
+        error={undefined}
+        assistant={emptyAssist({
+          open: true,
+          softNotice: 'Fallback drafts from shared interests.',
+        })}
+        onDraftChange={() => undefined}
+        onSend={() => undefined}
+        onDisconnect={() => undefined}
+        onBlock={() => undefined}
+        onUseSuggestion={() => undefined}
+        onAskOpen={() => undefined}
+        onAskClose={() => undefined}
+        onAskChangeQuery={() => undefined}
+        onAskSubmit={() => undefined}
+        onAskRegenerate={() => undefined}
+        onAskDismissSuggestion={() => undefined}
+      />,
+    );
+    expect(screen.getByTestId('chat-assist-soft-notice')).toBeInTheDocument();
+    expect(screen.getByText(/Fallback drafts/i)).toBeInTheDocument();
+  });
+
   it('opens the panel and renders the query form when Ask My Agent is clicked', () => {
     let assist = emptyAssist({ open: false });
     const { rerender } = render(
@@ -509,6 +541,7 @@ function emptyAssist(overrides: Partial<ChatAssistPanelState> = {}): ChatAssistP
     unavailable: false,
     unavailableReason: undefined,
     error: undefined,
+    softNotice: undefined,
     query: '',
     display: null,
     dismissedIds: [],

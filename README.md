@@ -67,8 +67,10 @@ dashed edge below is **planned, not implemented**:
 - ✅ Implemented: profile storage, KSA 0.1 envelopes (validated, replay-guarded,
   rate-limited), LAN transport (real UDP + TCP), agent-to-agent matching,
   consent, icebreaker, chat.
-- ⛔ Not implemented: cross-network (WebRTC) pairing — `WebRtcTransport` is a
-  stub and `connect()` throws. **Same-LAN only.**
+- ✅ Implemented (unverified on two devices): WebRTC DataChannel + **manual SDP
+  copy/paste** (Mode B) and **self-hosted Mode C** HTTP signalling
+  (`tools/kindora-signalling-server.mjs`). STUN defaults ship; TURN is
+  Settings-configurable (bring your own). No Kindora-operated relay.
 
 Full capability-by-capability status, with the evidence for each claim:
 [docs/DEVELOPMENT_STATUS.md](docs/DEVELOPMENT_STATUS.md).
@@ -79,17 +81,22 @@ Full capability-by-capability status, with the evidence for each claim:
 
 **V0.1 — Experimental. Source only: no releases, no installers.**
 
-> The desktop app builds and launches, but **no complete two-machine session has
-> been driven through the GUI by hand yet**, and **no automated test has ever
-> called a live LLM provider** — every LLM test mocks `fetch`. Real API
-> schemas, auth headers and error shapes remain unverified.
+> As of 2026-11-18 the desktop UI ships a dark IDE-style shell (sidebar +
+> workspace), a local Demo that needs no second device / API key, and clearer
+> failure surfaces (icebreaker / persistence / render crashes). **Ollama’s
+> default loopback endpoint is now allowed by CSP.** That does **not** make
+> the build verified: **no complete two-machine GUI session has been driven by
+> hand yet**, and **no automated test has ever called a live LLM provider** —
+> every LLM test mocks `fetch`. Real API schemas, auth headers and error shapes
+> remain unverified. Native `agent_sign` is in for the desktop connect hot
+> path; full P0-2A (envelope auth gates, keyring migration, IPC ACL) is
+> **not** complete — treat this as a developer preview.
 >
-> What _is_ green under automated tests: the whole TypeScript workspace
-> (**1035 cases across seven suites**) and the Rust transport layer (**48 cases
-> across four suites**), plus the whole toolchain gate — the type check, ESLint,
-> the package build, `cargo fmt --check` and `cargo clippy -D warnings` all
-> pass. The LAN integration suite binds **real UDP and TCP sockets**; it does
-> not exercise the React UI against a real Tauri window.
+> What _is_ green under automated tests: the TypeScript workspace (including
+> the desktop suite at **175** cases on 2026-11-18) and the Rust transport
+> layer (**48 cases** across four suites), plus the toolchain gates that CI
+> actually runs. The LAN integration suite binds **real UDP and TCP sockets**;
+> it does not exercise the React UI against a real Tauri window.
 >
 > **One gate is still red:** `pnpm format:check` reports **111 files** that have
 > never been Prettier-formatted — the baseline commit's own files included, so
@@ -178,22 +185,24 @@ assumes a feature works.
   suite is green (151/151) — but **the packaged app has not been driven by
   hand**.
 
+### ⚠️ Implemented, not hand-verified
+
+- **WebRTC / cross-network pairing (Mode B + Mode C)** — DataChannel + manual
+  SDP (Mode B) and HTTP long-poll signalling (Mode C, self-hosted). Unit-tested
+  with a mocked peer connection; **no two-device GUI acceptance yet**. Without
+  `RTCPeerConnection` or a signalling adapter, `connect()` still throws
+  `WebRtcNotImplementedError`. TURN requires your own URL.
+- **QR / pairing link** — host Connect shows a scannable QR (local encoder) and
+  a `kindora://pair?…` URL; Join accepts pasting that URL. Not yet proven
+  against a real phone camera in a hand drive.
+
 ### ❌ Not implemented
 
-- **WebRTC / cross-network pairing** — `WebRtcTransport` is a stub; every entry point
-  throws a typed `WebRtcNotImplementedError` (code `WEBRTC_NOT_IMPLEMENTED`) and no
-  code path lets it look connected. That is deliberate, and it is **pinned by
-  tests** — the stub's behaviour, the signalling contract and the capability
-  cross-check between two peers are all covered, so a "connected" state cannot
-  appear by accident. **Same-LAN only.**
-- **A Rust-side signer** — the agent's private key lives in the **OS keychain**,
-  but it is read back into the webview to sign there (imported as a
-  non-extractable WebCrypto key, so it cannot be exported once it is inside).
-  A Rust `agent_sign` command is not implemented. In browser dev mode there is
-  no keychain, so the key stays in `localStorage`.
-- **QR-code pairing** — the payload helpers exist in
-  `packages/transport/src/qr-payload.ts`; there is no UI.
-- **Releases / installers** — none. Build from source.
+- **Full P0-2A** — `agent_sign` covers the desktop connect hot path; envelope
+  auth gates, keyring service migration, LLM-via-Rust, and IPC ACL remain open.
+  Browser dev mode still keeps the identity key in `localStorage`.
+- **Releases / installers** — none published. Build from source (DMG is
+  buildable locally).
 
 ---
 
@@ -206,7 +215,7 @@ assumes a feature works.
 | Core / transport | Rust (`tokio`) — `apps/desktop/src-tauri`                                                                                                                                                                                           |
 | Language runtime | Node.js ≥ 20, pnpm 10 workspaces                                                                                                                                                                                                    |
 | LLM integration  | OpenAI-compatible, Anthropic, Ollama, MiniMax adapters                                                                                                                                                                              |
-| Transport        | UDP discovery + TCP (LAN), in-process loopback, WebRTC stub                                                                                                                                                                         |
+| Transport        | UDP discovery + TCP (LAN), in-process loopback, WebRTC DataChannel (manual SDP + self-hosted HTTP signalling)                                                                                                                       |
 | Storage          | SQLite via `tauri-plugin-sql` (agents, profiles, settings, block list, chat sessions and messages, plus a migration ledger) + `localStorage` (legacy copy, migrated once) + OS keychain (API keys **and** the agent's identity key) |
 | Tests            | Vitest + React Testing Library (TS), `#[tokio::test]` (Rust)                                                                                                                                                                        |
 
@@ -342,7 +351,7 @@ Kindora/
 │   ├── matching/         match / consent / icebreaker / chat orchestrators
 │   ├── storage/          profile, settings, block list (localStorage) + the SQLite
 │   │                     business database and chat history
-│   └── transport/        LAN (real) · Loopback · WebRTC (stub) · PairingSession FSM
+│   └── transport/        LAN (real) · Loopback · WebRTC (Mode B manual) · PairingSession FSM
 ├── docs/                 PRODUCT · ARCHITECTURE · PROTOCOL · COMMUNITY · DEVELOPMENT_STATUS
 │                         REMEDIATION_{PLAN,PROGRESS,TEST_REPORT} · phase16/ (LAN coverage)
 ├── experiments/          Phase 2.1 cross-process UDP harness (standalone crate)

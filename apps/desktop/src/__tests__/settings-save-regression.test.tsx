@@ -39,7 +39,7 @@ async function createAgentFromWelcome() {
   fireEvent.click(screen.getByText(/meet people with similar interests/i));
   fireEvent.click(screen.getByRole('button', { name: 'Casual' }));
   fireEvent.click(screen.getByRole('button', { name: 'Create Agent' }));
-  await waitFor(() => screen.getByText('Sam'));
+  await waitFor(() => expect(screen.getAllByText('Sam').length).toBeGreaterThan(0));
 }
 
 async function openSettings() {
@@ -47,7 +47,7 @@ async function openSettings() {
   // reaches Home after the agent has been read back from disk. Waiting for the
   // button (instead of querying it directly) is what makes this helper work
   // for a second render in the same test, where the agent already exists.
-  const settingsButton = await screen.findByRole('button', { name: 'Settings' });
+  const settingsButton = await screen.findByTestId('nav-settings');
   await act(async () => {
     fireEvent.click(settingsButton);
   });

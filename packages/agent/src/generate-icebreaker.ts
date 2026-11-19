@@ -27,6 +27,7 @@ import {
   type UntrustedNotice,
 } from './context-builder';
 import { computeHeuristics } from './heuristics';
+import { displayLabelsForSharedInterests } from './interest-taxonomy';
 import {
   MAX_ICEBREAKER_TOPICS,
   parseIcebreakerTopics,
@@ -164,16 +165,47 @@ export async function generateIcebreaker(
   const response = await provider.chat(messages, llmOptions);
   const parsed: ParseIcebreakerResult = parseIcebreakerTopics(response.content);
 
+  // When the model returns nothing usable, fall back to deterministic
+  // starters from recommendedTopics / taxonomy-aware shared interests so
+  // the human still has something concrete to send or edit.
+  let topics = parsed.topics;
+  let degraded = parsed.degraded;
+  let degradationNote = parsed.note;
+  if (topics.length === 0) {
+    const seeded = seedIcebreakerTopics(input, hints.sharedInterests);
+    if (seeded.length > 0) {
+      topics = Object.freeze(seeded);
+      degraded = true;
+      degradationNote = degradationNote
+        ? `${degradationNote}; heuristic-seed`
+        : 'heuristic-seed: empty LLM topics replaced with interest overlap';
+    }
+  }
+
   return {
-    topics: parsed.topics,
+    topics,
     messages,
     estimatedTokens: tokens,
     rawResponse: response.content,
-    degraded: parsed.degraded,
-    degradationNote: parsed.note,
+    degraded,
+    degradationNote,
     boundaryBlocked: false,
     notices: built.notices,
   };
+}
+
+function seedIcebreakerTopics(
+  input: GenerateIcebreakerInput,
+  sharedCanonical: readonly string[],
+): string[] {
+  const fromAnalysis = (input.analysis?.recommendedTopics ?? [])
+    .map((t) => t.trim())
+    .filter(Boolean)
+    .slice(0, MAX_ICEBREAKER_TOPICS);
+  if (fromAnalysis.length > 0) return fromAnalysis;
+
+  const labels = displayLabelsForSharedInterests(input.selfProfile.interests, sharedCanonical);
+  return labels.slice(0, MAX_ICEBREAKER_TOPICS).map((label) => `I'd like to hear more about ${label}.`);
 }
 
 function estimateTotal(messages: readonly ChatMessage[]): number {

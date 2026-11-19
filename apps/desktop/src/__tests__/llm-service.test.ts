@@ -1,5 +1,6 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import {
+  assertOllamaBaseUrlAllowed,
   clearLLMConfig,
   clearStoredApiKey,
   hasStoredApiKey,
@@ -151,5 +152,27 @@ describe('apps/desktop — testConnection', () => {
         'bad',
       ),
     ).rejects.toThrow(/invalid api key/i);
+  });
+
+  it('rejects a non-loopback Ollama base URL before calling fetch', async () => {
+    const spy = vi.spyOn(globalThis, 'fetch');
+    await expect(
+      testConnection(
+        { provider: 'ollama', baseUrl: 'http://evil.example:11434', model: 'llama3' },
+        undefined,
+      ),
+    ).rejects.toThrow(/localhost|127\.0\.0\.1/i);
+    expect(spy).not.toHaveBeenCalled();
+  });
+});
+
+describe('apps/desktop — assertOllamaBaseUrlAllowed', () => {
+  it('accepts localhost and 127.0.0.1', () => {
+    expect(() => assertOllamaBaseUrlAllowed('http://localhost:11434')).not.toThrow();
+    expect(() => assertOllamaBaseUrlAllowed('http://127.0.0.1:11434')).not.toThrow();
+  });
+
+  it('rejects a remote host', () => {
+    expect(() => assertOllamaBaseUrlAllowed('http://10.0.0.5:11434')).toThrow(/this machine/i);
   });
 });

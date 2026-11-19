@@ -19,7 +19,8 @@ import {
   buildMatchContextDetailed,
   type UntrustedNotice,
 } from './context-builder';
-import { computeHeuristics } from './heuristics';
+import { computeHeuristics, type HeuristicHints } from './heuristics';
+import { displayLabelsForSharedInterests } from './interest-taxonomy';
 import { applyBoundaryOverride, parseMatchAnalysis, type ParseResult } from './output-parser';
 
 /** Minimal config shape required by analyze-match — keeps the import surface small. */
@@ -43,6 +44,8 @@ export interface AnalyzeMatchOptions {
 
 export interface AnalyzeMatchResult {
   readonly analysis: MatchAnalysis;
+  /** Deterministic overlap scores that grounded (or seeded) the analysis. */
+  readonly heuristics: HeuristicHints;
   /** Messages actually sent to the LLM — handy for logging / tests. */
   readonly messages: readonly ChatMessage[];
   /** Tokens consumed (best-effort estimate; 0 chars → 0 tokens). */
@@ -95,6 +98,7 @@ export async function analyzeMatch(
     );
     return {
       analysis: blocked,
+      heuristics: hints,
       messages,
       estimatedTokens: tokens,
       rawResponse: '',
@@ -117,10 +121,29 @@ export async function analyzeMatch(
 
   const response = await provider.chat(messages, llmOptions);
   const parsed: ParseResult = parseMatchAnalysis(response.content);
-  const analysis = applyBoundaryOverride(parsed.analysis, input.selfProfile, input.peerProfile);
+  let analysis = applyBoundaryOverride(parsed.analysis, input.selfProfile, input.peerProfile);
+
+  // When the model already claims a match but leaves commonGround empty,
+  // seed it from taxonomy-aware interest overlap so the UI has concrete
+  // shared tags (using the local profile's own wording). Never invent a
+  // signal — signal 'none' stays empty.
+  if (
+    analysis.compatibilitySignal !== 'none' &&
+    analysis.commonGround.length === 0 &&
+    hints.sharedInterests.length > 0
+  ) {
+    analysis = {
+      ...analysis,
+      commonGround: displayLabelsForSharedInterests(
+        input.selfProfile.interests,
+        hints.sharedInterests,
+      ).slice(0, 6),
+    };
+  }
 
   return {
     analysis,
+    heuristics: hints,
     messages,
     estimatedTokens: tokens,
     rawResponse: response.content,

@@ -133,6 +133,26 @@ describe('apps/desktop — IcebreakerView', () => {
     expect(screen.getByText(/thin-profile/)).toBeInTheDocument();
   });
 
+  it('shows a heuristic-seed banner when fallback starters were used', () => {
+    render(
+      <IcebreakerView
+        peerDisplayName="Bob"
+        selfDisplayName="Alex"
+        phase="ready"
+        topics={["I'd like to hear more about AI."]}
+        boundaryBlocked={false}
+        degradationNote="heuristic-seed: empty LLM topics"
+        error={undefined}
+        onUse={() => undefined}
+        onRegenerate={() => undefined}
+        onSkip={() => undefined}
+        onDisconnect={() => undefined}
+      />,
+    );
+    expect(screen.getByTestId('icebreaker-heuristic-seed')).toBeInTheDocument();
+    expect(screen.getByText(/Fallback starters/i)).toBeInTheDocument();
+  });
+
   it('fires onUse with the original topic when Use is clicked (no edit)', () => {
     let used: string | null = null;
     render(

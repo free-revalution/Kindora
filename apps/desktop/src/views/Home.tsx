@@ -1,7 +1,5 @@
 /**
- * Home screen — shown once an agent exists on this device.
- *
- * 开发手册.md § 42.
+ * Home — agent overview as an editorial document, not a dashboard.
  */
 
 import type { SocialIntent } from '@kindora/protocol';
@@ -12,37 +10,44 @@ import {
   useTranslate,
   type Translate,
 } from '../i18n';
+import { StatusDot } from '../components/StatusDot';
+import { Banner } from '../components/Banner';
 
 export interface HomeProps {
   agent: StoredAgent;
   onEdit: () => void;
   onConnect: () => void;
   onSettings: () => void;
-  /** Phase B / B3 — open the blocked-agents list. */
   onBlocked?: () => void;
-  /** Phase D / D2 — open the chat history of this device. */
   onHistory?: () => void;
+  onTryDemo?: () => void;
 }
 
-export function Home({ agent, onEdit, onConnect, onSettings, onBlocked, onHistory }: HomeProps) {
+export function Home({
+  agent,
+  onEdit,
+  onConnect,
+  onSettings,
+  onBlocked,
+  onHistory,
+  onTryDemo,
+}: HomeProps) {
   const t = useTranslate();
   const { profile } = agent;
   return (
-    <main className="mx-auto flex w-full max-w-2xl flex-col gap-8 px-6 py-10">
-      <header className="flex items-start justify-between">
+    <main className="kindora-page" data-testid="home-screen">
+      <header className="flex flex-wrap items-end justify-between gap-6 border-b border-kindora-200 pb-8">
         <div>
-          <p className="text-kindora-500 dark:text-kindora-400 text-xs uppercase tracking-wide">
-            {t('home.myAgent')}
-          </p>
-          <h1 className="mt-1 flex items-center gap-2 text-3xl font-semibold tracking-tight">
-            <span className="h-3 w-3 rounded-full bg-emerald-500" aria-hidden />
+          <p className="kindora-eyebrow">{t('home.myAgent')}</p>
+          <h1 className="mt-3 flex items-center gap-3 font-display text-4xl font-medium tracking-[-0.03em] text-kindora-950">
+            <StatusDot tone="live" />
             {profile.nickname || t('home.unnamed')}
           </h1>
-          <p className="text-kindora-500 dark:text-kindora-400 mt-1 font-mono text-xs">
-            {agent.agentId.slice(0, 8)}…
+          <p className="mt-2 font-mono text-[11px] text-kindora-400">
+            {agent.agentId.slice(0, 12)}…
           </p>
         </div>
-        <div className="flex gap-2">
+        <div className="flex flex-wrap gap-2">
           {onHistory && (
             <button type="button" className="kindora-button-ghost" onClick={onHistory}>
               {t('home.chatHistory')}
@@ -62,68 +67,73 @@ export function Home({ agent, onEdit, onConnect, onSettings, onBlocked, onHistor
         </div>
       </header>
 
-      {/* Phase A / A1 — the browser-dev fallback keeps the private key in
-          localStorage. Say so, loudly, rather than implying the key is in a
-          secure store. */}
       {agent.privateKeyStorage.kind === 'dev-localstorage' && (
-        <section className="kindora-warning">
-          <p className="text-sm leading-relaxed">{t('home.keychainDevWarning')}</p>
-        </section>
+        <Banner tone="warn">
+          <p>{t('home.keychainDevWarning')}</p>
+        </Banner>
       )}
 
-      <section className="kindora-card">
-        <p className="text-sm leading-relaxed">{profile.bio}</p>
-
-        <div className="mt-6">
-          <h2 className="text-kindora-500 dark:text-kindora-400 text-xs uppercase tracking-wide">
-            {t('home.interests')}
-          </h2>
-          <div className="mt-2 flex flex-wrap gap-2">
-            {profile.interests.length === 0 ? (
-              <span className="text-kindora-400 text-sm">{t('home.noInterests')}</span>
-            ) : (
-              profile.interests.map((i) => (
-                <span key={i} className="kindora-chip-plain">
-                  {i}
-                </span>
-              ))
-            )}
-          </div>
-        </div>
-
-        {profile.currentActivities.length > 0 && (
+      <section className="grid gap-px overflow-hidden rounded-[8px] border border-kindora-200 bg-kindora-200 md:grid-cols-2">
+        <div className="bg-white p-7 md:col-span-2">
+          <p className="text-[15px] leading-[1.65] text-kindora-800">{profile.bio}</p>
           <div className="mt-6">
-            <h2 className="text-kindora-500 dark:text-kindora-400 text-xs uppercase tracking-wide">
-              {t('home.currently')}
-            </h2>
-            <ul className="mt-2 space-y-1 text-sm">
-              {profile.currentActivities.map((a) => (
-                <li key={a}>· {a}</li>
-              ))}
-            </ul>
+            <h2 className="kindora-eyebrow">{t('home.interests')}</h2>
+            <div className="mt-3 flex flex-wrap gap-2">
+              {profile.interests.length === 0 ? (
+                <span className="text-sm text-kindora-400">{t('home.noInterests')}</span>
+              ) : (
+                profile.interests.map((i) => (
+                  <span key={i} className="kindora-chip-plain">
+                    {i}
+                  </span>
+                ))
+              )}
+            </div>
           </div>
-        )}
+          {profile.currentActivities.length > 0 && (
+            <div className="mt-6">
+              <h2 className="kindora-eyebrow">{t('home.currently')}</h2>
+              <ul className="mt-3 space-y-1 text-sm text-kindora-700">
+                {profile.currentActivities.map((a) => (
+                  <li key={a}>{a}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </div>
+        <div className="bg-white p-7">
+          <h2 className="kindora-eyebrow">{t('home.lookingFor')}</h2>
+          <p className="mt-3 text-sm leading-relaxed text-kindora-800">
+            {intentSummary(t, profile.socialIntent)}
+          </p>
+        </div>
+        <div className="bg-white p-7">
+          <h2 className="kindora-eyebrow">{t('home.conversationStyle')}</h2>
+          <p className="mt-3 text-sm leading-relaxed text-kindora-800">
+            {profile.conversationStyle.map((s) => t(CONVERSATION_STYLE_KEYS[s])).join(' · ')}
+          </p>
+        </div>
       </section>
 
-      <section className="kindora-card">
-        <h2 className="text-kindora-500 dark:text-kindora-400 text-xs uppercase tracking-wide">
-          {t('home.lookingFor')}
-        </h2>
-        <p className="mt-2 text-sm">{intentSummary(t, profile.socialIntent)}</p>
-
-        <h2 className="text-kindora-500 dark:text-kindora-400 mt-6 text-xs uppercase tracking-wide">
-          {t('home.conversationStyle')}
-        </h2>
-        <p className="mt-2 text-sm">
-          {profile.conversationStyle.map((s) => t(CONVERSATION_STYLE_KEYS[s])).join(' · ')}
-        </p>
+      <section className="flex flex-col gap-2">
+        <div className="flex flex-wrap items-center gap-3">
+          <button type="button" className="kindora-button px-7 py-2.5" onClick={onConnect}>
+            {t('home.connectAgent')}
+          </button>
+          {onTryDemo && (
+            <button
+              type="button"
+              className="kindora-button-ghost"
+              onClick={onTryDemo}
+              data-testid="home-try-demo"
+            >
+              {t('home.tryDemo')}
+            </button>
+          )}
+        </div>
+        <p className="max-w-md text-xs leading-relaxed text-kindora-400">{t('home.connectHint')}</p>
       </section>
-
-      <section className="flex justify-center pt-2">
-        <button type="button" className="kindora-button px-10 py-3 text-base" onClick={onConnect}>
-          {t('home.connectAgent')}
-        </button>
-      </section>
+      {onTryDemo && <p className="text-xs text-kindora-400">{t('demo.banner')}</p>}
     </main>
   );
 }
